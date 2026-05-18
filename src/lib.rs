@@ -9,6 +9,7 @@ use serde::Deserialize;
 use std::env;
 use std::fmt::Write as _;
 use std::fs;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 const CONFIG_DIR_NAME: &str = "creature_life_cycle";
@@ -1192,7 +1193,8 @@ impl FoodConfig {
 
 /// Loads the runtime TOML configuration file from the XDG config directory.
 ///
-/// Invalid or missing config falls back to built-in standard data and default behavior parameters.
+/// Invalid config falls back to built-in standard data and default behavior parameters. Missing
+/// config is created from those defaults before continuing.
 pub fn load_configured_board(random: &mut Random) -> Board {
     let mut board = Board::new();
 
@@ -1214,6 +1216,18 @@ fn read_simulation_config(board: &mut Board, random: &mut Random) {
 
     let contents = match fs::read_to_string(&path) {
         Ok(contents) => contents,
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            eprintln!(
+                "Config file {} not found, using standard data.",
+                path.display()
+            );
+            load_standard_data(board, random);
+            match save_simulation_config(board, &path) {
+                Ok(()) => eprintln!("Created default config at {}.", path.display()),
+                Err(error) => eprintln!("Could not create default config: {error}"),
+            }
+            return;
+        }
         Err(error) => {
             eprintln!(
                 "Could not read {} ({error}), using standard data.",

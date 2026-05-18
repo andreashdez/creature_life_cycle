@@ -2,14 +2,22 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
-fn test_config_home(name: &str) -> PathBuf {
+fn clean_config_home(name: &str) -> PathBuf {
     let config_home = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("target")
         .join("test-config-home")
         .join(name);
-    let app_config_dir = config_home.join("creature_life_cycle");
 
     let _ = fs::remove_dir_all(&config_home);
+    fs::create_dir_all(&config_home).expect("create test config home");
+
+    config_home
+}
+
+fn test_config_home(name: &str) -> PathBuf {
+    let config_home = clean_config_home(name);
+    let app_config_dir = config_home.join("creature_life_cycle");
+
     fs::create_dir_all(&app_config_dir).expect("create test config directory");
     fs::write(
         app_config_dir.join("simulation.toml"),
@@ -35,6 +43,35 @@ fn assert_seeded_snapshot(name: &str, args: &[&str], expected_stdout: &str) {
     assert!(status.success(), "process exited with {status}");
     assert_eq!(stderr, "");
     assert_eq!(stdout, expected_stdout);
+}
+
+#[test]
+fn missing_config_is_created_with_defaults() {
+    let config_home = clean_config_home("missing_config_defaults");
+    let config_path = config_home
+        .join("creature_life_cycle")
+        .join("simulation.toml");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_creature_life_cycle"))
+        .args(["--turns", "0", "--delay-ms", "0", "--seed", "1"])
+        .env("XDG_CONFIG_HOME", &config_home)
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("run creature_life_cycle binary");
+    let stderr = String::from_utf8(output.stderr).expect("stderr is valid UTF-8");
+
+    assert!(
+        output.status.success(),
+        "process exited with {}",
+        output.status
+    );
+    assert!(stderr.contains("Created default config"));
+    assert!(config_path.exists());
+
+    let contents = fs::read_to_string(config_path).expect("read created simulation config");
+    assert!(contents.contains("[board]"));
+    assert!(contents.contains("[food]"));
+    assert!(contents.contains("regeneration_probability = 0.1"));
 }
 
 #[test]

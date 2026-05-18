@@ -61,7 +61,7 @@ cargo build --release
 
 ## Run
 
-Run with the XDG configuration file, or built-in defaults if it is absent:
+Run with the XDG configuration file. If it is absent, the program creates it from built-in defaults first:
 
 ```sh
 cargo run
@@ -160,7 +160,7 @@ regeneration_probability = 0.1
 
 Coordinates are zero-based. `x` is the row and `y` is the column.
 
-Rows and columns must both be greater than zero. If the XDG config file is missing or invalid, the program loads built-in standard board data and default behavior parameters.
+Rows and columns must both be greater than zero. If the XDG config file is missing, the program creates it from built-in standard board data and default behavior parameters. If it is invalid, the program loads those defaults without overwriting the file.
 
 Creature positions outside the board are skipped with a warning.
 
