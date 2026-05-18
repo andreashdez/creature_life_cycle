@@ -9,7 +9,6 @@ use serde::Deserialize;
 use std::fmt::Write as _;
 use std::fs;
 use std::path::Path;
-use std::str::SplitWhitespace;
 
 /// Zero-based board coordinate: `x` is the row and `y` is the column.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -328,7 +327,7 @@ impl Default for Board {
 }
 
 impl Board {
-    /// Creates an empty board. `parse_board` or `load_standard_data` must initialize the field.
+    /// Creates an empty board. `parse_simulation_config` or `load_standard_data` must initialize the field.
     pub fn new() -> Self {
         Self {
             rows: 0,
@@ -882,73 +881,6 @@ impl Random {
     }
 }
 
-/// Parses legacy whitespace board dimensions and starting creature positions.
-pub fn parse_board(contents: &str, board: &mut Board, random: &mut Random) -> Result<(), String> {
-    let mut tokens = contents.split_whitespace();
-    let rows: usize = parse_next(&mut tokens, "row count")?;
-    let cols: usize = parse_next(&mut tokens, "column count")?;
-
-    if rows == 0 || cols == 0 {
-        return Err("board dimensions must be greater than zero".to_string());
-    }
-
-    let aphid_count: usize = parse_next(&mut tokens, "aphid count")?;
-    let mut aphids = Vec::with_capacity(aphid_count);
-    for _ in 0..aphid_count {
-        let x = parse_next(&mut tokens, "aphid x coordinate")?;
-        let y = parse_next(&mut tokens, "aphid y coordinate")?;
-        aphids.push((x, y));
-    }
-
-    let ladybug_count: usize = parse_next(&mut tokens, "ladybug count")?;
-    let mut ladybugs = Vec::with_capacity(ladybug_count);
-    for _ in 0..ladybug_count {
-        let x = parse_next(&mut tokens, "ladybug x coordinate")?;
-        let y = parse_next(&mut tokens, "ladybug y coordinate")?;
-        ladybugs.push((x, y));
-    }
-
-    reject_trailing_tokens(&mut tokens, "board data")?;
-
-    board.create_field(rows, cols, random);
-
-    for (x, y) in aphids {
-        board.add_aphid(x, y, 10);
-    }
-
-    for (x, y) in ladybugs {
-        board.add_ladybug(x, y, 15, random);
-    }
-
-    Ok(())
-}
-
-/// Parses legacy whitespace aphid probabilities.
-pub fn parse_aphid_params(contents: &str) -> Result<AphidParams, String> {
-    let mut tokens = contents.split_whitespace();
-    let params = AphidParams {
-        prob_move: parse_probability(&mut tokens, "aphid move probability")?,
-        prob_kill: parse_probability(&mut tokens, "aphid kill probability")?,
-        prob_accomplice: parse_probability(&mut tokens, "aphid accomplice probability")?,
-        prob_procreate: parse_probability(&mut tokens, "aphid procreation probability")?,
-    };
-    reject_trailing_tokens(&mut tokens, "aphid data")?;
-    Ok(params)
-}
-
-/// Parses legacy whitespace ladybug probabilities.
-pub fn parse_ladybug_params(contents: &str) -> Result<LadybugParams, String> {
-    let mut tokens = contents.split_whitespace();
-    let params = LadybugParams {
-        prob_move: parse_probability(&mut tokens, "ladybug move probability")?,
-        prob_kill: parse_probability(&mut tokens, "ladybug kill probability")?,
-        prob_direction: parse_probability(&mut tokens, "ladybug direction probability")?,
-        prob_procreate: parse_probability(&mut tokens, "ladybug procreation probability")?,
-    };
-    reject_trailing_tokens(&mut tokens, "ladybug data")?;
-    Ok(params)
-}
-
 /// Parses TOML runtime configuration and initializes a board from it.
 pub fn parse_simulation_config(
     contents: &str,
@@ -1168,39 +1100,12 @@ pub fn load_standard_data(board: &mut Board, random: &mut Random) {
     board.add_ladybug(9, 2, 15, random);
 }
 
-/// Parses the next whitespace-delimited token with an error label for diagnostics.
-fn parse_next<T>(tokens: &mut SplitWhitespace<'_>, label: &str) -> Result<T, String>
-where
-    T: std::str::FromStr,
-{
-    tokens
-        .next()
-        .ok_or_else(|| format!("missing {label}"))?
-        .parse()
-        .map_err(|_| format!("invalid {label}"))
-}
-
-/// Parses the next token as a probability and validates it is in `0.0..=1.0`.
-fn parse_probability(tokens: &mut SplitWhitespace<'_>, label: &str) -> Result<f64, String> {
-    let value = parse_next(tokens, label)?;
-    validate_probability(value, label)
-}
-
 /// Validates a probability value is in `0.0..=1.0`.
 fn validate_probability(value: f64, label: &str) -> Result<f64, String> {
     if (0.0..=1.0).contains(&value) {
         Ok(value)
     } else {
         Err(format!("{label} must be between 0 and 1"))
-    }
-}
-
-/// Rejects extra config tokens after all expected values have been parsed.
-fn reject_trailing_tokens(tokens: &mut SplitWhitespace<'_>, source: &str) -> Result<(), String> {
-    if let Some(token) = tokens.next() {
-        Err(format!("unexpected trailing token in {source}: {token}"))
-    } else {
-        Ok(())
     }
 }
 
@@ -1230,30 +1135,6 @@ mod tests {
         for _ in 0..10 {
             assert_eq!(first.probability(), second.probability());
         }
-    }
-
-    #[test]
-    fn parse_board_loads_creatures() {
-        let mut random = Random::with_seed(1);
-        let mut board = Board::new();
-
-        parse_board("2 3 1 0 1 1 1 2", &mut board, &mut random).unwrap();
-
-        assert_eq!(board.rows, 2);
-        assert_eq!(board.cols, 3);
-        assert_eq!(board.creatures.len(), 2);
-        assert_eq!(
-            board.field[board.index(Coordinates { x: 0, y: 1 })]
-                .aphids
-                .len(),
-            1
-        );
-        assert_eq!(
-            board.field[board.index(Coordinates { x: 1, y: 2 })]
-                .ladybugs
-                .len(),
-            1
-        );
     }
 
     #[test]
@@ -1366,10 +1247,7 @@ procreation_probability = 0.1
     }
 
     #[test]
-    fn parse_probability_configs_reject_out_of_range_values() {
-        assert!(parse_aphid_params("0.7 1.2 0.1 0.4").is_err());
-        assert!(parse_ladybug_params("0.7 0.2 -0.1 0.2").is_err());
-
+    fn parse_simulation_config_rejects_out_of_range_probabilities() {
         let mut random = Random::with_seed(1);
         let mut board = Board::new();
         assert!(
@@ -1395,15 +1273,25 @@ procreation_probability = 0.4
     }
 
     #[test]
-    fn config_parsers_reject_trailing_tokens() {
+    fn parse_simulation_config_rejects_unknown_fields() {
         let mut random = Random::with_seed(1);
         let mut board = Board::new();
 
-        assert!(parse_board("2 2 0 0 extra", &mut board, &mut random).is_err());
-        assert_eq!(board.rows, 0);
-        assert_eq!(board.cols, 0);
-        assert!(parse_aphid_params("0.7 0.2 0.1 0.4 extra").is_err());
-        assert!(parse_ladybug_params("0.7 0.2 0.4 0.2 extra").is_err());
+        assert!(
+            parse_simulation_config(
+                r#"
+[board]
+rows = 2
+columns = 2
+aphids = []
+ladybugs = []
+extra = true
+"#,
+                &mut board,
+                &mut random,
+            )
+            .is_err()
+        );
     }
 
     #[test]
