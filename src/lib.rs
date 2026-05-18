@@ -116,6 +116,17 @@ impl BoardSummary {
     }
 }
 
+/// Read-only cell data for rendering or reporting board state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CellSnapshot {
+    /// Aphids currently occupying this cell.
+    pub aphids: usize,
+    /// Ladybugs currently occupying this cell.
+    pub ladybugs: usize,
+    /// Food available in this cell.
+    pub food: i32,
+}
+
 /// Changes and totals produced by one completed turn.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct TurnStats {
@@ -267,6 +278,19 @@ impl Board {
         self.in_bounds(coordinates).then(|| {
             let location = &self.field[self.index(coordinates)];
             (location.aphids.len(), location.ladybugs.len())
+        })
+    }
+
+    /// Returns read-only rendering data for a cell.
+    pub fn cell_snapshot(&self, x: usize, y: usize) -> Option<CellSnapshot> {
+        let coordinates = Coordinates { x, y };
+        self.in_bounds(coordinates).then(|| {
+            let location = &self.field[self.index(coordinates)];
+            CellSnapshot {
+                aphids: location.aphids.len(),
+                ladybugs: location.ladybugs.len(),
+                food: location.food,
+            }
         })
     }
 
@@ -646,7 +670,7 @@ impl Board {
     }
 
     /// Returns current living creature counts and total board food.
-    fn summary(&self) -> BoardSummary {
+    pub fn summary(&self) -> BoardSummary {
         let mut summary = BoardSummary {
             food: self.field.iter().map(|location| location.food).sum(),
             ..BoardSummary::default()

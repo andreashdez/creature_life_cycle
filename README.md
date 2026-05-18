@@ -6,7 +6,7 @@ The project uses `clap` for command-line parsing and `rand` for random number ge
 
 ## Project Layout
 
-The repository is organized around one executable and three runtime configuration files:
+The repository is organized around a CLI executable, a GUI executable, and three runtime configuration files:
 
 ```text
 .
@@ -17,6 +17,8 @@ The repository is organized around one executable and three runtime configuratio
 |-- board.conf
 |-- ladybug.conf
 `-- src/
+    |-- bin/
+    |   `-- gui.rs
     |-- lib.rs
     `-- main.rs
 ```
@@ -24,6 +26,8 @@ The repository is organized around one executable and three runtime configuratio
 `src/lib.rs` contains the simulation model, configuration parsing, random number wrapper, simulation rules, and rule tests.
 
 `src/main.rs` contains command-line parsing, file reads, board rendering, turn-summary printing, sleeping, and CLI tests.
+
+`src/bin/gui.rs` contains the Macroquad visual simulation.
 
 `board.conf` defines the board size and starting creature positions.
 
@@ -39,6 +43,7 @@ Runtime dependencies are intentionally small:
 
 ```text
 clap   command-line parsing and help output
+macroquad   realtime GUI visualization
 rand   seeded and unseeded random number generation
 ```
 
@@ -70,6 +75,12 @@ Run a short deterministic simulation:
 cargo run -- --turns 10 --delay-ms 0 --seed 42
 ```
 
+Run the Macroquad GUI visualizer. It starts from fixed seed `42` by default:
+
+```sh
+cargo run --bin gui
+```
+
 The executable accepts these optional flags:
 
 ```text
@@ -81,6 +92,20 @@ The executable accepts these optional flags:
 ```
 
 `clap` validates command-line arguments. Invalid flags, missing values, and invalid numeric values are reported as errors. The process exits with status code `2` after printing usage text.
+
+## GUI Controls
+
+The GUI uses the same `board.conf`, `aphid.conf`, and `ladybug.conf` files as the CLI.
+
+```text
+Space     pause or resume
+N         advance one turn
+R         reset to seed 42
+Up/Down   adjust simulation speed
+Esc       quit
+```
+
+Hover over a board cell to inspect its coordinates, food, aphids, and ladybugs.
 
 ## Board Configuration
 
@@ -280,7 +305,7 @@ A creature dies when its life drops below `1`.
 
 ## Randomness
 
-The simulation uses `rand::rngs::StdRng` through a small wrapper in `src/main.rs`.
+The simulation uses `rand::rngs::StdRng` through a small wrapper in `src/lib.rs`.
 
 Without `--seed`, the generator is seeded from operating system randomness.
 
