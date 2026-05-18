@@ -1,16 +1,45 @@
 use creature_life_cycle::{
-    Board, BoardSummary, CellSnapshot, Random, load_standard_data, parse_aphid_params, parse_board,
-    parse_ladybug_params,
+    AphidParams, Board, BoardSummary, CellSnapshot, Coordinates, CreatureSnapshot,
+    CreatureSnapshotKind, LadybugParams, Random, load_configured_board,
 };
 use macroquad::prelude::*;
-use std::fs;
+use std::collections::HashMap;
 
 const DEFAULT_SEED: u64 = 42;
+const HISTORY_LIMIT: usize = 240;
+
+#[derive(Clone, Copy)]
+struct HistoryPoint {
+    turn: usize,
+    aphids: usize,
+    ladybugs: usize,
+}
+
+impl HistoryPoint {
+    fn new(turn: usize, summary: BoardSummary) -> Self {
+        Self {
+            turn,
+            aphids: summary.aphids,
+            ladybugs: summary.ladybugs,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct AnimatedCreature {
+    id: usize,
+    kind: CreatureSnapshotKind,
+    from: Coordinates,
+    to: Coordinates,
+    born: bool,
+}
 
 struct SimulationApp {
     board: Board,
     random: Random,
     seed: u64,
+    aphid_params: AphidParams,
+    ladybug_params: LadybugParams,
     turn: usize,
     summary: BoardSummary,
     last_births: usize,
@@ -19,16 +48,26 @@ struct SimulationApp {
     extinct: bool,
     speed: f32,
     accumulator: f32,
+    history: Vec<HistoryPoint>,
+    animations: Vec<AnimatedCreature>,
+    animation_elapsed: f32,
+    animation_duration: f32,
 }
 
 impl SimulationApp {
     fn new(seed: u64) -> Self {
-        let (board, random) = load_simulation(seed);
+        let mut random = Random::with_seed(seed);
+        let board = load_configured_board(&mut random);
         let summary = board.summary();
+        let aphid_params = board.aphid_params();
+        let ladybug_params = board.ladybug_params();
+        let history = vec![HistoryPoint::new(0, summary)];
         Self {
             board,
             random,
             seed,
+            aphid_params,
+            ladybug_params,
             turn: 0,
             summary,
             last_births: 0,
@@ -37,11 +76,83 @@ impl SimulationApp {
             extinct: summary.is_extinct(),
             speed: 1.0,
             accumulator: 0.0,
+            history,
+            animations: Vec::new(),
+            animation_elapsed: 0.0,
+            animation_duration: 0.0,
         }
     }
 
     fn reset(&mut self) {
+        let mut random = Random::with_seed(self.seed);
+        let mut board = load_configured_board(&mut random);
+        board.set_aphid_params(self.aphid_params);
+        board.set_ladybug_params(self.ladybug_params);
+
+        self.summary = board.summary();
+        self.board = board;
+        self.random = random;
+        self.turn = 0;
+        self.last_births = 0;
+        self.last_deaths = 0;
+        self.extinct = self.summary.is_extinct();
+        self.accumulator = 0.0;
+        self.history.clear();
+        self.push_history();
+        self.finish_animation();
+    }
+
+    fn reload_config_files(&mut self) {
+        let speed = self.speed;
+        let playing = self.playing;
         *self = Self::new(self.seed);
+        self.speed = speed;
+        self.playing = playing;
+    }
+
+    fn set_seed(&mut self, seed: u64) {
+        self.seed = seed;
+        self.reset();
+    }
+
+    fn adjust_seed(&mut self, delta: i64) {
+        let seed = if delta < 0 {
+            self.seed.saturating_sub(delta.unsigned_abs())
+        } else {
+            self.seed.saturating_add(delta as u64)
+        };
+        self.set_seed(seed);
+    }
+
+    fn apply_params(&mut self) {
+        self.board.set_aphid_params(self.aphid_params);
+        self.board.set_ladybug_params(self.ladybug_params);
+    }
+
+    fn is_animating(&self) -> bool {
+        !self.animations.is_empty()
+    }
+
+    fn finish_animation(&mut self) {
+        self.animations.clear();
+        self.animation_elapsed = 0.0;
+        self.animation_duration = 0.0;
+    }
+
+    fn animation_progress(&self) -> f32 {
+        if self.animation_duration <= 0.0 {
+            1.0
+        } else {
+            (self.animation_elapsed / self.animation_duration).clamp(0.0, 1.0)
+        }
+    }
+
+    fn push_history(&mut self) {
+        if self.history.len() == HISTORY_LIMIT {
+            self.history.remove(0);
+        }
+        self.history
+            .push(HistoryPoint::new(self.turn, self.summary));
     }
 
     fn step(&mut self) {
@@ -49,13 +160,53 @@ impl SimulationApp {
             return;
         }
 
+        self.finish_animation();
+        let before = self.board.creature_snapshots();
         let stats = self.board.refresh(&mut self.random);
+        let after = self.board.creature_snapshots();
         self.turn += 1;
         self.summary = stats.summary;
         self.last_births = stats.births;
         self.last_deaths = stats.deaths;
         self.extinct = stats.summary.is_extinct();
+        self.push_history();
+
+        let (animations, changed) = build_movement_animations(&before, &after);
+        if changed {
+            self.animations = animations;
+            self.animation_elapsed = 0.0;
+            self.animation_duration = (0.42 / self.speed.sqrt()).clamp(0.12, 0.42);
+        }
     }
+}
+
+fn build_movement_animations(
+    before: &[CreatureSnapshot],
+    after: &[CreatureSnapshot],
+) -> (Vec<AnimatedCreature>, bool) {
+    let before_by_id: HashMap<usize, CreatureSnapshot> = before
+        .iter()
+        .map(|creature| (creature.id, *creature))
+        .collect();
+    let mut changed = false;
+    let animations = after
+        .iter()
+        .map(|creature| {
+            let previous = before_by_id.get(&creature.id);
+            let from = previous.map_or(creature.location, |snapshot| snapshot.location);
+            let born = previous.is_none();
+            changed |= born || from != creature.location;
+            AnimatedCreature {
+                id: creature.id,
+                kind: creature.kind,
+                from,
+                to: creature.location,
+                born,
+            }
+        })
+        .collect();
+
+    (animations, changed)
 }
 
 #[derive(Clone, Copy)]
@@ -71,6 +222,10 @@ struct BoardLayout {
     panel_y: f32,
     panel_w: f32,
     panel_h: f32,
+    graph_x: f32,
+    graph_y: f32,
+    graph_w: f32,
+    graph_h: f32,
 }
 
 fn window_conf() -> Conf {
@@ -102,47 +257,13 @@ async fn main() {
 
         let layout = calculate_layout(&app.board);
         let hovered = hovered_cell(layout);
-        draw_board(&app.board, layout, hovered);
-        draw_panel(&app, layout, hovered);
+        draw_board(&app, layout, hovered);
+        draw_history_graph(&app, layout);
+        draw_panel(&mut app, layout);
+        draw_hover_tooltip(&app, hovered);
 
         next_frame().await;
     }
-}
-
-fn load_simulation(seed: u64) -> (Board, Random) {
-    let mut random = Random::with_seed(seed);
-    let mut board = Board::new();
-
-    match fs::read_to_string("board.conf") {
-        Ok(contents) => {
-            if let Err(error) = parse_board(&contents, &mut board, &mut random) {
-                eprintln!("Invalid board.conf ({error}), using standard data.");
-                load_standard_data(&mut board, &mut random);
-            }
-        }
-        Err(_) => {
-            eprintln!("File \"board.conf\" not found, using standard data.");
-            load_standard_data(&mut board, &mut random);
-        }
-    }
-
-    match fs::read_to_string("aphid.conf") {
-        Ok(contents) => match parse_aphid_params(&contents) {
-            Ok(params) => board.set_aphid_params(params),
-            Err(error) => eprintln!("Invalid aphid.conf ({error}), using standard data."),
-        },
-        Err(_) => eprintln!("File \"aphid.conf\" not found, using standard data."),
-    }
-
-    match fs::read_to_string("ladybug.conf") {
-        Ok(contents) => match parse_ladybug_params(&contents) {
-            Ok(params) => board.set_ladybug_params(params),
-            Err(error) => eprintln!("Invalid ladybug.conf ({error}), using standard data."),
-        },
-        Err(_) => eprintln!("File \"ladybug.conf\" not found, using standard data."),
-    }
-
-    (board, random)
 }
 
 fn handle_input(app: &mut SimulationApp) {
@@ -152,6 +273,7 @@ fn handle_input(app: &mut SimulationApp) {
     }
 
     if is_key_pressed(KeyCode::N) {
+        app.finish_animation();
         app.step();
         app.accumulator = 0.0;
     }
@@ -170,15 +292,25 @@ fn handle_input(app: &mut SimulationApp) {
 }
 
 fn tick_simulation(app: &mut SimulationApp) {
+    let frame_time = get_frame_time();
+    if app.is_animating() {
+        app.animation_elapsed += frame_time;
+        if app.animation_elapsed < app.animation_duration {
+            return;
+        }
+
+        app.finish_animation();
+    }
+
     if !app.playing || app.extinct {
         return;
     }
 
-    app.accumulator += get_frame_time();
+    app.accumulator += frame_time;
     let step_interval = 1.0 / app.speed;
     let mut steps = 0;
 
-    while app.accumulator >= step_interval && steps < 8 && !app.extinct {
+    while app.accumulator >= step_interval && steps < 8 && !app.extinct && !app.is_animating() {
         app.step();
         app.accumulator -= step_interval;
         steps += 1;
@@ -193,17 +325,23 @@ fn calculate_layout(board: &Board) -> BoardLayout {
     let wide = screen_w >= 900.0;
     let margin = if wide { 32.0 } else { 18.0 };
     let top = if wide { 96.0 } else { 112.0 };
-    let panel_w = if wide { 302.0 } else { screen_w - margin * 2.0 };
-    let panel_h = if wide { screen_h - top - margin } else { 132.0 };
+    let panel_w = if wide { 360.0 } else { screen_w - margin * 2.0 };
+    let graph_h = if wide { 118.0 } else { 102.0 };
+    let graph_gap = if wide { 22.0 } else { 14.0 };
+    let panel_h = if wide {
+        screen_h - top - margin
+    } else {
+        (screen_h * 0.42).max(260.0)
+    };
     let board_area_w = if wide {
         screen_w - panel_w - margin * 3.0
     } else {
         screen_w - margin * 2.0
     };
     let board_area_h = if wide {
-        screen_h - top - margin
+        screen_h - top - margin - graph_h - graph_gap
     } else {
-        screen_h - top - panel_h - margin * 2.0
+        screen_h - top - panel_h - graph_h - graph_gap - margin * 3.0
     }
     .max(180.0);
     let cell = (board_area_w / cols as f32)
@@ -218,12 +356,19 @@ fn calculate_layout(board: &Board) -> BoardLayout {
         (screen_w - width) * 0.5
     };
     let y = top + (board_area_h - height).max(0.0) * 0.5;
+    let graph_x = margin;
+    let graph_y = y + height + graph_gap;
+    let graph_w = board_area_w;
     let panel_x = if wide {
         screen_w - panel_w - margin
     } else {
         margin
     };
-    let panel_y = if wide { top } else { y + height + margin };
+    let panel_y = if wide {
+        top
+    } else {
+        graph_y + graph_h + margin
+    };
 
     BoardLayout {
         x,
@@ -237,6 +382,10 @@ fn calculate_layout(board: &Board) -> BoardLayout {
         panel_y,
         panel_w,
         panel_h,
+        graph_x,
+        graph_y,
+        graph_w,
+        graph_h,
     }
 }
 
@@ -320,7 +469,7 @@ fn draw_title(app: &SimulationApp) {
     );
 }
 
-fn draw_board(board: &Board, layout: BoardLayout, hovered: Option<(usize, usize)>) {
+fn draw_board(app: &SimulationApp, layout: BoardLayout, hovered: Option<(usize, usize)>) {
     draw_round_rect(
         layout.x - 14.0,
         layout.y - 14.0,
@@ -343,17 +492,233 @@ fn draw_board(board: &Board, layout: BoardLayout, hovered: Option<(usize, usize)
 
     for row in 0..layout.rows {
         for col in 0..layout.cols {
-            let Some(snapshot) = board.cell_snapshot(row, col) else {
+            let Some(snapshot) = app.board.cell_snapshot(row, col) else {
                 continue;
             };
             let x = layout.x + col as f32 * layout.cell + gap * 0.5;
             let y = layout.y + row as f32 * layout.cell + gap * 0.5;
-            draw_cell(x, y, inner, row, col, snapshot, hovered == Some((row, col)));
+            if app.is_animating() {
+                draw_cell_background(x, y, inner, row, col, snapshot, hovered == Some((row, col)));
+            } else {
+                draw_cell(x, y, inner, row, col, snapshot, hovered == Some((row, col)));
+            }
         }
+    }
+
+    if app.is_animating() {
+        draw_animated_creatures(app, layout);
     }
 }
 
+fn draw_history_graph(app: &SimulationApp, layout: BoardLayout) {
+    let rect = Rect::new(
+        layout.graph_x,
+        layout.graph_y,
+        layout.graph_w,
+        layout.graph_h,
+    );
+    draw_round_rect(rect.x, rect.y, rect.w, rect.h, 18.0, color(15, 22, 25, 218));
+    draw_rectangle_lines(
+        rect.x + 1.0,
+        rect.y + 1.0,
+        rect.w - 2.0,
+        rect.h - 2.0,
+        1.0,
+        color(112, 131, 117, 96),
+    );
+
+    draw_text_ex(
+        "Population History",
+        rect.x + 18.0,
+        rect.y + 25.0,
+        TextParams {
+            font_size: 18,
+            color: color(238, 232, 210, 255),
+            ..Default::default()
+        },
+    );
+
+    let Some(first) = app.history.first() else {
+        return;
+    };
+    let Some(last) = app.history.last() else {
+        return;
+    };
+    let max_population = app
+        .history
+        .iter()
+        .map(|point| point.aphids.max(point.ladybugs))
+        .max()
+        .unwrap_or(1)
+        .max(1) as f32;
+    let plot = Rect::new(rect.x + 18.0, rect.y + 39.0, rect.w - 36.0, rect.h - 60.0);
+
+    draw_history_grid(plot, max_population);
+    draw_history_series(
+        &app.history,
+        plot,
+        max_population,
+        |point| point.aphids,
+        color(111, 219, 91, 255),
+    );
+    draw_history_series(
+        &app.history,
+        plot,
+        max_population,
+        |point| point.ladybugs,
+        color(231, 78, 61, 255),
+    );
+
+    draw_history_legend(rect, app, first.turn, last.turn, max_population as usize);
+}
+
+fn draw_history_grid(plot: Rect, max_population: f32) {
+    for step in 0..=3 {
+        let t = step as f32 / 3.0;
+        let y = plot.y + plot.h * t;
+        draw_line(
+            plot.x,
+            y,
+            plot.x + plot.w,
+            y,
+            1.0,
+            color(255, 255, 255, if step == 3 { 68 } else { 28 }),
+        );
+    }
+
+    draw_text_ex(
+        &format!("{}", max_population as usize),
+        plot.x + plot.w - 24.0,
+        plot.y - 5.0,
+        TextParams {
+            font_size: 12,
+            color: color(144, 158, 150, 255),
+            ..Default::default()
+        },
+    );
+    draw_text_ex(
+        "0",
+        plot.x + plot.w - 10.0,
+        plot.y + plot.h + 13.0,
+        TextParams {
+            font_size: 12,
+            color: color(144, 158, 150, 255),
+            ..Default::default()
+        },
+    );
+}
+
+fn draw_history_series(
+    history: &[HistoryPoint],
+    plot: Rect,
+    max_population: f32,
+    value: fn(&HistoryPoint) -> usize,
+    series_color: Color,
+) {
+    if history.is_empty() {
+        return;
+    }
+
+    if history.len() == 1 {
+        let y = history_y(value(&history[0]), plot, max_population);
+        draw_circle(plot.x, y, 3.0, series_color);
+        return;
+    }
+
+    for index in 1..history.len() {
+        let previous = &history[index - 1];
+        let current = &history[index];
+        draw_line(
+            history_x(index - 1, history.len(), plot),
+            history_y(value(previous), plot, max_population),
+            history_x(index, history.len(), plot),
+            history_y(value(current), plot, max_population),
+            2.2,
+            series_color,
+        );
+    }
+
+    let latest = history.last().expect("history is not empty");
+    draw_circle(
+        history_x(history.len() - 1, history.len(), plot),
+        history_y(value(latest), plot, max_population),
+        3.2,
+        series_color,
+    );
+}
+
+fn history_x(index: usize, length: usize, plot: Rect) -> f32 {
+    if length <= 1 {
+        plot.x
+    } else {
+        plot.x + plot.w * index as f32 / (length - 1) as f32
+    }
+}
+
+fn history_y(value: usize, plot: Rect, max_population: f32) -> f32 {
+    plot.y + plot.h - plot.h * value as f32 / max_population
+}
+
+fn draw_history_legend(
+    rect: Rect,
+    app: &SimulationApp,
+    first_turn: usize,
+    last_turn: usize,
+    max_population: usize,
+) {
+    let y = rect.y + rect.h - 14.0;
+    draw_legend_item(
+        rect.x + 18.0,
+        y,
+        color(111, 219, 91, 255),
+        &format!("Aphids {}", app.summary.aphids),
+    );
+    draw_legend_item(
+        rect.x + 122.0,
+        y,
+        color(231, 78, 61, 255),
+        &format!("Ladybugs {}", app.summary.ladybugs),
+    );
+    draw_text_ex(
+        &format!("Turns {first_turn}-{last_turn} | max {max_population}"),
+        rect.x + rect.w - 190.0,
+        y + 4.0,
+        TextParams {
+            font_size: 12,
+            color: color(144, 158, 150, 255),
+            ..Default::default()
+        },
+    );
+}
+
+fn draw_legend_item(x: f32, y: f32, item_color: Color, label: &str) {
+    draw_circle(x, y, 4.0, item_color);
+    draw_text_ex(
+        label,
+        x + 10.0,
+        y + 4.0,
+        TextParams {
+            font_size: 12,
+            color: color(211, 219, 198, 255),
+            ..Default::default()
+        },
+    );
+}
+
 fn draw_cell(
+    x: f32,
+    y: f32,
+    size: f32,
+    row: usize,
+    col: usize,
+    snapshot: CellSnapshot,
+    hovered: bool,
+) {
+    draw_cell_background(x, y, size, row, col, snapshot, hovered);
+    draw_creatures(x, y, size, snapshot.aphids, snapshot.ladybugs);
+}
+
+fn draw_cell_background(
     x: f32,
     y: f32,
     size: f32,
@@ -382,7 +747,6 @@ fn draw_cell(
     }
 
     draw_food_speckles(x, y, size, row, col, snapshot.food);
-    draw_creatures(x, y, size, snapshot.aphids, snapshot.ladybugs);
 
     if hovered {
         draw_rectangle_lines(
@@ -394,6 +758,87 @@ fn draw_cell(
             color(245, 228, 168, 230),
         );
     }
+}
+
+fn draw_animated_creatures(app: &SimulationApp, layout: BoardLayout) {
+    let progress = smooth_progress(app.animation_progress());
+    let base_radius = (layout.cell * 0.125).clamp(4.0, 12.0);
+
+    for creature in &app.animations {
+        let from = animated_creature_position(layout, creature.from, creature.id, creature.kind);
+        let to = animated_creature_position(layout, creature.to, creature.id, creature.kind);
+        let moving = creature.from != creature.to;
+        let position = if creature.born {
+            to
+        } else {
+            from + (to - from) * progress
+        };
+        let scale = if creature.born {
+            progress
+        } else if moving {
+            1.0 + (std::f32::consts::PI * progress).sin() * 0.08
+        } else {
+            1.0
+        };
+
+        if moving {
+            draw_line(
+                from.x,
+                from.y,
+                position.x,
+                position.y,
+                1.1,
+                color(245, 229, 177, 80),
+            );
+        }
+
+        match creature.kind {
+            CreatureSnapshotKind::Aphid => draw_aphid(
+                position.x,
+                position.y,
+                (base_radius * scale).max(1.0),
+                creature.id,
+            ),
+            CreatureSnapshotKind::Ladybug => draw_ladybug(
+                position.x,
+                position.y,
+                (base_radius * scale).max(1.0),
+                creature.id,
+            ),
+        }
+    }
+}
+
+fn animated_creature_position(
+    layout: BoardLayout,
+    location: Coordinates,
+    id: usize,
+    kind: CreatureSnapshotKind,
+) -> Vec2 {
+    let gap = (layout.cell * 0.08).clamp(2.0, 7.0);
+    let inner = layout.cell - gap;
+    let origin_x = layout.x + location.y as f32 * layout.cell + gap * 0.5;
+    let origin_y = layout.y + location.x as f32 * layout.cell + gap * 0.5;
+    let offset = animated_creature_offset(id, kind);
+
+    vec2(origin_x + inner * offset.x, origin_y + inner * offset.y)
+}
+
+fn animated_creature_offset(id: usize, kind: CreatureSnapshotKind) -> Vec2 {
+    let kind_offset = match kind {
+        CreatureSnapshotKind::Aphid => 17,
+        CreatureSnapshotKind::Ladybug => 53,
+    };
+    let hash = id.wrapping_mul(97).wrapping_add(kind_offset);
+    let dx = (hash % 19) as f32 / 18.0 - 0.5;
+    let dy = ((hash / 19) % 19) as f32 / 18.0 - 0.5;
+
+    vec2(0.5 + dx * 0.42, 0.5 + dy * 0.42)
+}
+
+fn smooth_progress(progress: f32) -> f32 {
+    let t = progress.clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
 }
 
 fn draw_food_speckles(x: f32, y: f32, size: f32, row: usize, col: usize, food: i32) {
@@ -557,7 +1002,7 @@ fn draw_count_badge(cx: f32, cy: f32, count: usize, accent: Color) {
     );
 }
 
-fn draw_panel(app: &SimulationApp, layout: BoardLayout, hovered: Option<(usize, usize)>) {
+fn draw_panel(app: &mut SimulationApp, layout: BoardLayout) {
     draw_round_rect(
         layout.panel_x,
         layout.panel_y,
@@ -575,10 +1020,12 @@ fn draw_panel(app: &SimulationApp, layout: BoardLayout, hovered: Option<(usize, 
         color(116, 137, 119, 115),
     );
 
+    let content_x = layout.panel_x + 24.0;
+    let content_w = layout.panel_w - 48.0;
     let mut y = layout.panel_y + 34.0;
     draw_text_ex(
         "Simulation",
-        layout.panel_x + 24.0,
+        content_x,
         y,
         TextParams {
             font_size: 24,
@@ -586,113 +1033,419 @@ fn draw_panel(app: &SimulationApp, layout: BoardLayout, hovered: Option<(usize, 
             ..Default::default()
         },
     );
-    y += 34.0;
+    y += 28.0;
 
     draw_stat(layout.panel_x, y, "Status", status_label(app));
-    y += 28.0;
+    y += 19.0;
     draw_stat(layout.panel_x, y, "Turn", &app.turn.to_string());
-    y += 28.0;
+    y += 19.0;
     draw_stat(layout.panel_x, y, "Aphids", &app.summary.aphids.to_string());
-    y += 28.0;
+    y += 19.0;
     draw_stat(
         layout.panel_x,
         y,
         "Ladybugs",
         &app.summary.ladybugs.to_string(),
     );
-    y += 28.0;
+    y += 19.0;
     draw_stat(layout.panel_x, y, "Food", &app.summary.food.to_string());
-    y += 28.0;
+    y += 19.0;
     draw_stat(
         layout.panel_x,
         y,
-        "Last Births",
-        &app.last_births.to_string(),
+        "Births/Deaths",
+        &format!("{} / {}", app.last_births, app.last_deaths),
     );
-    y += 28.0;
-    draw_stat(
-        layout.panel_x,
-        y,
-        "Last Deaths",
-        &app.last_deaths.to_string(),
-    );
-    y += 28.0;
+    y += 19.0;
     draw_stat(
         layout.panel_x,
         y,
         "Speed",
         &format!("{:.1} turns/s", app.speed),
     );
-    y += 42.0;
+    y += 26.0;
 
+    draw_section_title(content_x, y, "Run");
+    y += 20.0;
+
+    let gap = 8.0;
+    let button_h = 26.0;
+    let third_w = (content_w - gap * 2.0) / 3.0;
+    let play_label = if app.playing { "Pause" } else { "Play" };
+    if draw_control_button(
+        Rect::new(content_x, y, third_w, button_h),
+        play_label,
+        color(82, 116, 80, 255),
+    ) {
+        app.playing = !app.playing;
+        app.accumulator = 0.0;
+    }
+    if draw_control_button(
+        Rect::new(content_x + third_w + gap, y, third_w, button_h),
+        "Step",
+        color(78, 96, 121, 255),
+    ) {
+        app.step();
+        app.accumulator = 0.0;
+    }
+    if draw_control_button(
+        Rect::new(content_x + (third_w + gap) * 2.0, y, third_w, button_h),
+        "Reset",
+        color(127, 86, 61, 255),
+    ) {
+        app.reset();
+    }
+    y += 30.0;
+
+    let half_w = (content_w - gap) / 2.0;
+    if draw_control_button(
+        Rect::new(content_x, y, half_w, button_h),
+        "Slower",
+        color(62, 76, 92, 255),
+    ) {
+        app.speed = (app.speed - 0.5).max(0.5);
+    }
+    if draw_control_button(
+        Rect::new(content_x + half_w + gap, y, half_w, button_h),
+        "Faster",
+        color(62, 76, 92, 255),
+    ) {
+        app.speed = (app.speed + 0.5).min(8.0);
+    }
+    y += 32.0;
+
+    draw_section_title(content_x, y, "Seed");
+    y += 20.0;
+    let seed_button_w = 44.0;
+    let seed_display_w = content_w - seed_button_w * 4.0 - gap * 4.0;
+    if draw_control_button(
+        Rect::new(content_x, y, seed_button_w, button_h),
+        "-10",
+        color(74, 83, 93, 255),
+    ) {
+        app.adjust_seed(-10);
+    }
+    if draw_control_button(
+        Rect::new(content_x + seed_button_w + gap, y, seed_button_w, button_h),
+        "-1",
+        color(74, 83, 93, 255),
+    ) {
+        app.adjust_seed(-1);
+    }
+    draw_round_rect(
+        content_x + (seed_button_w + gap) * 2.0,
+        y,
+        seed_display_w,
+        button_h,
+        8.0,
+        color(32, 42, 45, 230),
+    );
+    draw_centered_text(
+        &app.seed.to_string(),
+        Rect::new(
+            content_x + (seed_button_w + gap) * 2.0,
+            y,
+            seed_display_w,
+            button_h,
+        ),
+        16,
+        color(232, 223, 188, 255),
+    );
+    if draw_control_button(
+        Rect::new(
+            content_x + (seed_button_w + gap) * 2.0 + seed_display_w + gap,
+            y,
+            seed_button_w,
+            button_h,
+        ),
+        "+1",
+        color(74, 83, 93, 255),
+    ) {
+        app.adjust_seed(1);
+    }
+    if draw_control_button(
+        Rect::new(
+            content_x + (seed_button_w + gap) * 3.0 + seed_display_w + gap,
+            y,
+            seed_button_w,
+            button_h,
+        ),
+        "+10",
+        color(74, 83, 93, 255),
+    ) {
+        app.adjust_seed(10);
+    }
+    y += 32.0;
+
+    draw_section_title(content_x, y, "Config Probabilities");
+    y += 22.0;
+    let mut params_changed = false;
+    params_changed |= draw_probability_slider(
+        content_x,
+        y,
+        content_w,
+        "Aphid move",
+        &mut app.aphid_params.prob_move,
+        color(98, 204, 83, 255),
+    );
+    y += 24.0;
+    params_changed |= draw_probability_slider(
+        content_x,
+        y,
+        content_w,
+        "Aphid kill",
+        &mut app.aphid_params.prob_kill,
+        color(98, 204, 83, 255),
+    );
+    y += 24.0;
+    params_changed |= draw_probability_slider(
+        content_x,
+        y,
+        content_w,
+        "Aphid help",
+        &mut app.aphid_params.prob_accomplice,
+        color(98, 204, 83, 255),
+    );
+    y += 24.0;
+    params_changed |= draw_probability_slider(
+        content_x,
+        y,
+        content_w,
+        "Aphid breed",
+        &mut app.aphid_params.prob_procreate,
+        color(98, 204, 83, 255),
+    );
+    y += 26.0;
+    params_changed |= draw_probability_slider(
+        content_x,
+        y,
+        content_w,
+        "Lady move",
+        &mut app.ladybug_params.prob_move,
+        color(221, 73, 58, 255),
+    );
+    y += 24.0;
+    params_changed |= draw_probability_slider(
+        content_x,
+        y,
+        content_w,
+        "Lady kill",
+        &mut app.ladybug_params.prob_kill,
+        color(221, 73, 58, 255),
+    );
+    y += 24.0;
+    params_changed |= draw_probability_slider(
+        content_x,
+        y,
+        content_w,
+        "Lady turn",
+        &mut app.ladybug_params.prob_direction,
+        color(221, 73, 58, 255),
+    );
+    y += 24.0;
+    params_changed |= draw_probability_slider(
+        content_x,
+        y,
+        content_w,
+        "Lady breed",
+        &mut app.ladybug_params.prob_procreate,
+        color(221, 73, 58, 255),
+    );
+    y += 29.0;
+
+    if params_changed {
+        app.apply_params();
+    }
+
+    if draw_control_button(
+        Rect::new(content_x, y, content_w, button_h),
+        "Reload config files",
+        color(77, 91, 75, 255),
+    ) {
+        app.reload_config_files();
+    }
+}
+
+fn draw_section_title(x: f32, y: f32, label: &str) {
     draw_text_ex(
-        "Controls",
-        layout.panel_x + 24.0,
+        label,
+        x,
         y,
         TextParams {
-            font_size: 20,
+            font_size: 17,
             color: color(205, 211, 184, 255),
             ..Default::default()
         },
     );
-    y += 28.0;
+}
 
-    for control in [
-        "Space  play / pause",
-        "N      step one turn",
-        "R      reset seed 42",
-        "Up/Down adjust speed",
-        "Esc    quit",
-    ] {
-        draw_text_ex(
-            control,
-            layout.panel_x + 24.0,
-            y,
-            TextParams {
-                font_size: 17,
-                color: color(154, 170, 158, 255),
-                ..Default::default()
-            },
-        );
-        y += 24.0;
+fn draw_control_button(rect: Rect, label: &str, fill: Color) -> bool {
+    let mouse = mouse_vec();
+    let hovered = rect.contains(mouse);
+    let pressed = hovered && is_mouse_button_down(MouseButton::Left);
+    let clicked = hovered && is_mouse_button_pressed(MouseButton::Left);
+    let button_fill = if pressed {
+        mix(fill, color(255, 255, 255, 255), 0.18)
+    } else if hovered {
+        mix(fill, color(255, 255, 255, 255), 0.10)
+    } else {
+        fill
+    };
+
+    draw_round_rect(rect.x, rect.y, rect.w, rect.h, 8.0, button_fill);
+    draw_rectangle_lines(
+        rect.x + 1.0,
+        rect.y + 1.0,
+        rect.w - 2.0,
+        rect.h - 2.0,
+        1.0,
+        color(255, 255, 255, if hovered { 110 } else { 55 }),
+    );
+    draw_centered_text(label, rect, 15, color(240, 233, 207, 255));
+
+    clicked
+}
+
+fn draw_probability_slider(
+    x: f32,
+    y: f32,
+    width: f32,
+    label: &str,
+    value: &mut f64,
+    accent: Color,
+) -> bool {
+    let track_x = x + 112.0;
+    let track_y = y + 10.0;
+    let track_w = (width - 162.0).max(40.0);
+    let track_h = 7.0;
+    let mouse = mouse_vec();
+    let hitbox = Rect::new(track_x - 8.0, y - 4.0, track_w + 16.0, 28.0);
+    let changed = hitbox.contains(mouse) && is_mouse_button_down(MouseButton::Left);
+
+    if changed {
+        *value = ((mouse.x - track_x) / track_w).clamp(0.0, 1.0) as f64;
     }
 
-    if let Some((row, col)) = hovered
-        && let Some(snapshot) = app.board.cell_snapshot(row, col)
-    {
-        let hover_y = (layout.panel_y + layout.panel_h - 92.0).max(y + 18.0);
-        draw_round_rect(
-            layout.panel_x + 18.0,
-            hover_y,
-            layout.panel_w - 36.0,
-            70.0,
-            14.0,
-            color(38, 50, 47, 190),
-        );
-        draw_text_ex(
-            &format!("Cell ({row}, {col})"),
-            layout.panel_x + 36.0,
-            hover_y + 26.0,
-            TextParams {
-                font_size: 18,
-                color: color(244, 229, 177, 255),
-                ..Default::default()
-            },
-        );
-        draw_text_ex(
-            &format!(
-                "Food {}  |  Aphids {}  |  Ladybugs {}",
-                snapshot.food, snapshot.aphids, snapshot.ladybugs
-            ),
-            layout.panel_x + 36.0,
-            hover_y + 52.0,
-            TextParams {
-                font_size: 15,
-                color: color(178, 191, 177, 255),
-                ..Default::default()
-            },
-        );
-    }
+    draw_text_ex(
+        label,
+        x,
+        y + 16.0,
+        TextParams {
+            font_size: 14,
+            color: color(154, 170, 158, 255),
+            ..Default::default()
+        },
+    );
+
+    draw_round_rect(
+        track_x,
+        track_y,
+        track_w,
+        track_h,
+        4.0,
+        color(42, 52, 55, 255),
+    );
+    draw_round_rect(
+        track_x,
+        track_y,
+        track_w * (*value as f32),
+        track_h,
+        4.0,
+        accent,
+    );
+
+    let knob_x = track_x + track_w * (*value as f32);
+    draw_circle(knob_x, track_y + track_h * 0.5, 8.0, color(16, 21, 23, 220));
+    draw_circle(
+        knob_x,
+        track_y + track_h * 0.5,
+        5.8,
+        color(239, 232, 203, 255),
+    );
+
+    draw_text_ex(
+        &format!("{:.2}", *value),
+        x + width - 38.0,
+        y + 16.0,
+        TextParams {
+            font_size: 14,
+            color: color(232, 223, 188, 255),
+            ..Default::default()
+        },
+    );
+
+    changed
+}
+
+fn draw_hover_tooltip(app: &SimulationApp, hovered: Option<(usize, usize)>) {
+    let Some((row, col)) = hovered else {
+        return;
+    };
+    let Some(snapshot) = app.board.cell_snapshot(row, col) else {
+        return;
+    };
+
+    let (mouse_x, mouse_y) = mouse_position();
+    let width = 260.0;
+    let height = 66.0;
+    let x = (mouse_x + 18.0)
+        .min(screen_width() - width - 12.0)
+        .max(12.0);
+    let y = (mouse_y + 18.0)
+        .min(screen_height() - height - 12.0)
+        .max(12.0);
+
+    draw_round_rect(x, y, width, height, 14.0, color(22, 31, 31, 232));
+    draw_rectangle_lines(
+        x + 1.0,
+        y + 1.0,
+        width - 2.0,
+        height - 2.0,
+        1.0,
+        color(209, 194, 142, 125),
+    );
+    draw_text_ex(
+        &format!("Cell ({row}, {col})"),
+        x + 16.0,
+        y + 26.0,
+        TextParams {
+            font_size: 17,
+            color: color(244, 229, 177, 255),
+            ..Default::default()
+        },
+    );
+    draw_text_ex(
+        &format!(
+            "Food {}  |  Aphids {}  |  Ladybugs {}",
+            snapshot.food, snapshot.aphids, snapshot.ladybugs
+        ),
+        x + 16.0,
+        y + 50.0,
+        TextParams {
+            font_size: 14,
+            color: color(178, 191, 177, 255),
+            ..Default::default()
+        },
+    );
+}
+
+fn draw_centered_text(label: &str, rect: Rect, font_size: u16, text_color: Color) {
+    let dimensions = measure_text(label, None, font_size, 1.0);
+    draw_text_ex(
+        label,
+        rect.x + (rect.w - dimensions.width) * 0.5,
+        rect.y + (rect.h + dimensions.height) * 0.5 - 2.0,
+        TextParams {
+            font_size,
+            color: text_color,
+            ..Default::default()
+        },
+    );
+}
+
+fn mouse_vec() -> Vec2 {
+    let (x, y) = mouse_position();
+    vec2(x, y)
 }
 
 fn draw_stat(panel_x: f32, y: f32, label: &str, value: &str) {
@@ -701,7 +1454,7 @@ fn draw_stat(panel_x: f32, y: f32, label: &str, value: &str) {
         panel_x + 24.0,
         y,
         TextParams {
-            font_size: 16,
+            font_size: 14,
             color: color(126, 142, 134, 255),
             ..Default::default()
         },
@@ -711,7 +1464,7 @@ fn draw_stat(panel_x: f32, y: f32, label: &str, value: &str) {
         panel_x + 154.0,
         y,
         TextParams {
-            font_size: 17,
+            font_size: 15,
             color: color(232, 223, 188, 255),
             ..Default::default()
         },

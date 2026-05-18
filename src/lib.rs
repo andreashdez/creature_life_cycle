@@ -1,10 +1,11 @@
 //! Simulation library for the aphid and ladybug life-cycle model.
 //!
-//! The library owns the board state, creature rules, configuration parsers, and random number
-//! generator wrapper. The binary owns command-line parsing, file IO, rendering, and sleeping.
+//! The library owns the board state, creature rules, configuration loading/parsing, and random
+//! number generator wrapper. The binaries own command-line parsing, rendering, and sleeping.
 
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
+use std::fs;
 use std::str::SplitWhitespace;
 
 /// Zero-based board coordinate: `x` is the row and `y` is the column.
@@ -125,6 +126,26 @@ pub struct CellSnapshot {
     pub ladybugs: usize,
     /// Food available in this cell.
     pub food: i32,
+}
+
+/// Public creature discriminator for read-only board snapshots.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CreatureSnapshotKind {
+    /// Aphid creature.
+    Aphid,
+    /// Ladybug creature.
+    Ladybug,
+}
+
+/// Read-only living creature data for renderers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CreatureSnapshot {
+    /// Stable creature ID.
+    pub id: usize,
+    /// Creature kind.
+    pub kind: CreatureSnapshotKind,
+    /// Current board coordinate.
+    pub location: Coordinates,
 }
 
 /// Changes and totals produced by one completed turn.
@@ -262,6 +283,16 @@ impl Board {
         self.ladybug_params = params;
     }
 
+    /// Returns active aphid behavior parameters.
+    pub fn aphid_params(&self) -> AphidParams {
+        self.aphid_params
+    }
+
+    /// Returns active ladybug behavior parameters.
+    pub fn ladybug_params(&self) -> LadybugParams {
+        self.ladybug_params
+    }
+
     /// Returns the number of board rows.
     pub fn rows(&self) -> usize {
         self.rows
@@ -292,6 +323,24 @@ impl Board {
                 food: location.food,
             }
         })
+    }
+
+    /// Returns read-only data for every living creature in stable ID order.
+    pub fn creature_snapshots(&self) -> Vec<CreatureSnapshot> {
+        self.creatures
+            .iter()
+            .enumerate()
+            .filter_map(|(id, creature)| {
+                creature.as_ref().map(|creature| CreatureSnapshot {
+                    id,
+                    kind: match creature.kind() {
+                        CreatureKind::Aphid => CreatureSnapshotKind::Aphid,
+                        CreatureKind::Ladybug => CreatureSnapshotKind::Ladybug,
+                    },
+                    location: creature.location(),
+                })
+            })
+            .collect()
     }
 
     /// Creates a new board field and assigns random starting food to each cell.
@@ -803,6 +852,60 @@ pub fn parse_ladybug_params(contents: &str) -> Result<LadybugParams, String> {
     };
     reject_trailing_tokens(&mut tokens, "ladybug.conf")?;
     Ok(params)
+}
+
+/// Loads the runtime configuration files from the current working directory.
+///
+/// Invalid or missing `board.conf` falls back to built-in standard data. Invalid or missing aphid
+/// and ladybug config files keep the board's default behavior parameters.
+pub fn load_configured_board(random: &mut Random) -> Board {
+    let mut board = Board::new();
+
+    read_board_config(&mut board, random);
+    read_aphid_config(&mut board);
+    read_ladybug_config(&mut board);
+
+    board
+}
+
+/// Reads `board.conf`, falling back to built-in standard data on errors.
+fn read_board_config(board: &mut Board, random: &mut Random) {
+    let Ok(contents) = fs::read_to_string("board.conf") else {
+        eprintln!("File \"board.conf\" not found, using standard data.");
+        load_standard_data(board, random);
+        return;
+    };
+
+    if let Err(error) = parse_board(&contents, board, random) {
+        eprintln!("Invalid board.conf ({error}), using standard data.");
+        load_standard_data(board, random);
+    }
+}
+
+/// Reads `aphid.conf`, keeping default aphid parameters on errors.
+fn read_aphid_config(board: &mut Board) {
+    let Ok(contents) = fs::read_to_string("aphid.conf") else {
+        eprintln!("File \"aphid.conf\" not found, using standard data.");
+        return;
+    };
+
+    match parse_aphid_params(&contents) {
+        Ok(params) => board.set_aphid_params(params),
+        Err(error) => eprintln!("Invalid aphid.conf ({error}), using standard data."),
+    }
+}
+
+/// Reads `ladybug.conf`, keeping default ladybug parameters on errors.
+fn read_ladybug_config(board: &mut Board) {
+    let Ok(contents) = fs::read_to_string("ladybug.conf") else {
+        eprintln!("File \"ladybug.conf\" not found, using standard data.");
+        return;
+    };
+
+    match parse_ladybug_params(&contents) {
+        Ok(params) => board.set_ladybug_params(params),
+        Err(error) => eprintln!("Invalid ladybug.conf ({error}), using standard data."),
+    }
 }
 
 /// Loads the same default board data represented by the checked-in `board.conf`.

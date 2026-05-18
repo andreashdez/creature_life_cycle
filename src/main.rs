@@ -1,9 +1,5 @@
 use clap::Parser;
-use creature_life_cycle::{
-    Board, Random, TurnStats, load_standard_data, parse_aphid_params, parse_board,
-    parse_ladybug_params,
-};
-use std::fs;
+use creature_life_cycle::{Board, Random, TurnStats, load_configured_board};
 use std::thread;
 use std::time::Duration;
 
@@ -29,11 +25,7 @@ fn main() {
         Some(seed) => Random::with_seed(seed),
         None => Random::new(),
     };
-    let mut board = Board::new();
-
-    read_board(&mut board, &mut random);
-    read_aphids(&mut board);
-    read_ladybugs(&mut board);
+    let mut board = load_configured_board(&mut random);
 
     print_board(&board);
 
@@ -50,46 +42,6 @@ fn main() {
         if options.delay_ms > 0 {
             thread::sleep(Duration::from_millis(options.delay_ms));
         }
-    }
-}
-
-/// Reads `board.conf`, falling back to built-in standard data on errors.
-fn read_board(board: &mut Board, random: &mut Random) {
-    let Ok(contents) = fs::read_to_string("board.conf") else {
-        eprintln!("File \"board.conf\" not found, using standard data.");
-        load_standard_data(board, random);
-        return;
-    };
-
-    if let Err(error) = parse_board(&contents, board, random) {
-        eprintln!("Invalid board.conf ({error}), using standard data.");
-        load_standard_data(board, random);
-    }
-}
-
-/// Reads `aphid.conf`, keeping default aphid parameters on errors.
-fn read_aphids(board: &mut Board) {
-    let Ok(contents) = fs::read_to_string("aphid.conf") else {
-        eprintln!("File \"aphid.conf\" not found, using standard data.");
-        return;
-    };
-
-    match parse_aphid_params(&contents) {
-        Ok(params) => board.set_aphid_params(params),
-        Err(error) => eprintln!("Invalid aphid.conf ({error}), using standard data."),
-    }
-}
-
-/// Reads `ladybug.conf`, keeping default ladybug parameters on errors.
-fn read_ladybugs(board: &mut Board) {
-    let Ok(contents) = fs::read_to_string("ladybug.conf") else {
-        eprintln!("File \"ladybug.conf\" not found, using standard data.");
-        return;
-    };
-
-    match parse_ladybug_params(&contents) {
-        Ok(params) => board.set_ladybug_params(params),
-        Err(error) => eprintln!("Invalid ladybug.conf ({error}), using standard data."),
     }
 }
 

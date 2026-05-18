@@ -23,9 +23,9 @@ The repository is organized around a CLI executable, a GUI executable, and three
     `-- main.rs
 ```
 
-`src/lib.rs` contains the simulation model, configuration parsing, random number wrapper, simulation rules, and rule tests.
+`src/lib.rs` contains the simulation model, configuration loading/parsing, random number wrapper, simulation rules, and rule tests.
 
-`src/main.rs` contains command-line parsing, file reads, board rendering, turn-summary printing, sleeping, and CLI tests.
+`src/main.rs` contains command-line parsing, board rendering, turn-summary printing, sleeping, and CLI tests.
 
 `src/bin/gui.rs` contains the Macroquad visual simulation.
 
@@ -100,12 +100,12 @@ The GUI uses the same `board.conf`, `aphid.conf`, and `ladybug.conf` files as th
 ```text
 Space     pause or resume
 N         advance one turn
-R         reset to seed 42
+R         reset to the selected seed and probabilities
 Up/Down   adjust simulation speed
 Esc       quit
 ```
 
-Hover over a board cell to inspect its coordinates, food, aphids, and ladybugs.
+The side panel also provides mouse controls for play, step, reset, speed, seed, and all aphid and ladybug probabilities. Changing a probability affects future turns immediately; reset restarts the run with the selected seed and probabilities. Creature movement is animated between turns, and a population history graph below the board tracks recent aphid and ladybug counts. Hover over a board cell to inspect its coordinates, food, aphids, and ladybugs.
 
 ## Board Configuration
 
