@@ -5,6 +5,7 @@
 
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
+use serde::Deserialize;
 use std::fs;
 use std::str::SplitWhitespace;
 
@@ -37,6 +38,70 @@ enum CreatureKind {
     Ladybug,
 }
 
+/// Top-level runtime TOML configuration.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SimulationConfig {
+    /// Board dimensions and starting creatures.
+    board: BoardConfig,
+    /// Optional aphid behavior parameters. Defaults are used when omitted.
+    aphid: Option<AphidConfig>,
+    /// Optional ladybug behavior parameters. Defaults are used when omitted.
+    ladybug: Option<LadybugConfig>,
+}
+
+/// TOML board configuration.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BoardConfig {
+    /// Board row count.
+    rows: usize,
+    /// Board column count.
+    columns: usize,
+    /// Starting aphid positions.
+    aphids: Vec<ConfigCoordinates>,
+    /// Starting ladybug positions.
+    ladybugs: Vec<ConfigCoordinates>,
+}
+
+/// TOML coordinate value.
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ConfigCoordinates {
+    /// Zero-based row.
+    x: usize,
+    /// Zero-based column.
+    y: usize,
+}
+
+/// TOML aphid behavior configuration.
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AphidConfig {
+    /// Chance that an aphid moves during movement phase.
+    move_probability: f64,
+    /// Base chance that an aphid kills a ladybug in the same cell.
+    kill_probability: f64,
+    /// Extra kill chance contributed by each other aphid in the same cell.
+    accomplice_probability: f64,
+    /// Chance that an aphid creates a child when sharing a cell with another aphid.
+    procreation_probability: f64,
+}
+
+/// TOML ladybug behavior configuration.
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LadybugConfig {
+    /// Chance that a ladybug moves during movement phase.
+    move_probability: f64,
+    /// Chance that a ladybug kills an aphid in the same cell.
+    kill_probability: f64,
+    /// Chance that a ladybug chooses a new preferred direction set before moving.
+    direction_change_probability: f64,
+    /// Chance that a ladybug creates a child when sharing a cell with another ladybug.
+    procreation_probability: f64,
+}
+
 /// One board cell.
 ///
 /// Creature lists store IDs into `Board::creatures`, which keeps movement and removal cheap
@@ -51,7 +116,7 @@ struct Location {
     food: i32,
 }
 
-/// Tunable aphid probabilities loaded from `aphid.conf`.
+/// Tunable aphid probabilities loaded from `simulation.toml`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AphidParams {
     /// Chance that an aphid moves during movement phase.
@@ -75,7 +140,7 @@ impl Default for AphidParams {
     }
 }
 
-/// Tunable ladybug probabilities loaded from `ladybug.conf`.
+/// Tunable ladybug probabilities loaded from `simulation.toml`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LadybugParams {
     /// Chance that a ladybug moves during movement phase.
@@ -787,7 +852,7 @@ impl Random {
     }
 }
 
-/// Parses board dimensions and starting creature positions.
+/// Parses legacy whitespace board dimensions and starting creature positions.
 pub fn parse_board(contents: &str, board: &mut Board, random: &mut Random) -> Result<(), String> {
     let mut tokens = contents.split_whitespace();
     let rows: usize = parse_next(&mut tokens, "row count")?;
@@ -813,7 +878,7 @@ pub fn parse_board(contents: &str, board: &mut Board, random: &mut Random) -> Re
         ladybugs.push((x, y));
     }
 
-    reject_trailing_tokens(&mut tokens, "board.conf")?;
+    reject_trailing_tokens(&mut tokens, "board data")?;
 
     board.create_field(rows, cols, random);
 
@@ -828,7 +893,7 @@ pub fn parse_board(contents: &str, board: &mut Board, random: &mut Random) -> Re
     Ok(())
 }
 
-/// Parses aphid probabilities from `aphid.conf` content.
+/// Parses legacy whitespace aphid probabilities.
 pub fn parse_aphid_params(contents: &str) -> Result<AphidParams, String> {
     let mut tokens = contents.split_whitespace();
     let params = AphidParams {
@@ -837,11 +902,11 @@ pub fn parse_aphid_params(contents: &str) -> Result<AphidParams, String> {
         prob_accomplice: parse_probability(&mut tokens, "aphid accomplice probability")?,
         prob_procreate: parse_probability(&mut tokens, "aphid procreation probability")?,
     };
-    reject_trailing_tokens(&mut tokens, "aphid.conf")?;
+    reject_trailing_tokens(&mut tokens, "aphid data")?;
     Ok(params)
 }
 
-/// Parses ladybug probabilities from `ladybug.conf` content.
+/// Parses legacy whitespace ladybug probabilities.
 pub fn parse_ladybug_params(contents: &str) -> Result<LadybugParams, String> {
     let mut tokens = contents.split_whitespace();
     let params = LadybugParams {
@@ -850,65 +915,111 @@ pub fn parse_ladybug_params(contents: &str) -> Result<LadybugParams, String> {
         prob_direction: parse_probability(&mut tokens, "ladybug direction probability")?,
         prob_procreate: parse_probability(&mut tokens, "ladybug procreation probability")?,
     };
-    reject_trailing_tokens(&mut tokens, "ladybug.conf")?;
+    reject_trailing_tokens(&mut tokens, "ladybug data")?;
     Ok(params)
 }
 
-/// Loads the runtime configuration files from the current working directory.
+/// Parses TOML runtime configuration and initializes a board from it.
+pub fn parse_simulation_config(
+    contents: &str,
+    board: &mut Board,
+    random: &mut Random,
+) -> Result<(), String> {
+    let config: SimulationConfig = toml::from_str(contents).map_err(|error| error.to_string())?;
+    let aphid_params = config
+        .aphid
+        .map(AphidConfig::params)
+        .transpose()?
+        .unwrap_or_default();
+    let ladybug_params = config
+        .ladybug
+        .map(LadybugConfig::params)
+        .transpose()?
+        .unwrap_or_default();
+
+    if config.board.rows == 0 || config.board.columns == 0 {
+        return Err("board dimensions must be greater than zero".to_string());
+    }
+
+    board.create_field(config.board.rows, config.board.columns, random);
+
+    for coordinates in config.board.aphids {
+        board.add_aphid(coordinates.x, coordinates.y, 10);
+    }
+
+    for coordinates in config.board.ladybugs {
+        board.add_ladybug(coordinates.x, coordinates.y, 15, random);
+    }
+
+    board.set_aphid_params(aphid_params);
+    board.set_ladybug_params(ladybug_params);
+
+    Ok(())
+}
+
+impl AphidConfig {
+    /// Converts TOML values into validated aphid parameters.
+    fn params(self) -> Result<AphidParams, String> {
+        Ok(AphidParams {
+            prob_move: validate_probability(self.move_probability, "aphid move probability")?,
+            prob_kill: validate_probability(self.kill_probability, "aphid kill probability")?,
+            prob_accomplice: validate_probability(
+                self.accomplice_probability,
+                "aphid accomplice probability",
+            )?,
+            prob_procreate: validate_probability(
+                self.procreation_probability,
+                "aphid procreation probability",
+            )?,
+        })
+    }
+}
+
+impl LadybugConfig {
+    /// Converts TOML values into validated ladybug parameters.
+    fn params(self) -> Result<LadybugParams, String> {
+        Ok(LadybugParams {
+            prob_move: validate_probability(self.move_probability, "ladybug move probability")?,
+            prob_kill: validate_probability(self.kill_probability, "ladybug kill probability")?,
+            prob_direction: validate_probability(
+                self.direction_change_probability,
+                "ladybug direction probability",
+            )?,
+            prob_procreate: validate_probability(
+                self.procreation_probability,
+                "ladybug procreation probability",
+            )?,
+        })
+    }
+}
+
+/// Loads the runtime TOML configuration file from the current working directory.
 ///
-/// Invalid or missing `board.conf` falls back to built-in standard data. Invalid or missing aphid
-/// and ladybug config files keep the board's default behavior parameters.
+/// Invalid or missing `simulation.toml` falls back to built-in standard data and default behavior
+/// parameters.
 pub fn load_configured_board(random: &mut Random) -> Board {
     let mut board = Board::new();
 
-    read_board_config(&mut board, random);
-    read_aphid_config(&mut board);
-    read_ladybug_config(&mut board);
+    read_simulation_config(&mut board, random);
 
     board
 }
 
-/// Reads `board.conf`, falling back to built-in standard data on errors.
-fn read_board_config(board: &mut Board, random: &mut Random) {
-    let Ok(contents) = fs::read_to_string("board.conf") else {
-        eprintln!("File \"board.conf\" not found, using standard data.");
+/// Reads `simulation.toml`, falling back to built-in standard data on errors.
+fn read_simulation_config(board: &mut Board, random: &mut Random) {
+    let Ok(contents) = fs::read_to_string("simulation.toml") else {
+        eprintln!("File \"simulation.toml\" not found, using standard data.");
         load_standard_data(board, random);
         return;
     };
 
-    if let Err(error) = parse_board(&contents, board, random) {
-        eprintln!("Invalid board.conf ({error}), using standard data.");
+    if let Err(error) = parse_simulation_config(&contents, board, random) {
+        eprintln!("Invalid simulation.toml ({error}), using standard data.");
         load_standard_data(board, random);
     }
 }
 
-/// Reads `aphid.conf`, keeping default aphid parameters on errors.
-fn read_aphid_config(board: &mut Board) {
-    let Ok(contents) = fs::read_to_string("aphid.conf") else {
-        eprintln!("File \"aphid.conf\" not found, using standard data.");
-        return;
-    };
-
-    match parse_aphid_params(&contents) {
-        Ok(params) => board.set_aphid_params(params),
-        Err(error) => eprintln!("Invalid aphid.conf ({error}), using standard data."),
-    }
-}
-
-/// Reads `ladybug.conf`, keeping default ladybug parameters on errors.
-fn read_ladybug_config(board: &mut Board) {
-    let Ok(contents) = fs::read_to_string("ladybug.conf") else {
-        eprintln!("File \"ladybug.conf\" not found, using standard data.");
-        return;
-    };
-
-    match parse_ladybug_params(&contents) {
-        Ok(params) => board.set_ladybug_params(params),
-        Err(error) => eprintln!("Invalid ladybug.conf ({error}), using standard data."),
-    }
-}
-
-/// Loads the same default board data represented by the checked-in `board.conf`.
+/// Loads the same default board data represented by the checked-in `simulation.toml`.
 pub fn load_standard_data(board: &mut Board, random: &mut Random) {
     board.create_field(10, 10, random);
 
@@ -939,6 +1050,11 @@ where
 /// Parses the next token as a probability and validates it is in `0.0..=1.0`.
 fn parse_probability(tokens: &mut SplitWhitespace<'_>, label: &str) -> Result<f64, String> {
     let value = parse_next(tokens, label)?;
+    validate_probability(value, label)
+}
+
+/// Validates a probability value is in `0.0..=1.0`.
+fn validate_probability(value: f64, label: &str) -> Result<f64, String> {
     if (0.0..=1.0).contains(&value) {
         Ok(value)
     } else {
@@ -1008,9 +1124,83 @@ mod tests {
     }
 
     #[test]
+    fn parse_simulation_config_loads_board_and_params() {
+        let mut random = Random::with_seed(1);
+        let mut board = Board::new();
+
+        parse_simulation_config(
+            r#"
+[board]
+rows = 2
+columns = 3
+aphids = [{ x = 0, y = 1 }]
+ladybugs = [{ x = 1, y = 2 }]
+
+[aphid]
+move_probability = 0.6
+kill_probability = 0.3
+accomplice_probability = 0.2
+procreation_probability = 0.5
+
+[ladybug]
+move_probability = 0.4
+kill_probability = 0.8
+direction_change_probability = 0.7
+procreation_probability = 0.1
+"#,
+            &mut board,
+            &mut random,
+        )
+        .unwrap();
+
+        assert_eq!(board.rows, 2);
+        assert_eq!(board.cols, 3);
+        assert_eq!(board.creatures.len(), 2);
+        assert_eq!(board.aphid_params.prob_move, 0.6);
+        assert_eq!(board.aphid_params.prob_accomplice, 0.2);
+        assert_eq!(board.ladybug_params.prob_kill, 0.8);
+        assert_eq!(board.ladybug_params.prob_direction, 0.7);
+        assert_eq!(
+            board.field[board.index(Coordinates { x: 0, y: 1 })]
+                .aphids
+                .len(),
+            1
+        );
+        assert_eq!(
+            board.field[board.index(Coordinates { x: 1, y: 2 })]
+                .ladybugs
+                .len(),
+            1
+        );
+    }
+
+    #[test]
     fn parse_probability_configs_reject_out_of_range_values() {
         assert!(parse_aphid_params("0.7 1.2 0.1 0.4").is_err());
         assert!(parse_ladybug_params("0.7 0.2 -0.1 0.2").is_err());
+
+        let mut random = Random::with_seed(1);
+        let mut board = Board::new();
+        assert!(
+            parse_simulation_config(
+                r#"
+[board]
+rows = 2
+columns = 2
+aphids = []
+ladybugs = []
+
+[aphid]
+move_probability = 1.2
+kill_probability = 0.2
+accomplice_probability = 0.1
+procreation_probability = 0.4
+"#,
+                &mut board,
+                &mut random,
+            )
+            .is_err()
+        );
     }
 
     #[test]

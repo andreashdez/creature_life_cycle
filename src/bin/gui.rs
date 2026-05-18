@@ -1259,7 +1259,7 @@ fn draw_panel(app: &mut SimulationApp, layout: BoardLayout) {
 
     if draw_control_button(
         Rect::new(content_x, y, content_w, button_h),
-        "Reload config files",
+        "Reload simulation.toml",
         color(77, 91, 75, 255),
     ) {
         app.reload_config_files();

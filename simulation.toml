@@ -1,0 +1,30 @@
+[board]
+rows = 10
+columns = 10
+
+aphids = [
+  { x = 3, y = 5 },
+  { x = 4, y = 8 },
+  { x = 2, y = 9 },
+  { x = 1, y = 6 },
+  { x = 1, y = 9 },
+]
+
+ladybugs = [
+  { x = 5, y = 9 },
+  { x = 1, y = 1 },
+  { x = 3, y = 8 },
+  { x = 9, y = 2 },
+]
+
+[aphid]
+move_probability = 0.7
+kill_probability = 0.2
+accomplice_probability = 0.1
+procreation_probability = 0.4
+
+[ladybug]
+move_probability = 0.7
+kill_probability = 0.2
+direction_change_probability = 0.4
+procreation_probability = 0.2
