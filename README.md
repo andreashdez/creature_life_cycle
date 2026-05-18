@@ -98,10 +98,18 @@ Space     pause or resume
 N         advance one turn
 R         reset to the selected seed and probabilities
 Up/Down   adjust simulation speed
+E         toggle board editing
+A         select aphid edit tool
+L         select ladybug edit tool
+S         save current board and probabilities to simulation.toml
 Esc       quit
 ```
 
-The side panel also provides mouse controls for play, step, reset, speed, seed, and all aphid and ladybug probabilities. Changing a probability affects future turns immediately; reset restarts the run with the selected seed and probabilities. Creature movement is animated between turns, and a population history graph below the board tracks recent aphid and ladybug counts. Hover over a board cell to inspect its coordinates, food, aphids, and ladybugs.
+The side panel also provides mouse controls for play, step, reset, speed, seed, board editing, saving, reloading, and all aphid and ladybug probabilities. Changing a probability affects future turns immediately; reset restarts the run with the selected seed and probabilities.
+
+When board editing is enabled, left-click a board cell to add the selected creature type and right-click a board cell to remove one selected creature type from that cell. Editing pauses the simulation and resets the displayed turn history to treat the edited board as a new starting point.
+
+`Save TOML` writes the current board creature positions and active probability values to `simulation.toml`. Food values, creature life values, and current turn number are not saved; they are regenerated when the simulation is loaded. Creature movement is animated between turns, and a population history graph below the board tracks recent aphid and ladybug counts. Hover over a board cell to inspect its coordinates, food, aphids, and ladybugs.
 
 ## Simulation Configuration
 

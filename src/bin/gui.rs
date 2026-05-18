@@ -1,6 +1,6 @@
 use creature_life_cycle::{
     AphidParams, Board, BoardSummary, CellSnapshot, Coordinates, CreatureSnapshot,
-    CreatureSnapshotKind, LadybugParams, Random, load_configured_board,
+    CreatureSnapshotKind, LadybugParams, Random, load_configured_board, save_simulation_config,
 };
 use macroquad::prelude::*;
 use std::collections::HashMap;
@@ -34,6 +34,18 @@ struct AnimatedCreature {
     born: bool,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EditTool {
+    Aphid,
+    Ladybug,
+}
+
+struct SaveStatus {
+    message: String,
+    success: bool,
+    ttl: f32,
+}
+
 struct SimulationApp {
     board: Board,
     random: Random,
@@ -52,6 +64,9 @@ struct SimulationApp {
     animations: Vec<AnimatedCreature>,
     animation_elapsed: f32,
     animation_duration: f32,
+    editing_enabled: bool,
+    edit_tool: EditTool,
+    save_status: Option<SaveStatus>,
 }
 
 impl SimulationApp {
@@ -80,6 +95,9 @@ impl SimulationApp {
             animations: Vec::new(),
             animation_elapsed: 0.0,
             animation_duration: 0.0,
+            editing_enabled: false,
+            edit_tool: EditTool::Aphid,
+            save_status: None,
         }
     }
 
@@ -108,6 +126,7 @@ impl SimulationApp {
         *self = Self::new(self.seed);
         self.speed = speed;
         self.playing = playing;
+        self.editing_enabled = false;
     }
 
     fn set_seed(&mut self, seed: u64) {
@@ -127,6 +146,69 @@ impl SimulationApp {
     fn apply_params(&mut self) {
         self.board.set_aphid_params(self.aphid_params);
         self.board.set_ladybug_params(self.ladybug_params);
+    }
+
+    fn update_save_status(&mut self, frame_time: f32) {
+        if let Some(status) = &mut self.save_status {
+            status.ttl -= frame_time;
+            if status.ttl <= 0.0 {
+                self.save_status = None;
+            }
+        }
+    }
+
+    fn set_save_status(&mut self, message: impl Into<String>, success: bool) {
+        self.save_status = Some(SaveStatus {
+            message: message.into(),
+            success,
+            ttl: 4.0,
+        });
+    }
+
+    fn save_config(&mut self) {
+        self.apply_params();
+        match save_simulation_config(&self.board, "simulation.toml") {
+            Ok(()) => self.set_save_status("Saved simulation.toml", true),
+            Err(error) => self.set_save_status(format!("Save failed: {error}"), false),
+        }
+    }
+
+    fn add_edit_creature(&mut self, row: usize, col: usize) {
+        let added = match self.edit_tool {
+            EditTool::Aphid => self.board.add_aphid(row, col, 10).is_some(),
+            EditTool::Ladybug => self
+                .board
+                .add_ladybug(row, col, 15, &mut self.random)
+                .is_some(),
+        };
+
+        if added {
+            self.after_board_edit();
+        }
+    }
+
+    fn remove_edit_creature(&mut self, row: usize, col: usize) {
+        let removed = match self.edit_tool {
+            EditTool::Aphid => self.board.remove_aphid_at(row, col),
+            EditTool::Ladybug => self.board.remove_ladybug_at(row, col),
+        };
+
+        if removed {
+            self.after_board_edit();
+        }
+    }
+
+    fn after_board_edit(&mut self) {
+        self.finish_animation();
+        self.summary = self.board.summary();
+        self.turn = 0;
+        self.last_births = 0;
+        self.last_deaths = 0;
+        self.extinct = self.summary.is_extinct();
+        self.playing = false;
+        self.accumulator = 0.0;
+        self.history.clear();
+        self.push_history();
     }
 
     fn is_animating(&self) -> bool {
@@ -232,7 +314,7 @@ fn window_conf() -> Conf {
     Conf {
         window_title: "Aphids and Ladybugs".to_string(),
         window_width: 1120,
-        window_height: 760,
+        window_height: 860,
         window_resizable: true,
         high_dpi: true,
         sample_count: 4,
@@ -257,6 +339,7 @@ async fn main() {
 
         let layout = calculate_layout(&app.board);
         let hovered = hovered_cell(layout);
+        handle_board_edit(&mut app, hovered);
         draw_board(&app, layout, hovered);
         draw_history_graph(&app, layout);
         draw_panel(&mut app, layout);
@@ -282,6 +365,28 @@ fn handle_input(app: &mut SimulationApp) {
         app.reset();
     }
 
+    if is_key_pressed(KeyCode::E) {
+        app.editing_enabled = !app.editing_enabled;
+        app.playing = false;
+        app.finish_animation();
+    }
+
+    if is_key_pressed(KeyCode::A) {
+        app.edit_tool = EditTool::Aphid;
+        app.editing_enabled = true;
+        app.playing = false;
+    }
+
+    if is_key_pressed(KeyCode::L) {
+        app.edit_tool = EditTool::Ladybug;
+        app.editing_enabled = true;
+        app.playing = false;
+    }
+
+    if is_key_pressed(KeyCode::S) {
+        app.save_config();
+    }
+
     if is_key_pressed(KeyCode::Up) || is_key_pressed(KeyCode::Equal) {
         app.speed = (app.speed + 0.5).min(8.0);
     }
@@ -291,8 +396,28 @@ fn handle_input(app: &mut SimulationApp) {
     }
 }
 
+fn handle_board_edit(app: &mut SimulationApp, hovered: Option<(usize, usize)>) {
+    if !app.editing_enabled || app.is_animating() {
+        return;
+    }
+
+    let Some((row, col)) = hovered else {
+        return;
+    };
+
+    if is_mouse_button_pressed(MouseButton::Left) {
+        app.add_edit_creature(row, col);
+    }
+
+    if is_mouse_button_pressed(MouseButton::Right) {
+        app.remove_edit_creature(row, col);
+    }
+}
+
 fn tick_simulation(app: &mut SimulationApp) {
     let frame_time = get_frame_time();
+    app.update_save_status(frame_time);
+
     if app.is_animating() {
         app.animation_elapsed += frame_time;
         if app.animation_elapsed < app.animation_duration {
@@ -507,6 +632,10 @@ fn draw_board(app: &SimulationApp, layout: BoardLayout, hovered: Option<(usize, 
 
     if app.is_animating() {
         draw_animated_creatures(app, layout);
+    }
+
+    if app.editing_enabled {
+        draw_edit_overlay(app, layout, hovered);
     }
 }
 
@@ -839,6 +968,37 @@ fn animated_creature_offset(id: usize, kind: CreatureSnapshotKind) -> Vec2 {
 fn smooth_progress(progress: f32) -> f32 {
     let t = progress.clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
+}
+
+fn draw_edit_overlay(app: &SimulationApp, layout: BoardLayout, hovered: Option<(usize, usize)>) {
+    let Some((row, col)) = hovered else {
+        return;
+    };
+
+    let gap = (layout.cell * 0.08).clamp(2.0, 7.0);
+    let inner = layout.cell - gap;
+    let x = layout.x + col as f32 * layout.cell + gap * 0.5;
+    let y = layout.y + row as f32 * layout.cell + gap * 0.5;
+    let preview_color = match app.edit_tool {
+        EditTool::Aphid => color(111, 219, 91, 175),
+        EditTool::Ladybug => color(231, 78, 61, 175),
+    };
+
+    draw_rectangle_lines(
+        x - 3.0,
+        y - 3.0,
+        inner + 6.0,
+        inner + 6.0,
+        3.0,
+        preview_color,
+    );
+    draw_circle_lines(
+        x + inner * 0.5,
+        y + inner * 0.5,
+        inner * 0.22,
+        2.0,
+        preview_color,
+    );
 }
 
 fn draw_food_speckles(x: f32, y: f32, size: f32, row: usize, col: usize, food: i32) {
@@ -1177,6 +1337,71 @@ fn draw_panel(app: &mut SimulationApp, layout: BoardLayout) {
     }
     y += 32.0;
 
+    draw_section_title(content_x, y, "Board Edit");
+    y += 20.0;
+    let edit_button_w = (content_w - gap * 2.0) / 3.0;
+    let edit_label = if app.editing_enabled {
+        "Editing"
+    } else {
+        "Edit Off"
+    };
+    if draw_control_button(
+        Rect::new(content_x, y, edit_button_w, button_h),
+        edit_label,
+        if app.editing_enabled {
+            color(82, 116, 80, 255)
+        } else {
+            color(74, 83, 93, 255)
+        },
+    ) {
+        app.editing_enabled = !app.editing_enabled;
+        app.playing = false;
+        app.finish_animation();
+    }
+    if draw_control_button(
+        Rect::new(content_x + edit_button_w + gap, y, edit_button_w, button_h),
+        "Aphid",
+        if app.edit_tool == EditTool::Aphid {
+            color(85, 145, 73, 255)
+        } else {
+            color(57, 76, 59, 255)
+        },
+    ) {
+        app.edit_tool = EditTool::Aphid;
+        app.editing_enabled = true;
+        app.playing = false;
+    }
+    if draw_control_button(
+        Rect::new(
+            content_x + (edit_button_w + gap) * 2.0,
+            y,
+            edit_button_w,
+            button_h,
+        ),
+        "Ladybug",
+        if app.edit_tool == EditTool::Ladybug {
+            color(145, 73, 62, 255)
+        } else {
+            color(76, 59, 57, 255)
+        },
+    ) {
+        app.edit_tool = EditTool::Ladybug;
+        app.editing_enabled = true;
+        app.playing = false;
+    }
+    y += 35.0;
+    draw_text_ex(
+        "Left click adds, right click removes.",
+        content_x,
+        y,
+        TextParams {
+            font_size: 13,
+            color: color(154, 170, 158, 255),
+            ..Default::default()
+        },
+    );
+    y += 22.0;
+
     draw_section_title(content_x, y, "Config Probabilities");
     y += 22.0;
     let mut params_changed = false;
@@ -1257,12 +1482,38 @@ fn draw_panel(app: &mut SimulationApp, layout: BoardLayout) {
         app.apply_params();
     }
 
+    let half_w = (content_w - gap) / 2.0;
     if draw_control_button(
-        Rect::new(content_x, y, content_w, button_h),
-        "Reload simulation.toml",
+        Rect::new(content_x, y, half_w, button_h),
+        "Save TOML",
+        color(91, 105, 73, 255),
+    ) {
+        app.save_config();
+    }
+    if draw_control_button(
+        Rect::new(content_x + half_w + gap, y, half_w, button_h),
+        "Reload TOML",
         color(77, 91, 75, 255),
     ) {
         app.reload_config_files();
+    }
+    y += 28.0;
+
+    if let Some(status) = &app.save_status {
+        draw_text_ex(
+            &status.message,
+            content_x,
+            y,
+            TextParams {
+                font_size: 13,
+                color: if status.success {
+                    color(167, 218, 137, 255)
+                } else {
+                    color(235, 126, 102, 255)
+                },
+                ..Default::default()
+            },
+        );
     }
 }
 

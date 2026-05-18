@@ -6,7 +6,9 @@
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use serde::Deserialize;
+use std::fmt::Write as _;
 use std::fs;
+use std::path::Path;
 use std::str::SplitWhitespace;
 
 /// Zero-based board coordinate: `x` is the row and `y` is the column.
@@ -463,6 +465,34 @@ impl Board {
             location, life, random,
         ))));
         Some(id)
+    }
+
+    /// Removes one aphid from a cell and returns whether a creature was removed.
+    pub fn remove_aphid_at(&mut self, x: usize, y: usize) -> bool {
+        let location = Coordinates { x, y };
+        if !self.in_bounds(location) {
+            return false;
+        }
+
+        let Some(id) = self.field[self.index(location)].aphids.last().copied() else {
+            return false;
+        };
+        self.remove_creature(id);
+        true
+    }
+
+    /// Removes one ladybug from a cell and returns whether a creature was removed.
+    pub fn remove_ladybug_at(&mut self, x: usize, y: usize) -> bool {
+        let location = Coordinates { x, y };
+        if !self.in_bounds(location) {
+            return false;
+        }
+
+        let Some(id) = self.field[self.index(location)].ladybugs.last().copied() else {
+            return false;
+        };
+        self.remove_creature(id);
+        true
     }
 
     /// Advances the board by one phased turn.
@@ -957,6 +987,109 @@ pub fn parse_simulation_config(
     Ok(())
 }
 
+/// Formats the current board and active behavior parameters as `simulation.toml` content.
+pub fn format_simulation_config(board: &Board) -> String {
+    let mut aphids = Vec::new();
+    let mut ladybugs = Vec::new();
+
+    for creature in board.creature_snapshots() {
+        match creature.kind {
+            CreatureSnapshotKind::Aphid => aphids.push(creature.location),
+            CreatureSnapshotKind::Ladybug => ladybugs.push(creature.location),
+        }
+    }
+
+    let aphid_params = board.aphid_params();
+    let ladybug_params = board.ladybug_params();
+    let mut contents = String::new();
+
+    writeln!(&mut contents, "[board]").expect("write to string");
+    writeln!(&mut contents, "rows = {}", board.rows()).expect("write to string");
+    writeln!(&mut contents, "columns = {}", board.cols()).expect("write to string");
+    writeln!(&mut contents).expect("write to string");
+    write_coordinate_array(&mut contents, "aphids", &aphids);
+    writeln!(&mut contents).expect("write to string");
+    write_coordinate_array(&mut contents, "ladybugs", &ladybugs);
+    writeln!(&mut contents).expect("write to string");
+    writeln!(&mut contents, "[aphid]").expect("write to string");
+    writeln!(
+        &mut contents,
+        "move_probability = {}",
+        aphid_params.prob_move
+    )
+    .expect("write to string");
+    writeln!(
+        &mut contents,
+        "kill_probability = {}",
+        aphid_params.prob_kill
+    )
+    .expect("write to string");
+    writeln!(
+        &mut contents,
+        "accomplice_probability = {}",
+        aphid_params.prob_accomplice
+    )
+    .expect("write to string");
+    writeln!(
+        &mut contents,
+        "procreation_probability = {}",
+        aphid_params.prob_procreate
+    )
+    .expect("write to string");
+    writeln!(&mut contents).expect("write to string");
+    writeln!(&mut contents, "[ladybug]").expect("write to string");
+    writeln!(
+        &mut contents,
+        "move_probability = {}",
+        ladybug_params.prob_move
+    )
+    .expect("write to string");
+    writeln!(
+        &mut contents,
+        "kill_probability = {}",
+        ladybug_params.prob_kill
+    )
+    .expect("write to string");
+    writeln!(
+        &mut contents,
+        "direction_change_probability = {}",
+        ladybug_params.prob_direction
+    )
+    .expect("write to string");
+    writeln!(
+        &mut contents,
+        "procreation_probability = {}",
+        ladybug_params.prob_procreate
+    )
+    .expect("write to string");
+
+    contents
+}
+
+/// Saves the current board and active behavior parameters to a TOML config file.
+pub fn save_simulation_config(board: &Board, path: impl AsRef<Path>) -> Result<(), String> {
+    fs::write(path, format_simulation_config(board)).map_err(|error| error.to_string())
+}
+
+/// Writes a TOML inline-table coordinate array.
+fn write_coordinate_array(contents: &mut String, label: &str, coordinates: &[Coordinates]) {
+    if coordinates.is_empty() {
+        writeln!(contents, "{label} = []").expect("write to string");
+        return;
+    }
+
+    writeln!(contents, "{label} = [").expect("write to string");
+    for coordinate in coordinates {
+        writeln!(
+            contents,
+            "  {{ x = {}, y = {} }},",
+            coordinate.x, coordinate.y
+        )
+        .expect("write to string");
+    }
+    writeln!(contents, "]").expect("write to string");
+}
+
 impl AphidConfig {
     /// Converts TOML values into validated aphid parameters.
     fn params(self) -> Result<AphidParams, String> {
@@ -1172,6 +1305,64 @@ procreation_probability = 0.1
                 .len(),
             1
         );
+    }
+
+    #[test]
+    fn format_simulation_config_round_trips() {
+        let mut random = Random::with_seed(1);
+        let mut board = Board::new();
+        parse_simulation_config(
+            r#"
+[board]
+rows = 2
+columns = 3
+aphids = [{ x = 0, y = 1 }]
+ladybugs = [{ x = 1, y = 2 }]
+
+[aphid]
+move_probability = 0.6
+kill_probability = 0.3
+accomplice_probability = 0.2
+procreation_probability = 0.5
+
+[ladybug]
+move_probability = 0.4
+kill_probability = 0.8
+direction_change_probability = 0.7
+procreation_probability = 0.1
+"#,
+            &mut board,
+            &mut random,
+        )
+        .unwrap();
+
+        let contents = format_simulation_config(&board);
+        let mut round_trip_random = Random::with_seed(1);
+        let mut round_trip = Board::new();
+        parse_simulation_config(&contents, &mut round_trip, &mut round_trip_random).unwrap();
+
+        assert_eq!(round_trip.rows, 2);
+        assert_eq!(round_trip.cols, 3);
+        assert_eq!(round_trip.aphid_params, board.aphid_params);
+        assert_eq!(round_trip.ladybug_params, board.ladybug_params);
+        assert_eq!(round_trip.cell_counts(0, 1), Some((1, 0)));
+        assert_eq!(round_trip.cell_counts(1, 2), Some((0, 1)));
+    }
+
+    #[test]
+    fn remove_creature_at_removes_one_matching_kind() {
+        let mut random = Random::with_seed(1);
+        let mut board = board_with_field(1, 1);
+        board.add_aphid(0, 0, 10).unwrap();
+        board.add_aphid(0, 0, 10).unwrap();
+        board.add_ladybug(0, 0, 15, &mut random).unwrap();
+
+        assert!(board.remove_aphid_at(0, 0));
+        assert_eq!(board.cell_counts(0, 0), Some((1, 1)));
+        assert!(board.remove_ladybug_at(0, 0));
+        assert_eq!(board.cell_counts(0, 0), Some((1, 0)));
+        assert!(!board.remove_ladybug_at(0, 0));
+        assert_eq!(board.cell_counts(0, 0), Some((1, 0)));
     }
 
     #[test]
