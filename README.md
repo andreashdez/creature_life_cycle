@@ -79,6 +79,14 @@ Run the Macroquad GUI visualizer. It starts from fixed seed `42` by default:
 cargo run --bin gui
 ```
 
+Package the GUI as a macOS app bundle and zip archive:
+
+```sh
+sh scripts/package_gui.sh
+```
+
+The packaged outputs are written to `target/package/Creature Life Cycle.app` and `target/package/creature_life_cycle_gui-macos.zip`.
+
 The executable accepts these optional flags:
 
 ```text
