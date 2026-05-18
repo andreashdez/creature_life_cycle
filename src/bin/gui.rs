@@ -1,6 +1,6 @@
 use creature_life_cycle::{
     AphidParams, Board, BoardSummary, CellSnapshot, Coordinates, CreatureSnapshot,
-    CreatureSnapshotKind, LadybugParams, Random, load_configured_board, save_simulation_config,
+    CreatureSnapshotKind, LadybugParams, Random, load_configured_board, save_configured_board,
 };
 use macroquad::prelude::*;
 use std::collections::HashMap;
@@ -167,8 +167,8 @@ impl SimulationApp {
 
     fn save_config(&mut self) {
         self.apply_params();
-        match save_simulation_config(&self.board, "simulation.toml") {
-            Ok(()) => self.set_save_status("Saved simulation.toml", true),
+        match save_configured_board(&self.board) {
+            Ok(path) => self.set_save_status(format!("Saved {}", path.display()), true),
             Err(error) => self.set_save_status(format!("Save failed: {error}"), false),
         }
     }

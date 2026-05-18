@@ -1,8 +1,30 @@
+use std::fs;
+use std::path::PathBuf;
 use std::process::Command;
 
-fn assert_seeded_snapshot(args: &[&str], expected_stdout: &str) {
+fn test_config_home(name: &str) -> PathBuf {
+    let config_home = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("target")
+        .join("test-config-home")
+        .join(name);
+    let app_config_dir = config_home.join("creature_life_cycle");
+
+    let _ = fs::remove_dir_all(&config_home);
+    fs::create_dir_all(&app_config_dir).expect("create test config directory");
+    fs::write(
+        app_config_dir.join("simulation.toml"),
+        include_str!("../simulation.example.toml"),
+    )
+    .expect("write test simulation config");
+
+    config_home
+}
+
+fn assert_seeded_snapshot(name: &str, args: &[&str], expected_stdout: &str) {
+    let config_home = test_config_home(name);
     let output = Command::new(env!("CARGO_BIN_EXE_creature_life_cycle"))
         .args(args)
+        .env("XDG_CONFIG_HOME", &config_home)
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .output()
         .expect("run creature_life_cycle binary");
@@ -18,6 +40,7 @@ fn assert_seeded_snapshot(args: &[&str], expected_stdout: &str) {
 #[test]
 fn seeded_e2e_run_matches_death_snapshot() {
     assert_seeded_snapshot(
+        "death_snapshot",
         &["--turns", "1", "--delay-ms", "0", "--seed", "1"],
         r#"
  __ __ __ __ __ __ __ __ __ __
@@ -49,6 +72,7 @@ Turn: 1 | Aphids: 5 | Ladybugs: 3 | Births: 0 | Deaths: 1 | Food: 416
 #[test]
 fn seeded_e2e_run_matches_birth_snapshot() {
     assert_seeded_snapshot(
+        "birth_snapshot",
         &["--turns", "6", "--delay-ms", "0", "--seed", "2"],
         r#"
  __ __ __ __ __ __ __ __ __ __

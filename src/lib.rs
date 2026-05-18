@@ -6,9 +6,13 @@
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use serde::Deserialize;
+use std::env;
 use std::fmt::Write as _;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+const CONFIG_DIR_NAME: &str = "creature_life_cycle";
+const CONFIG_FILE_NAME: &str = "simulation.toml";
 
 /// Zero-based board coordinate: `x` is the row and `y` is the column.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -117,7 +121,7 @@ struct Location {
     food: i32,
 }
 
-/// Tunable aphid probabilities loaded from `simulation.toml`.
+/// Tunable aphid probabilities loaded from the runtime config.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AphidParams {
     /// Chance that an aphid moves during movement phase.
@@ -141,7 +145,7 @@ impl Default for AphidParams {
     }
 }
 
-/// Tunable ladybug probabilities loaded from `simulation.toml`.
+/// Tunable ladybug probabilities loaded from the runtime config.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LadybugParams {
     /// Chance that a ladybug moves during movement phase.
@@ -998,9 +1002,49 @@ pub fn format_simulation_config(board: &Board) -> String {
     contents
 }
 
+/// Returns the XDG runtime config path.
+///
+/// `XDG_CONFIG_HOME` is used when set; otherwise this falls back to
+/// `$HOME/.config/creature_life_cycle/simulation.toml`.
+pub fn simulation_config_path() -> Result<PathBuf, String> {
+    let config_home = env::var_os("XDG_CONFIG_HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            env::var_os("HOME")
+                .filter(|value| !value.is_empty())
+                .map(|home| PathBuf::from(home).join(".config"))
+        })
+        .ok_or_else(|| "XDG_CONFIG_HOME and HOME are not set".to_string())?;
+
+    Ok(config_home.join(CONFIG_DIR_NAME).join(CONFIG_FILE_NAME))
+}
+
+/// Saves the current board and active behavior parameters to the XDG config path.
+pub fn save_configured_board(board: &Board) -> Result<PathBuf, String> {
+    let path = simulation_config_path()?;
+    save_simulation_config(board, &path)?;
+    Ok(path)
+}
+
 /// Saves the current board and active behavior parameters to a TOML config file.
 pub fn save_simulation_config(board: &Board, path: impl AsRef<Path>) -> Result<(), String> {
-    fs::write(path, format_simulation_config(board)).map_err(|error| error.to_string())
+    let path = path.as_ref();
+
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent).map_err(|error| {
+            format!(
+                "failed to create config directory {}: {error}",
+                parent.display()
+            )
+        })?;
+    }
+
+    fs::write(path, format_simulation_config(board))
+        .map_err(|error| format!("failed to write {}: {error}", path.display()))
 }
 
 /// Writes a TOML inline-table coordinate array.
@@ -1058,10 +1102,9 @@ impl LadybugConfig {
     }
 }
 
-/// Loads the runtime TOML configuration file from the current working directory.
+/// Loads the runtime TOML configuration file from the XDG config directory.
 ///
-/// Invalid or missing `simulation.toml` falls back to built-in standard data and default behavior
-/// parameters.
+/// Invalid or missing config falls back to built-in standard data and default behavior parameters.
 pub fn load_configured_board(random: &mut Random) -> Board {
     let mut board = Board::new();
 
@@ -1070,21 +1113,36 @@ pub fn load_configured_board(random: &mut Random) -> Board {
     board
 }
 
-/// Reads `simulation.toml`, falling back to built-in standard data on errors.
+/// Reads `simulation.toml` from the XDG config directory, falling back to built-in standard data on errors.
 fn read_simulation_config(board: &mut Board, random: &mut Random) {
-    let Ok(contents) = fs::read_to_string("simulation.toml") else {
-        eprintln!("File \"simulation.toml\" not found, using standard data.");
-        load_standard_data(board, random);
-        return;
+    let path = match simulation_config_path() {
+        Ok(path) => path,
+        Err(error) => {
+            eprintln!("Config path unavailable ({error}), using standard data.");
+            load_standard_data(board, random);
+            return;
+        }
+    };
+
+    let contents = match fs::read_to_string(&path) {
+        Ok(contents) => contents,
+        Err(error) => {
+            eprintln!(
+                "Could not read {} ({error}), using standard data.",
+                path.display()
+            );
+            load_standard_data(board, random);
+            return;
+        }
     };
 
     if let Err(error) = parse_simulation_config(&contents, board, random) {
-        eprintln!("Invalid simulation.toml ({error}), using standard data.");
+        eprintln!("Invalid {} ({error}), using standard data.", path.display());
         load_standard_data(board, random);
     }
 }
 
-/// Loads the same default board data represented by the checked-in `simulation.toml`.
+/// Loads the same default board data represented by `simulation.example.toml`.
 pub fn load_standard_data(board: &mut Board, random: &mut Random) {
     board.create_field(10, 10, random);
 
@@ -1228,6 +1286,24 @@ procreation_probability = 0.1
         assert_eq!(round_trip.ladybug_params, board.ladybug_params);
         assert_eq!(round_trip.cell_counts(0, 1), Some((1, 0)));
         assert_eq!(round_trip.cell_counts(1, 2), Some((0, 1)));
+    }
+
+    #[test]
+    fn save_simulation_config_creates_parent_directory() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("test-output")
+            .join("save_simulation_config")
+            .join("simulation.toml");
+        if let Some(parent) = path.parent() {
+            let _ = fs::remove_dir_all(parent);
+        }
+
+        let board = board_with_field(1, 1);
+
+        save_simulation_config(&board, &path).unwrap();
+
+        assert!(path.exists());
     }
 
     #[test]
