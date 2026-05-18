@@ -653,11 +653,12 @@ fn draw_history_graph(app: &SimulationApp, layout: BoardLayout) {
         layout.graph_h,
     );
     draw_round_rect(rect.x, rect.y, rect.w, rect.h, 18.0, color(15, 22, 25, 218));
-    draw_rectangle_lines(
+    draw_round_rect_lines(
         rect.x + 1.0,
         rect.y + 1.0,
         rect.w - 2.0,
         rect.h - 2.0,
+        17.0,
         1.0,
         color(112, 131, 117, 96),
     );
@@ -867,7 +868,15 @@ fn draw_cell_background(
     let rim = mix(color(48, 53, 50, 255), color(135, 153, 89, 255), food);
 
     draw_round_rect(x, y, size, size, size * 0.12, base);
-    draw_rectangle_lines(x + 1.0, y + 1.0, size - 2.0, size - 2.0, 1.0, rim);
+    draw_round_rect_lines(
+        x + 1.0,
+        y + 1.0,
+        size - 2.0,
+        size - 2.0,
+        size * 0.12,
+        1.0,
+        rim,
+    );
 
     if snapshot.food > 0 {
         let bar_w = size * (snapshot.food.min(9) as f32 / 9.0).clamp(0.0, 1.0);
@@ -884,11 +893,12 @@ fn draw_cell_background(
     draw_food_speckles(x, y, size, row, col, snapshot.food);
 
     if hovered {
-        draw_rectangle_lines(
+        draw_round_rect_lines(
             x - 1.5,
             y - 1.5,
             size + 3.0,
             size + 3.0,
+            size * 0.12 + 1.5,
             3.0,
             color(245, 228, 168, 230),
         );
@@ -990,11 +1000,12 @@ fn draw_edit_overlay(app: &SimulationApp, layout: BoardLayout, hovered: Option<(
         EditTool::Ladybug => color(231, 78, 61, 175),
     };
 
-    draw_rectangle_lines(
+    draw_round_rect_lines(
         x - 3.0,
         y - 3.0,
         inner + 6.0,
         inner + 6.0,
+        inner * 0.12 + 3.0,
         3.0,
         preview_color,
     );
@@ -1177,11 +1188,12 @@ fn draw_panel(app: &mut SimulationApp, layout: BoardLayout) {
         22.0,
         color(18, 24, 29, 218),
     );
-    draw_rectangle_lines(
+    draw_round_rect_lines(
         layout.panel_x + 1.0,
         layout.panel_y + 1.0,
         layout.panel_w - 2.0,
         layout.panel_h - 2.0,
+        21.0,
         1.0,
         color(116, 137, 119, 115),
     );
@@ -1559,11 +1571,12 @@ fn draw_control_button(rect: Rect, label: &str, fill: Color) -> bool {
     };
 
     draw_round_rect(rect.x, rect.y, rect.w, rect.h, 8.0, button_fill);
-    draw_rectangle_lines(
+    draw_round_rect_lines(
         rect.x + 1.0,
         rect.y + 1.0,
         rect.w - 2.0,
         rect.h - 2.0,
+        7.0,
         1.0,
         color(255, 255, 255, if hovered { 110 } else { 55 }),
     );
@@ -1662,11 +1675,12 @@ fn draw_hover_tooltip(app: &SimulationApp, hovered: Option<(usize, usize)>) {
         .max(12.0);
 
     draw_round_rect(x, y, width, height, 14.0, color(22, 31, 31, 232));
-    draw_rectangle_lines(
+    draw_round_rect_lines(
         x + 1.0,
         y + 1.0,
         width - 2.0,
         height - 2.0,
+        13.0,
         1.0,
         color(209, 194, 142, 125),
     );
@@ -1755,6 +1769,66 @@ fn draw_round_rect(x: f32, y: f32, w: f32, h: f32, radius: f32, fill: Color) {
     draw_circle(x + w - r, y + r, r, fill);
     draw_circle(x + r, y + h - r, r, fill);
     draw_circle(x + w - r, y + h - r, r, fill);
+}
+
+fn draw_round_rect_lines(
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    radius: f32,
+    thickness: f32,
+    line_color: Color,
+) {
+    let half = thickness * 0.5;
+    let left = x + half;
+    let right = x + w - half;
+    let top = y + half;
+    let bottom = y + h - half;
+    let r = (radius - half)
+        .max(0.0)
+        .min((right - left) * 0.5)
+        .min((bottom - top) * 0.5);
+
+    if r <= 0.0 {
+        draw_rectangle_lines(x, y, w, h, thickness, line_color);
+        return;
+    }
+
+    draw_line(left + r, top, right - r, top, thickness, line_color);
+    draw_line(right, top + r, right, bottom - r, thickness, line_color);
+    draw_line(right - r, bottom, left + r, bottom, thickness, line_color);
+    draw_line(left, bottom - r, left, top + r, thickness, line_color);
+
+    draw_arc_lines(left + r, top + r, r, 180.0, 270.0, thickness, line_color);
+    draw_arc_lines(right - r, top + r, r, 270.0, 360.0, thickness, line_color);
+    draw_arc_lines(right - r, bottom - r, r, 0.0, 90.0, thickness, line_color);
+    draw_arc_lines(left + r, bottom - r, r, 90.0, 180.0, thickness, line_color);
+}
+
+fn draw_arc_lines(
+    cx: f32,
+    cy: f32,
+    radius: f32,
+    start_degrees: f32,
+    end_degrees: f32,
+    thickness: f32,
+    line_color: Color,
+) {
+    let segments = (radius * 0.6).ceil().clamp(6.0, 16.0) as usize;
+    let start = start_degrees.to_radians();
+    let end = end_degrees.to_radians();
+    let step = (end - start) / segments as f32;
+
+    let mut previous = vec2(cx + radius * start.cos(), cy + radius * start.sin());
+    for segment in 1..=segments {
+        let angle = start + step * segment as f32;
+        let current = vec2(cx + radius * angle.cos(), cy + radius * angle.sin());
+        draw_line(
+            previous.x, previous.y, current.x, current.y, thickness, line_color,
+        );
+        previous = current;
+    }
 }
 
 fn color(red: u8, green: u8, blue: u8, alpha: u8) -> Color {
