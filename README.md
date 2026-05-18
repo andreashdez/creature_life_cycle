@@ -115,7 +115,7 @@ S         save current board and probabilities to the XDG config file
 Esc       quit
 ```
 
-The side panel also provides mouse controls for play, step, reset, speed, seed, board editing, saving, reloading, and all aphid and ladybug probabilities. Changing a probability affects future turns immediately; reset restarts the run with the selected seed and probabilities.
+The side panel also provides mouse controls for play, step, reset, speed, seed, board editing, saving, reloading, and all aphid, ladybug, and food probabilities. Changing a probability affects future turns immediately; reset restarts the run with the selected seed and probabilities.
 
 When board editing is enabled, left-click a board cell to add the selected creature type and right-click a board cell to remove one selected creature type from that cell. Editing pauses the simulation and resets the displayed turn history to treat the edited board as a new starting point.
 
@@ -123,7 +123,7 @@ When board editing is enabled, left-click a board cell to add the selected creat
 
 ## Simulation Configuration
 
-The XDG `simulation.toml` contains the board layout and creature probabilities.
+The XDG `simulation.toml` contains the board layout and behavior probabilities.
 
 Example:
 
@@ -153,6 +153,9 @@ move_probability = 0.7
 kill_probability = 0.2
 direction_change_probability = 0.4
 procreation_probability = 0.2
+
+[food]
+regeneration_probability = 0.1
 ```
 
 Coordinates are zero-based. `x` is the row and `y` is the column.
@@ -167,9 +170,11 @@ Starting ladybugs have `15` life.
 
 Each board cell starts with a random food value from `0` through `9`.
 
+Food is capped at `9` per cell.
+
 All probability values must be from `0.0` through `1.0`.
 
-The `[aphid]` and `[ladybug]` sections are optional. If either section is omitted, that creature type uses its default probabilities.
+The `[aphid]`, `[ladybug]`, and `[food]` sections are optional. If a section is omitted, that behavior uses its default probabilities.
 
 ## Board Output
 
@@ -219,6 +224,7 @@ The simulation then runs these phases:
 4. Procreation for all surviving original turn creatures.
 5. Starvation for all surviving original turn creatures.
 6. Removal of creatures killed by starvation.
+7. Random food regeneration for board cells below the food cap.
 
 Within each phase, creatures are processed in creation order.
 
@@ -260,13 +266,13 @@ New creatures do not move, fight, procreate, or starve until the next turn.
 
 During starvation, each surviving original turn creature consumes from the food value of its current cell.
 
-The cell food value is reduced by `1` before the creature checks whether food remains.
+If the cell has food, the cell food value is reduced by `1` and the creature does not lose life that turn.
 
-If the cell still has food after the reduction, the creature gains `1` life and then loses `1` life for the turn, leaving its life unchanged.
+If the cell has no food, the creature loses `1` life.
 
-If the cell has no food after the reduction, the creature loses `1` life.
+Food values never drop below `0`.
 
-Food values can become negative.
+After starvation deaths are removed, each cell below the food cap has a configured chance to regain `1` food. The default regeneration probability is `0.1`.
 
 A creature dies when its life drops below `1`.
 

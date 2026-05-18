@@ -28,3 +28,6 @@ move_probability = 0.7
 kill_probability = 0.2
 direction_change_probability = 0.4
 procreation_probability = 0.2
+
+[food]
+regeneration_probability = 0.1

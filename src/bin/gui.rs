@@ -1,6 +1,7 @@
 use creature_life_cycle::{
     AphidParams, Board, BoardSummary, CellSnapshot, Coordinates, CreatureSnapshot,
-    CreatureSnapshotKind, LadybugParams, Random, load_configured_board, save_configured_board,
+    CreatureSnapshotKind, FoodParams, LadybugParams, Random, load_configured_board,
+    save_configured_board,
 };
 use macroquad::prelude::*;
 use std::collections::HashMap;
@@ -52,6 +53,7 @@ struct SimulationApp {
     seed: u64,
     aphid_params: AphidParams,
     ladybug_params: LadybugParams,
+    food_params: FoodParams,
     turn: usize,
     summary: BoardSummary,
     last_births: usize,
@@ -76,6 +78,7 @@ impl SimulationApp {
         let summary = board.summary();
         let aphid_params = board.aphid_params();
         let ladybug_params = board.ladybug_params();
+        let food_params = board.food_params();
         let history = vec![HistoryPoint::new(0, summary)];
         Self {
             board,
@@ -83,6 +86,7 @@ impl SimulationApp {
             seed,
             aphid_params,
             ladybug_params,
+            food_params,
             turn: 0,
             summary,
             last_births: 0,
@@ -106,6 +110,7 @@ impl SimulationApp {
         let mut board = load_configured_board(&mut random);
         board.set_aphid_params(self.aphid_params);
         board.set_ladybug_params(self.ladybug_params);
+        board.set_food_params(self.food_params);
 
         self.summary = board.summary();
         self.board = board;
@@ -146,6 +151,7 @@ impl SimulationApp {
     fn apply_params(&mut self) {
         self.board.set_aphid_params(self.aphid_params);
         self.board.set_ladybug_params(self.ladybug_params);
+        self.board.set_food_params(self.food_params);
     }
 
     fn update_save_status(&mut self, frame_time: f32) {
@@ -856,7 +862,7 @@ fn draw_cell_background(
     snapshot: CellSnapshot,
     hovered: bool,
 ) {
-    let food = ((snapshot.food + 2) as f32 / 12.0).clamp(0.0, 1.0);
+    let food = (snapshot.food as f32 / 9.0).clamp(0.0, 1.0);
     let base = mix(color(31, 33, 34, 255), color(76, 104, 58, 255), food);
     let rim = mix(color(48, 53, 50, 255), color(135, 153, 89, 255), food);
 
@@ -1413,7 +1419,7 @@ fn draw_panel(app: &mut SimulationApp, layout: BoardLayout) {
         &mut app.aphid_params.prob_move,
         color(98, 204, 83, 255),
     );
-    y += 24.0;
+    y += 22.0;
     params_changed |= draw_probability_slider(
         content_x,
         y,
@@ -1422,7 +1428,7 @@ fn draw_panel(app: &mut SimulationApp, layout: BoardLayout) {
         &mut app.aphid_params.prob_kill,
         color(98, 204, 83, 255),
     );
-    y += 24.0;
+    y += 22.0;
     params_changed |= draw_probability_slider(
         content_x,
         y,
@@ -1431,7 +1437,7 @@ fn draw_panel(app: &mut SimulationApp, layout: BoardLayout) {
         &mut app.aphid_params.prob_accomplice,
         color(98, 204, 83, 255),
     );
-    y += 24.0;
+    y += 22.0;
     params_changed |= draw_probability_slider(
         content_x,
         y,
@@ -1440,7 +1446,7 @@ fn draw_panel(app: &mut SimulationApp, layout: BoardLayout) {
         &mut app.aphid_params.prob_procreate,
         color(98, 204, 83, 255),
     );
-    y += 26.0;
+    y += 24.0;
     params_changed |= draw_probability_slider(
         content_x,
         y,
@@ -1449,7 +1455,7 @@ fn draw_panel(app: &mut SimulationApp, layout: BoardLayout) {
         &mut app.ladybug_params.prob_move,
         color(221, 73, 58, 255),
     );
-    y += 24.0;
+    y += 22.0;
     params_changed |= draw_probability_slider(
         content_x,
         y,
@@ -1458,7 +1464,7 @@ fn draw_panel(app: &mut SimulationApp, layout: BoardLayout) {
         &mut app.ladybug_params.prob_kill,
         color(221, 73, 58, 255),
     );
-    y += 24.0;
+    y += 22.0;
     params_changed |= draw_probability_slider(
         content_x,
         y,
@@ -1467,7 +1473,7 @@ fn draw_panel(app: &mut SimulationApp, layout: BoardLayout) {
         &mut app.ladybug_params.prob_direction,
         color(221, 73, 58, 255),
     );
-    y += 24.0;
+    y += 22.0;
     params_changed |= draw_probability_slider(
         content_x,
         y,
@@ -1476,7 +1482,16 @@ fn draw_panel(app: &mut SimulationApp, layout: BoardLayout) {
         &mut app.ladybug_params.prob_procreate,
         color(221, 73, 58, 255),
     );
-    y += 29.0;
+    y += 24.0;
+    params_changed |= draw_probability_slider(
+        content_x,
+        y,
+        content_w,
+        "Food regrow",
+        &mut app.food_params.prob_regenerate,
+        color(194, 184, 83, 255),
+    );
+    y += 23.0;
 
     if params_changed {
         app.apply_params();

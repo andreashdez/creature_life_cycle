@@ -13,6 +13,8 @@ use std::path::{Path, PathBuf};
 
 const CONFIG_DIR_NAME: &str = "creature_life_cycle";
 const CONFIG_FILE_NAME: &str = "simulation.toml";
+const MAX_CELL_FOOD: i32 = 9;
+const DEFAULT_FOOD_REGEN_PROBABILITY: f64 = 0.1;
 
 /// Zero-based board coordinate: `x` is the row and `y` is the column.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -53,6 +55,8 @@ struct SimulationConfig {
     aphid: Option<AphidConfig>,
     /// Optional ladybug behavior parameters. Defaults are used when omitted.
     ladybug: Option<LadybugConfig>,
+    /// Optional food behavior parameters. Defaults are used when omitted.
+    food: Option<FoodConfig>,
 }
 
 /// TOML board configuration.
@@ -107,6 +111,14 @@ struct LadybugConfig {
     procreation_probability: f64,
 }
 
+/// TOML food behavior configuration.
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FoodConfig {
+    /// Chance that a cell below the food cap regains one food after each turn.
+    regeneration_probability: f64,
+}
+
 /// One board cell.
 ///
 /// Creature lists store IDs into `Board::creatures`, which keeps movement and removal cheap
@@ -117,7 +129,7 @@ struct Location {
     aphids: Vec<usize>,
     /// Ladybug IDs currently occupying this cell.
     ladybugs: Vec<usize>,
-    /// Food available in the cell. This can become negative as creatures consume it.
+    /// Food available in the cell.
     food: i32,
 }
 
@@ -165,6 +177,21 @@ impl Default for LadybugParams {
             prob_kill: 0.2,
             prob_direction: 0.4,
             prob_procreate: 0.2,
+        }
+    }
+}
+
+/// Tunable food probabilities loaded from the runtime config.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FoodParams {
+    /// Chance that a cell below the food cap regains one food after each turn.
+    pub prob_regenerate: f64,
+}
+
+impl Default for FoodParams {
+    fn default() -> Self {
+        Self {
+            prob_regenerate: DEFAULT_FOOD_REGEN_PROBABILITY,
         }
     }
 }
@@ -322,6 +349,8 @@ pub struct Board {
     aphid_params: AphidParams,
     /// Active ladybug behavior parameters.
     ladybug_params: LadybugParams,
+    /// Active food behavior parameters.
+    food_params: FoodParams,
 }
 
 impl Default for Board {
@@ -340,6 +369,7 @@ impl Board {
             creatures: Vec::new(),
             aphid_params: AphidParams::default(),
             ladybug_params: LadybugParams::default(),
+            food_params: FoodParams::default(),
         }
     }
 
@@ -353,6 +383,11 @@ impl Board {
         self.ladybug_params = params;
     }
 
+    /// Sets active food behavior parameters.
+    pub fn set_food_params(&mut self, params: FoodParams) {
+        self.food_params = params;
+    }
+
     /// Returns active aphid behavior parameters.
     pub fn aphid_params(&self) -> AphidParams {
         self.aphid_params
@@ -361,6 +396,11 @@ impl Board {
     /// Returns active ladybug behavior parameters.
     pub fn ladybug_params(&self) -> LadybugParams {
         self.ladybug_params
+    }
+
+    /// Returns active food behavior parameters.
+    pub fn food_params(&self) -> FoodParams {
+        self.food_params
     }
 
     /// Returns the number of board rows.
@@ -425,7 +465,7 @@ impl Board {
                 self.field.push(Location {
                     aphids: Vec::new(),
                     ladybugs: Vec::new(),
-                    food: random.int_inclusive(0, 9),
+                    food: random.int_inclusive(0, MAX_CELL_FOOD),
                 });
             }
         }
@@ -564,6 +604,9 @@ impl Board {
             self.remove_creature(id);
         }
 
+        // Phase 7: cells randomly regain food after creatures finish acting.
+        self.regenerate_food(random);
+
         stats.summary = self.summary();
         stats
     }
@@ -700,23 +743,25 @@ impl Board {
         let location = creature.location();
         let index = self.index(location);
 
-        self.field[index].food -= 1;
-        let food = self.field[index].food;
+        let ate = if self.field[index].food > 0 {
+            self.field[index].food -= 1;
+            true
+        } else {
+            false
+        };
 
         let creature = self.creatures.get_mut(id).and_then(Option::as_mut)?;
         let starved = match creature {
             Creature::Aphid(aphid) => {
-                if food > 0 {
-                    aphid.life += 1;
+                if !ate {
+                    aphid.life -= 1;
                 }
-                aphid.life -= 1;
                 aphid.life < 1
             }
             Creature::Ladybug(ladybug) => {
-                if food > 0 {
-                    ladybug.life += 1;
+                if !ate {
+                    ladybug.life -= 1;
                 }
-                ladybug.life -= 1;
                 ladybug.life < 1
             }
         };
@@ -727,6 +772,22 @@ impl Board {
         } else {
             None
         }
+    }
+
+    /// Randomly restores one food to cells that are below the food cap.
+    fn regenerate_food(&mut self, random: &mut Random) -> usize {
+        let mut regenerated = 0;
+
+        for location in &mut self.field {
+            if location.food < MAX_CELL_FOOD
+                && random.probability() < self.food_params.prob_regenerate
+            {
+                location.food += 1;
+                regenerated += 1;
+            }
+        }
+
+        regenerated
     }
 
     /// Removes a creature from its current location and marks its stable ID as dead.
@@ -902,6 +963,11 @@ pub fn parse_simulation_config(
         .map(LadybugConfig::params)
         .transpose()?
         .unwrap_or_default();
+    let food_params = config
+        .food
+        .map(FoodConfig::params)
+        .transpose()?
+        .unwrap_or_default();
 
     if config.board.rows == 0 || config.board.columns == 0 {
         return Err("board dimensions must be greater than zero".to_string());
@@ -919,6 +985,7 @@ pub fn parse_simulation_config(
 
     board.set_aphid_params(aphid_params);
     board.set_ladybug_params(ladybug_params);
+    board.set_food_params(food_params);
 
     Ok(())
 }
@@ -937,6 +1004,7 @@ pub fn format_simulation_config(board: &Board) -> String {
 
     let aphid_params = board.aphid_params();
     let ladybug_params = board.ladybug_params();
+    let food_params = board.food_params();
     let mut contents = String::new();
 
     writeln!(&mut contents, "[board]").expect("write to string");
@@ -996,6 +1064,14 @@ pub fn format_simulation_config(board: &Board) -> String {
         &mut contents,
         "procreation_probability = {}",
         ladybug_params.prob_procreate
+    )
+    .expect("write to string");
+    writeln!(&mut contents).expect("write to string");
+    writeln!(&mut contents, "[food]").expect("write to string");
+    writeln!(
+        &mut contents,
+        "regeneration_probability = {}",
+        food_params.prob_regenerate
     )
     .expect("write to string");
 
@@ -1097,6 +1173,18 @@ impl LadybugConfig {
             prob_procreate: validate_probability(
                 self.procreation_probability,
                 "ladybug procreation probability",
+            )?,
+        })
+    }
+}
+
+impl FoodConfig {
+    /// Converts TOML values into validated food parameters.
+    fn params(self) -> Result<FoodParams, String> {
+        Ok(FoodParams {
+            prob_regenerate: validate_probability(
+                self.regeneration_probability,
+                "food regeneration probability",
             )?,
         })
     }
@@ -1219,6 +1307,9 @@ move_probability = 0.4
 kill_probability = 0.8
 direction_change_probability = 0.7
 procreation_probability = 0.1
+
+[food]
+regeneration_probability = 0.9
 "#,
             &mut board,
             &mut random,
@@ -1232,6 +1323,7 @@ procreation_probability = 0.1
         assert_eq!(board.aphid_params.prob_accomplice, 0.2);
         assert_eq!(board.ladybug_params.prob_kill, 0.8);
         assert_eq!(board.ladybug_params.prob_direction, 0.7);
+        assert_eq!(board.food_params.prob_regenerate, 0.9);
         assert_eq!(
             board.field[board.index(Coordinates { x: 0, y: 1 })]
                 .aphids
@@ -1269,6 +1361,9 @@ move_probability = 0.4
 kill_probability = 0.8
 direction_change_probability = 0.7
 procreation_probability = 0.1
+
+[food]
+regeneration_probability = 0.9
 "#,
             &mut board,
             &mut random,
@@ -1284,6 +1379,7 @@ procreation_probability = 0.1
         assert_eq!(round_trip.cols, 3);
         assert_eq!(round_trip.aphid_params, board.aphid_params);
         assert_eq!(round_trip.ladybug_params, board.ladybug_params);
+        assert_eq!(round_trip.food_params, board.food_params);
         assert_eq!(round_trip.cell_counts(0, 1), Some((1, 0)));
         assert_eq!(round_trip.cell_counts(1, 2), Some((0, 1)));
     }
@@ -1340,6 +1436,24 @@ move_probability = 1.2
 kill_probability = 0.2
 accomplice_probability = 0.1
 procreation_probability = 0.4
+"#,
+                &mut board,
+                &mut random,
+            )
+            .is_err()
+        );
+
+        assert!(
+            parse_simulation_config(
+                r#"
+[board]
+rows = 2
+columns = 2
+aphids = []
+ladybugs = []
+
+[food]
+regeneration_probability = -0.1
 "#,
                 &mut board,
                 &mut random,
@@ -1490,5 +1604,49 @@ extra = true
 
         assert_eq!(board.creature_starvation(aphid), Some(aphid));
         assert!(board.field[index].aphids.is_empty());
+    }
+
+    #[test]
+    fn starvation_never_reduces_food_below_zero() {
+        let mut board = board_with_field(1, 1);
+        let location = Coordinates { x: 0, y: 0 };
+        let index = board.index(location);
+        board.field[index].food = 0;
+        let aphid = board.add_aphid(0, 0, 2).unwrap();
+
+        assert_eq!(board.creature_starvation(aphid), None);
+        assert_eq!(board.field[index].food, 0);
+    }
+
+    #[test]
+    fn starvation_consumes_last_food_without_life_loss() {
+        let mut board = board_with_field(1, 1);
+        let location = Coordinates { x: 0, y: 0 };
+        let index = board.index(location);
+        board.field[index].food = 1;
+        let aphid = board.add_aphid(0, 0, 1).unwrap();
+
+        assert_eq!(board.creature_starvation(aphid), None);
+        assert_eq!(board.field[index].food, 0);
+    }
+
+    #[test]
+    fn food_regeneration_restores_food_without_exceeding_cap() {
+        let mut board = board_with_field(10, 10);
+        for location in &mut board.field {
+            location.food = 0;
+        }
+        board.food_params.prob_regenerate = 1.0;
+        let mut random = Random::with_seed(1);
+
+        let regenerated = board.regenerate_food(&mut random);
+
+        assert_eq!(regenerated, 100);
+        assert!(
+            board
+                .field
+                .iter()
+                .all(|location| location.food == 1 && location.food <= MAX_CELL_FOOD)
+        );
     }
 }
