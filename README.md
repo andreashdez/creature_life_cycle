@@ -59,6 +59,20 @@ Build an optimized release executable:
 cargo build --release
 ```
 
+## CI
+
+Codeberg CI/Woodpecker is configured in `.woodpecker.yml`.
+
+The pipeline runs on pushes and pull requests, installs the Linux libraries needed to compile the Macroquad GUI target, then checks:
+
+```sh
+cargo fmt --check
+cargo clippy --locked --all-targets -- -D warnings
+cargo test --locked
+```
+
+After Codeberg CI access is enabled for your account or organization, add this repository at `https://ci.codeberg.org/repos/add`.
+
 ## Run
 
 Run with the XDG configuration file. If it is absent, the program creates it from built-in defaults first:
