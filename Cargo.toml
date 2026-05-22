@@ -10,3 +10,15 @@ macroquad = "0.4"
 rand = "0.9"
 serde = { version = "1", features = ["derive"] }
 toml = "0.9"
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "board_refresh"
+harness = false
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
