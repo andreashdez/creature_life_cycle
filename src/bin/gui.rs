@@ -1200,7 +1200,7 @@ fn draw_panel(app: &mut SimulationApp, layout: BoardLayout) {
 
     let content_x = layout.panel_x + 24.0;
     let content_w = layout.panel_w - 48.0;
-    let mut y = layout.panel_y + 34.0;
+    let mut y = layout.panel_y + 40.0;
     draw_text_ex(
         "Simulation",
         content_x,
@@ -1241,10 +1241,10 @@ fn draw_panel(app: &mut SimulationApp, layout: BoardLayout) {
         "Speed",
         &format!("{:.1} turns/s", app.speed),
     );
-    y += 26.0;
+    y += 32.0;
 
     draw_section_title(content_x, y, "Run");
-    y += 20.0;
+    y += 12.0;
 
     let gap = 8.0;
     let button_h = 26.0;
@@ -1290,10 +1290,10 @@ fn draw_panel(app: &mut SimulationApp, layout: BoardLayout) {
     ) {
         app.speed = (app.speed + 0.5).min(8.0);
     }
-    y += 32.0;
+    y += 56.0;
 
     draw_section_title(content_x, y, "Seed");
-    y += 20.0;
+    y += 12.0;
     let seed_button_w = 44.0;
     let seed_display_w = content_w - seed_button_w * 4.0 - gap * 4.0;
     if draw_control_button(
@@ -1353,10 +1353,10 @@ fn draw_panel(app: &mut SimulationApp, layout: BoardLayout) {
     ) {
         app.adjust_seed(10);
     }
-    y += 32.0;
+    y += 56.0;
 
     draw_section_title(content_x, y, "Board Edit");
-    y += 20.0;
+    y += 12.0;
     let edit_button_w = (content_w - gap * 2.0) / 3.0;
     let edit_label = if app.editing_enabled {
         "Editing"
@@ -1407,7 +1407,7 @@ fn draw_panel(app: &mut SimulationApp, layout: BoardLayout) {
         app.editing_enabled = true;
         app.playing = false;
     }
-    y += 35.0;
+    y += 40.0;
     draw_text_ex(
         "Left click adds, right click removes.",
         content_x,
@@ -1418,10 +1418,10 @@ fn draw_panel(app: &mut SimulationApp, layout: BoardLayout) {
             ..Default::default()
         },
     );
-    y += 22.0;
+    y += 32.0;
 
     draw_section_title(content_x, y, "Config Probabilities");
-    y += 22.0;
+    y += 12.0;
     let mut params_changed = false;
     params_changed |= draw_probability_slider(
         content_x,
@@ -1431,7 +1431,7 @@ fn draw_panel(app: &mut SimulationApp, layout: BoardLayout) {
         &mut app.aphid_params.prob_move,
         color(98, 204, 83, 255),
     );
-    y += 22.0;
+    y += 20.0;
     params_changed |= draw_probability_slider(
         content_x,
         y,
@@ -1440,7 +1440,7 @@ fn draw_panel(app: &mut SimulationApp, layout: BoardLayout) {
         &mut app.aphid_params.prob_kill,
         color(98, 204, 83, 255),
     );
-    y += 22.0;
+    y += 20.0;
     params_changed |= draw_probability_slider(
         content_x,
         y,
@@ -1449,7 +1449,7 @@ fn draw_panel(app: &mut SimulationApp, layout: BoardLayout) {
         &mut app.aphid_params.prob_accomplice,
         color(98, 204, 83, 255),
     );
-    y += 22.0;
+    y += 20.0;
     params_changed |= draw_probability_slider(
         content_x,
         y,
@@ -1467,7 +1467,7 @@ fn draw_panel(app: &mut SimulationApp, layout: BoardLayout) {
         &mut app.ladybug_params.prob_move,
         color(221, 73, 58, 255),
     );
-    y += 22.0;
+    y += 20.0;
     params_changed |= draw_probability_slider(
         content_x,
         y,
@@ -1476,7 +1476,7 @@ fn draw_panel(app: &mut SimulationApp, layout: BoardLayout) {
         &mut app.ladybug_params.prob_kill,
         color(221, 73, 58, 255),
     );
-    y += 22.0;
+    y += 20.0;
     params_changed |= draw_probability_slider(
         content_x,
         y,
@@ -1485,7 +1485,7 @@ fn draw_panel(app: &mut SimulationApp, layout: BoardLayout) {
         &mut app.ladybug_params.prob_direction,
         color(221, 73, 58, 255),
     );
-    y += 22.0;
+    y += 20.0;
     params_changed |= draw_probability_slider(
         content_x,
         y,
@@ -1503,7 +1503,7 @@ fn draw_panel(app: &mut SimulationApp, layout: BoardLayout) {
         &mut app.food_params.prob_regenerate,
         color(194, 184, 83, 255),
     );
-    y += 23.0;
+    y += 32.0;
 
     if params_changed {
         app.apply_params();
