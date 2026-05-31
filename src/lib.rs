@@ -346,6 +346,20 @@ pub struct Board {
     field: Vec<Location>,
     /// Stable creature ID table. Dead creatures are stored as `None`.
     creatures: Vec<Option<Creature>>,
+    /// Per-ID index inside the creature's current cell occupant list.
+    cell_slots: Vec<usize>,
+    /// IDs for currently living creatures, in creation order.
+    active_creatures: Vec<usize>,
+    /// Reusable snapshot of active creature IDs for the current refresh.
+    turn_creatures: Vec<usize>,
+    /// Reusable list of creature IDs scheduled for phase-end removal.
+    dead_creatures: Vec<usize>,
+    /// Per-ID death marker epochs used while resolving one refresh.
+    death_marks: Vec<u32>,
+    /// Current marker epoch for scheduled deaths.
+    death_mark_epoch: u32,
+    /// Cached living creature counts and total board food.
+    summary: BoardSummary,
     /// Active aphid behavior parameters.
     aphid_params: AphidParams,
     /// Active ladybug behavior parameters.
@@ -368,6 +382,13 @@ impl Board {
             cols: 0,
             field: Vec::new(),
             creatures: Vec::new(),
+            cell_slots: Vec::new(),
+            active_creatures: Vec::new(),
+            turn_creatures: Vec::new(),
+            dead_creatures: Vec::new(),
+            death_marks: Vec::new(),
+            death_mark_epoch: 0,
+            summary: BoardSummary::default(),
             aphid_params: AphidParams::default(),
             ladybug_params: LadybugParams::default(),
             food_params: FoodParams::default(),
@@ -438,20 +459,28 @@ impl Board {
 
     /// Returns read-only data for every living creature in stable ID order.
     pub fn creature_snapshots(&self) -> Vec<CreatureSnapshot> {
-        self.creatures
-            .iter()
-            .enumerate()
-            .filter_map(|(id, creature)| {
-                creature.as_ref().map(|creature| CreatureSnapshot {
+        let mut snapshots = Vec::with_capacity(self.active_creatures.len());
+        self.write_creature_snapshots(&mut snapshots);
+        snapshots
+    }
+
+    /// Writes read-only data for every living creature into a reusable buffer.
+    pub fn write_creature_snapshots(&self, snapshots: &mut Vec<CreatureSnapshot>) {
+        snapshots.clear();
+        snapshots.reserve(self.active_creatures.len());
+
+        for id in self.active_creatures.iter().copied() {
+            if let Some(creature) = self.creatures[id].as_ref() {
+                snapshots.push(CreatureSnapshot {
                     id,
                     kind: match creature.kind() {
                         CreatureKind::Aphid => CreatureSnapshotKind::Aphid,
                         CreatureKind::Ladybug => CreatureSnapshotKind::Ladybug,
                     },
                     location: creature.location(),
-                })
-            })
-            .collect()
+                });
+            }
+        }
     }
 
     /// Creates a new board field and assigns random starting food to each cell.
@@ -460,16 +489,33 @@ impl Board {
         self.cols = cols;
         self.field.clear();
         self.creatures.clear();
+        self.cell_slots.clear();
+        self.active_creatures.clear();
+        self.turn_creatures.clear();
+        self.dead_creatures.clear();
+        self.death_marks.clear();
+        self.death_mark_epoch = 0;
+        self.summary = BoardSummary::default();
 
         for _ in 0..rows {
             for _ in 0..cols {
+                let food = random.int_inclusive(0, MAX_CELL_FOOD);
                 self.field.push(Location {
                     aphids: Vec::new(),
                     ladybugs: Vec::new(),
-                    food: random.int_inclusive(0, MAX_CELL_FOOD),
+                    food,
                 });
+                self.summary.food += food;
             }
         }
+    }
+
+    /// Sets one cell's food while preserving the cached food total.
+    #[cfg(test)]
+    fn set_cell_food(&mut self, coordinates: Coordinates, food: i32) {
+        let index = self.index(coordinates);
+        self.summary.food += food - self.field[index].food;
+        self.field[index].food = food;
     }
 
     /// Adds an aphid if the coordinate is valid and returns its stable ID.
@@ -482,7 +528,12 @@ impl Board {
 
         let id = self.creatures.len();
         let index = self.index(location);
+        let cell_slot = self.field[index].aphids.len();
         self.field[index].aphids.push(id);
+        self.cell_slots.push(cell_slot);
+        self.active_creatures.push(id);
+        self.death_marks.push(0);
+        self.summary.aphids += 1;
         self.creatures
             .push(Some(Creature::Aphid(Aphid { location, life })));
         Some(id)
@@ -504,7 +555,12 @@ impl Board {
 
         let id = self.creatures.len();
         let index = self.index(location);
+        let cell_slot = self.field[index].ladybugs.len();
         self.field[index].ladybugs.push(id);
+        self.cell_slots.push(cell_slot);
+        self.active_creatures.push(id);
+        self.death_marks.push(0);
+        self.summary.ladybugs += 1;
         self.creatures.push(Some(Creature::Ladybug(Ladybug::new(
             location, life, random,
         ))));
@@ -545,12 +601,9 @@ impl Board {
     /// applied before procreation and starvation so killed creatures do not continue acting later
     /// in the same turn.
     pub fn refresh(&mut self, random: &mut Random) -> TurnStats {
-        let turn_creatures: Vec<usize> = self
-            .creatures
-            .iter()
-            .enumerate()
-            .filter_map(|(id, creature)| creature.as_ref().map(|_| id))
-            .collect();
+        let mut turn_creatures = std::mem::take(&mut self.turn_creatures);
+        turn_creatures.clear();
+        turn_creatures.extend_from_slice(&self.active_creatures);
         let mut stats = TurnStats::default();
 
         // Phase 1: all original creatures move before any combat or births happen.
@@ -558,26 +611,26 @@ impl Board {
             self.creature_movement(id, random);
         }
 
-        let mut dead_creatures = Vec::new();
+        let mut dead_creatures = std::mem::take(&mut self.dead_creatures);
+        dead_creatures.clear();
+        self.start_death_marking();
 
         // Phase 2: combat is resolved for survivors from the original turn snapshot.
         for id in turn_creatures.iter().copied() {
-            if dead_creatures.contains(&id)
-                || self.creatures.get(id).and_then(Option::as_ref).is_none()
+            if self.is_marked_dead(id) || self.creatures.get(id).and_then(Option::as_ref).is_none()
             {
                 continue;
             }
 
             if let Some(killed) = self.creature_combat(id, random) {
-                push_unique(&mut dead_creatures, killed);
+                self.mark_dead(&mut dead_creatures, killed);
             }
         }
 
         // Phase 3: combat deaths are applied before procreation and starvation.
         stats.deaths += dead_creatures.len();
-        for id in dead_creatures.drain(..) {
-            self.remove_creature(id);
-        }
+        let mut removed_creatures = self.remove_dead_creatures(&dead_creatures);
+        dead_creatures.clear();
 
         // Phase 4: survivors from the original turn snapshot may procreate.
         for id in turn_creatures.iter().copied() {
@@ -595,15 +648,20 @@ impl Board {
             }
 
             if let Some(starved) = self.creature_starvation(id) {
-                push_unique(&mut dead_creatures, starved);
+                self.mark_dead(&mut dead_creatures, starved);
             }
         }
 
         // Phase 6: starvation deaths are applied after every survivor had a starvation turn.
         stats.deaths += dead_creatures.len();
-        for id in dead_creatures {
-            self.remove_creature(id);
+        removed_creatures |= self.remove_dead_creatures(&dead_creatures);
+        dead_creatures.clear();
+        if removed_creatures {
+            self.compact_active_creatures();
         }
+
+        self.turn_creatures = turn_creatures;
+        self.dead_creatures = dead_creatures;
 
         // Phase 7: cells randomly regain food after creatures finish acting.
         self.regenerate_food(random);
@@ -623,6 +681,7 @@ impl Board {
 
         let kind = creature.kind();
         let old_location = creature.location();
+        let old_cell_slot = self.cell_slots[id];
         let direction = match creature {
             Creature::Aphid(_) => {
                 if random.probability() < aphid_params.prob_move {
@@ -658,8 +717,9 @@ impl Board {
         }
 
         let new_location = self.direction_to_location(direction, old_location);
-        self.remove_from_location(kind, old_location, id);
-        self.add_to_location(kind, new_location, id);
+        self.remove_from_location(kind, old_location, id, old_cell_slot);
+        let new_cell_slot = self.add_to_location(kind, new_location, id);
+        self.cell_slots[id] = new_cell_slot;
 
         if let Some(creature) = self.creatures.get_mut(id).and_then(Option::as_mut) {
             creature.set_location(new_location);
@@ -742,10 +802,12 @@ impl Board {
         let creature = self.creatures.get(id).and_then(Option::as_ref)?;
         let kind = creature.kind();
         let location = creature.location();
+        let cell_slot = self.cell_slots[id];
         let index = self.index(location);
 
         let ate = if self.field[index].food > 0 {
             self.field[index].food -= 1;
+            self.summary.food -= 1;
             true
         } else {
             false
@@ -768,7 +830,7 @@ impl Board {
         };
 
         if starved {
-            self.remove_from_location(kind, location, id);
+            self.remove_from_location(kind, location, id, cell_slot);
             Some(id)
         } else {
             None
@@ -784,6 +846,7 @@ impl Board {
                 && random.probability() < self.food_params.prob_regenerate
             {
                 location.food += 1;
+                self.summary.food += 1;
                 regenerated += 1;
             }
         }
@@ -793,31 +856,127 @@ impl Board {
 
     /// Removes a creature from its current location and marks its stable ID as dead.
     fn remove_creature(&mut self, id: usize) {
-        let Some(creature) = self.creatures.get(id).and_then(Option::as_ref) else {
+        let Some((kind, location)) = self.creature_kind_location(id) else {
             return;
         };
+        let cell_slot = self.cell_slots[id];
 
-        self.remove_from_location(creature.kind(), creature.location(), id);
-        self.creatures[id] = None;
+        self.remove_from_location(kind, location, id, cell_slot);
+        self.mark_creature_removed(id, kind);
+        self.active_creatures.retain(|active_id| *active_id != id);
     }
 
-    /// Adds an existing creature ID to a location list for its kind.
-    fn add_to_location(&mut self, kind: CreatureKind, location: Coordinates, id: usize) {
+    /// Removes scheduled creatures without compacting active IDs.
+    fn remove_dead_creatures(&mut self, dead_creatures: &[usize]) -> bool {
+        let mut removed = false;
+
+        for id in dead_creatures.iter().copied() {
+            let Some(kind) = self.creature_kind(id) else {
+                continue;
+            };
+
+            self.mark_creature_removed(id, kind);
+            removed = true;
+        }
+
+        removed
+    }
+
+    /// Removes dead IDs from the active list after all refresh phases finish.
+    fn compact_active_creatures(&mut self) {
+        let creatures = &self.creatures;
+        self.active_creatures
+            .retain(|active_id| creatures[*active_id].is_some());
+    }
+
+    /// Returns a live creature's kind and location by stable ID.
+    fn creature_kind_location(&self, id: usize) -> Option<(CreatureKind, Coordinates)> {
+        self.creatures
+            .get(id)
+            .and_then(Option::as_ref)
+            .map(|creature| (creature.kind(), creature.location()))
+    }
+
+    /// Returns a live creature's kind by stable ID.
+    fn creature_kind(&self, id: usize) -> Option<CreatureKind> {
+        self.creatures
+            .get(id)
+            .and_then(Option::as_ref)
+            .map(Creature::kind)
+    }
+
+    /// Marks a creature as removed in the stable ID table and cached totals.
+    fn mark_creature_removed(&mut self, id: usize, kind: CreatureKind) {
+        self.creatures[id] = None;
+        match kind {
+            CreatureKind::Aphid => self.summary.aphids -= 1,
+            CreatureKind::Ladybug => self.summary.ladybugs -= 1,
+        }
+    }
+
+    /// Starts a new scheduled-death marking pass without clearing the full marker table.
+    fn start_death_marking(&mut self) {
+        self.death_mark_epoch = self.death_mark_epoch.wrapping_add(1);
+        if self.death_mark_epoch == 0 {
+            self.death_marks.fill(0);
+            self.death_mark_epoch = 1;
+        }
+    }
+
+    /// Returns whether a creature is already scheduled to die in this refresh.
+    fn is_marked_dead(&self, id: usize) -> bool {
+        self.death_marks.get(id).copied() == Some(self.death_mark_epoch)
+    }
+
+    /// Marks one creature ID as dead and records it once for phase-end removal.
+    fn mark_dead(&mut self, dead_creatures: &mut Vec<usize>, id: usize) {
+        if id >= self.death_marks.len() {
+            self.death_marks.resize(id + 1, 0);
+        }
+
+        if self.death_marks[id] != self.death_mark_epoch {
+            self.death_marks[id] = self.death_mark_epoch;
+            dead_creatures.push(id);
+        }
+    }
+
+    /// Adds an existing creature ID to a location list for its kind and returns its cell slot.
+    fn add_to_location(&mut self, kind: CreatureKind, location: Coordinates, id: usize) -> usize {
         let index = self.index(location);
         match kind {
-            CreatureKind::Aphid => self.field[index].aphids.push(id),
-            CreatureKind::Ladybug => self.field[index].ladybugs.push(id),
+            CreatureKind::Aphid => {
+                let cell_slot = self.field[index].aphids.len();
+                self.field[index].aphids.push(id);
+                cell_slot
+            }
+            CreatureKind::Ladybug => {
+                let cell_slot = self.field[index].ladybugs.len();
+                self.field[index].ladybugs.push(id);
+                cell_slot
+            }
         }
     }
 
     /// Removes an existing creature ID from a location list for its kind.
-    fn remove_from_location(&mut self, kind: CreatureKind, location: Coordinates, id: usize) {
+    fn remove_from_location(
+        &mut self,
+        kind: CreatureKind,
+        location: Coordinates,
+        id: usize,
+        cell_slot: usize,
+    ) {
         let index = self.index(location);
-        match kind {
-            CreatureKind::Aphid => self.field[index].aphids.retain(|creature| *creature != id),
-            CreatureKind::Ladybug => self.field[index]
-                .ladybugs
-                .retain(|creature| *creature != id),
+        let moved = match kind {
+            CreatureKind::Aphid => {
+                swap_remove_occupant(&mut self.field[index].aphids, id, cell_slot)
+            }
+            CreatureKind::Ladybug => {
+                swap_remove_occupant(&mut self.field[index].ladybugs, id, cell_slot)
+            }
+        };
+
+        if let Some((moved_id, moved_slot)) = moved {
+            self.cell_slots[moved_id] = moved_slot;
         }
     }
 
@@ -880,19 +1039,7 @@ impl Board {
 
     /// Returns current living creature counts and total board food.
     pub fn summary(&self) -> BoardSummary {
-        let mut summary = BoardSummary {
-            food: self.field.iter().map(|location| location.food).sum(),
-            ..BoardSummary::default()
-        };
-
-        for creature in self.creatures.iter().flatten() {
-            match creature {
-                Creature::Aphid(_) => summary.aphids += 1,
-                Creature::Ladybug(_) => summary.ladybugs += 1,
-            }
-        }
-
-        summary
+        self.summary
     }
 
     /// Converts a two-dimensional coordinate into the row-major field index.
@@ -1269,11 +1416,19 @@ fn validate_probability(value: f64, label: &str) -> Result<f64, String> {
     }
 }
 
-/// Appends a value only if it is not already present.
-fn push_unique(values: &mut Vec<usize>, value: usize) {
-    if !values.contains(&value) {
-        values.push(value);
-    }
+/// Removes an occupant by its cached slot and returns the ID moved into that slot, if any.
+#[inline]
+fn swap_remove_occupant(
+    occupants: &mut Vec<usize>,
+    id: usize,
+    cell_slot: usize,
+) -> Option<(usize, usize)> {
+    debug_assert_eq!(occupants.get(cell_slot).copied(), Some(id));
+
+    let removed = occupants.swap_remove(cell_slot);
+    debug_assert_eq!(removed, id);
+
+    (cell_slot < occupants.len()).then(|| (occupants[cell_slot], cell_slot))
 }
 
 #[cfg(test)]
@@ -1285,6 +1440,10 @@ mod tests {
         let mut board = Board::new();
         board.create_field(rows, cols, &mut random);
         board
+    }
+
+    fn creature_cell_slot(board: &Board, id: usize) -> usize {
+        board.cell_slots[id]
     }
 
     #[test]
@@ -1433,6 +1592,59 @@ regeneration_probability = 0.9
     }
 
     #[test]
+    fn removed_creatures_are_not_active() {
+        let mut random = Random::with_seed(1);
+        let mut board = board_with_field(1, 1);
+        let aphid = board.add_aphid(0, 0, 10).unwrap();
+        let ladybug = board.add_ladybug(0, 0, 15, &mut random).unwrap();
+
+        assert!(board.remove_aphid_at(0, 0));
+
+        let snapshots = board.creature_snapshots();
+        assert_eq!(board.active_creatures, vec![ladybug]);
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(snapshots[0].id, ladybug);
+        assert_eq!(board.summary().aphids, 0);
+        assert_eq!(board.summary().ladybugs, 1);
+        assert!(board.creatures[aphid].is_none());
+    }
+
+    #[test]
+    fn cell_slots_follow_swap_removed_occupants() {
+        let mut random = Random::with_seed(1);
+        let mut board = board_with_field(1, 1);
+        let index = board.index(Coordinates { x: 0, y: 0 });
+
+        let first_aphid = board.add_aphid(0, 0, 10).unwrap();
+        let middle_aphid = board.add_aphid(0, 0, 10).unwrap();
+        let last_aphid = board.add_aphid(0, 0, 10).unwrap();
+        let first_ladybug = board.add_ladybug(0, 0, 15, &mut random).unwrap();
+        let middle_ladybug = board.add_ladybug(0, 0, 15, &mut random).unwrap();
+        let last_ladybug = board.add_ladybug(0, 0, 15, &mut random).unwrap();
+
+        board.remove_creature(first_aphid);
+        board.remove_creature(first_ladybug);
+
+        assert_eq!(board.field[index].aphids, vec![last_aphid, middle_aphid]);
+        assert_eq!(creature_cell_slot(&board, last_aphid), 0);
+        assert_eq!(creature_cell_slot(&board, middle_aphid), 1);
+        assert_eq!(
+            board.field[index].ladybugs,
+            vec![last_ladybug, middle_ladybug]
+        );
+        assert_eq!(creature_cell_slot(&board, last_ladybug), 0);
+        assert_eq!(creature_cell_slot(&board, middle_ladybug), 1);
+
+        board.remove_creature(last_aphid);
+        board.remove_creature(last_ladybug);
+
+        assert_eq!(board.field[index].aphids, vec![middle_aphid]);
+        assert_eq!(creature_cell_slot(&board, middle_aphid), 0);
+        assert_eq!(board.field[index].ladybugs, vec![middle_ladybug]);
+        assert_eq!(creature_cell_slot(&board, middle_ladybug), 0);
+    }
+
+    #[test]
     fn parse_simulation_config_rejects_out_of_range_probabilities() {
         let mut random = Random::with_seed(1);
         let mut board = Board::new();
@@ -1549,7 +1761,7 @@ extra = true
         let mut board = board_with_field(1, 1);
         let location = Coordinates { x: 0, y: 0 };
         let index = board.index(location);
-        board.field[index].food = 100;
+        board.set_cell_food(location, 100);
 
         board.add_aphid(0, 0, 10).unwrap();
         board.add_aphid(0, 0, 10).unwrap();
@@ -1613,7 +1825,7 @@ extra = true
         let mut board = board_with_field(1, 1);
         let location = Coordinates { x: 0, y: 0 };
         let index = board.index(location);
-        board.field[index].food = 0;
+        board.set_cell_food(location, 0);
         let aphid = board.add_aphid(0, 0, 1).unwrap();
 
         assert_eq!(board.creature_starvation(aphid), Some(aphid));
@@ -1625,7 +1837,7 @@ extra = true
         let mut board = board_with_field(1, 1);
         let location = Coordinates { x: 0, y: 0 };
         let index = board.index(location);
-        board.field[index].food = 0;
+        board.set_cell_food(location, 0);
         let aphid = board.add_aphid(0, 0, 2).unwrap();
 
         assert_eq!(board.creature_starvation(aphid), None);
@@ -1637,7 +1849,7 @@ extra = true
         let mut board = board_with_field(1, 1);
         let location = Coordinates { x: 0, y: 0 };
         let index = board.index(location);
-        board.field[index].food = 1;
+        board.set_cell_food(location, 1);
         let aphid = board.add_aphid(0, 0, 1).unwrap();
 
         assert_eq!(board.creature_starvation(aphid), None);
@@ -1647,8 +1859,10 @@ extra = true
     #[test]
     fn food_regeneration_restores_food_without_exceeding_cap() {
         let mut board = board_with_field(10, 10);
-        for location in &mut board.field {
-            location.food = 0;
+        for x in 0..board.rows {
+            for y in 0..board.cols {
+                board.set_cell_food(Coordinates { x, y }, 0);
+            }
         }
         board.food_params.prob_regenerate = 1.0;
         let mut random = Random::with_seed(1);
@@ -1656,6 +1870,7 @@ extra = true
         let regenerated = board.regenerate_food(&mut random);
 
         assert_eq!(regenerated, 100);
+        assert_eq!(board.summary().food, 100);
         assert!(
             board
                 .field

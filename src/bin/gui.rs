@@ -4,7 +4,7 @@ use creature_life_cycle::{
     save_configured_board,
 };
 use macroquad::prelude::*;
-use std::collections::HashMap;
+use std::collections::VecDeque;
 
 const DEFAULT_SEED: u64 = 42;
 const HISTORY_LIMIT: usize = 240;
@@ -62,13 +62,16 @@ struct SimulationApp {
     extinct: bool,
     speed: f32,
     accumulator: f32,
-    history: Vec<HistoryPoint>,
+    history: VecDeque<HistoryPoint>,
     animations: Vec<AnimatedCreature>,
+    previous_creatures: Vec<CreatureSnapshot>,
+    current_creatures: Vec<CreatureSnapshot>,
     animation_elapsed: f32,
     animation_duration: f32,
     editing_enabled: bool,
     edit_tool: EditTool,
     save_status: Option<SaveStatus>,
+    board_revision: u64,
 }
 
 impl SimulationApp {
@@ -79,7 +82,8 @@ impl SimulationApp {
         let aphid_params = board.aphid_params();
         let ladybug_params = board.ladybug_params();
         let food_params = board.food_params();
-        let history = vec![HistoryPoint::new(0, summary)];
+        let mut history = VecDeque::with_capacity(HISTORY_LIMIT);
+        history.push_back(HistoryPoint::new(0, summary));
         Self {
             board,
             random,
@@ -97,11 +101,14 @@ impl SimulationApp {
             accumulator: 0.0,
             history,
             animations: Vec::new(),
+            previous_creatures: Vec::new(),
+            current_creatures: Vec::new(),
             animation_elapsed: 0.0,
             animation_duration: 0.0,
             editing_enabled: false,
             edit_tool: EditTool::Aphid,
             save_status: None,
+            board_revision: 0,
         }
     }
 
@@ -123,15 +130,18 @@ impl SimulationApp {
         self.history.clear();
         self.push_history();
         self.finish_animation();
+        self.board_revision = self.board_revision.wrapping_add(1);
     }
 
     fn reload_config_files(&mut self) {
         let speed = self.speed;
         let playing = self.playing;
+        let board_revision = self.board_revision.wrapping_add(1);
         *self = Self::new(self.seed);
         self.speed = speed;
         self.playing = playing;
         self.editing_enabled = false;
+        self.board_revision = board_revision;
     }
 
     fn set_seed(&mut self, seed: u64) {
@@ -215,6 +225,7 @@ impl SimulationApp {
         self.accumulator = 0.0;
         self.history.clear();
         self.push_history();
+        self.board_revision = self.board_revision.wrapping_add(1);
     }
 
     fn is_animating(&self) -> bool {
@@ -237,10 +248,10 @@ impl SimulationApp {
 
     fn push_history(&mut self) {
         if self.history.len() == HISTORY_LIMIT {
-            self.history.remove(0);
+            self.history.pop_front();
         }
         self.history
-            .push(HistoryPoint::new(self.turn, self.summary));
+            .push_back(HistoryPoint::new(self.turn, self.summary));
     }
 
     fn step(&mut self) {
@@ -249,19 +260,25 @@ impl SimulationApp {
         }
 
         self.finish_animation();
-        let before = self.board.creature_snapshots();
+        self.board
+            .write_creature_snapshots(&mut self.previous_creatures);
         let stats = self.board.refresh(&mut self.random);
-        let after = self.board.creature_snapshots();
+        self.board
+            .write_creature_snapshots(&mut self.current_creatures);
         self.turn += 1;
         self.summary = stats.summary;
         self.last_births = stats.births;
         self.last_deaths = stats.deaths;
         self.extinct = stats.summary.is_extinct();
+        self.board_revision = self.board_revision.wrapping_add(1);
         self.push_history();
 
-        let (animations, changed) = build_movement_animations(&before, &after);
+        let changed = build_movement_animations(
+            &self.previous_creatures,
+            &self.current_creatures,
+            &mut self.animations,
+        );
         if changed {
-            self.animations = animations;
             self.animation_elapsed = 0.0;
             self.animation_duration = (0.42 / self.speed.sqrt()).clamp(0.12, 0.42);
         }
@@ -271,33 +288,46 @@ impl SimulationApp {
 fn build_movement_animations(
     before: &[CreatureSnapshot],
     after: &[CreatureSnapshot],
-) -> (Vec<AnimatedCreature>, bool) {
-    let before_by_id: HashMap<usize, CreatureSnapshot> = before
-        .iter()
-        .map(|creature| (creature.id, *creature))
-        .collect();
-    let mut changed = false;
-    let animations = after
-        .iter()
-        .map(|creature| {
-            let previous = before_by_id.get(&creature.id);
-            let from = previous.map_or(creature.location, |snapshot| snapshot.location);
-            let born = previous.is_none();
-            changed |= born || from != creature.location;
-            AnimatedCreature {
-                id: creature.id,
-                kind: creature.kind,
-                from,
-                to: creature.location,
-                born,
-            }
-        })
-        .collect();
+    animations: &mut Vec<AnimatedCreature>,
+) -> bool {
+    animations.clear();
+    animations.reserve(after.len());
 
-    (animations, changed)
+    let mut changed = false;
+    let mut before_index = 0;
+
+    for creature in after {
+        while before_index < before.len() && before[before_index].id < creature.id {
+            before_index += 1;
+        }
+
+        let previous = if before_index < before.len() && before[before_index].id == creature.id {
+            let previous = Some(before[before_index]);
+            before_index += 1;
+            previous
+        } else {
+            None
+        };
+        let from = previous.map_or(creature.location, |snapshot| snapshot.location);
+        let born = previous.is_none();
+        changed |= born || from != creature.location;
+        animations.push(AnimatedCreature {
+            id: creature.id,
+            kind: creature.kind,
+            from,
+            to: creature.location,
+            born,
+        });
+    }
+
+    if !changed {
+        animations.clear();
+    }
+
+    changed
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 struct BoardLayout {
     x: f32,
     y: f32,
@@ -316,6 +346,165 @@ struct BoardLayout {
     graph_h: f32,
 }
 
+struct StaticGuiLayers {
+    target: Option<RenderTarget>,
+    signature: Option<StaticLayerSignature>,
+}
+
+impl StaticGuiLayers {
+    fn new() -> Self {
+        Self {
+            target: None,
+            signature: None,
+        }
+    }
+
+    fn draw(&mut self, layout: BoardLayout) {
+        let signature = StaticLayerSignature::new(layout);
+        if self.signature != Some(signature) {
+            self.target = Some(render_cached_layer(
+                signature.width,
+                signature.height,
+                || {
+                    draw_static_gui_layer(layout);
+                },
+            ));
+            self.signature = Some(signature);
+        }
+
+        if let Some(target) = &self.target {
+            draw_cached_target(target);
+        }
+    }
+}
+
+struct BoardLayerCache {
+    target: Option<RenderTarget>,
+    signature: Option<BoardLayerSignature>,
+}
+
+impl BoardLayerCache {
+    fn new() -> Self {
+        Self {
+            target: None,
+            signature: None,
+        }
+    }
+
+    fn draw(&mut self, app: &SimulationApp, layout: BoardLayout) {
+        let signature = BoardLayerSignature::new(layout, app.board_revision);
+        if self.signature != Some(signature) {
+            self.target = Some(render_cached_layer(
+                signature.width,
+                signature.height,
+                || {
+                    draw_board_background_layer(app, layout);
+                },
+            ));
+            self.signature = Some(signature);
+        }
+
+        if let Some(target) = &self.target {
+            draw_cached_target_at(target, layout.x, layout.y, layout.width, layout.height);
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq)]
+struct StaticLayerSignature {
+    width: u32,
+    height: u32,
+    layout: BoardLayout,
+}
+
+impl StaticLayerSignature {
+    fn new(layout: BoardLayout) -> Self {
+        let (width, height) = cached_layer_size();
+        Self {
+            width,
+            height,
+            layout,
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq)]
+struct BoardLayerSignature {
+    width: u32,
+    height: u32,
+    layout: BoardLayout,
+    board_revision: u64,
+}
+
+impl BoardLayerSignature {
+    fn new(layout: BoardLayout, board_revision: u64) -> Self {
+        let (width, height) = cached_board_layer_size(layout);
+        Self {
+            width,
+            height,
+            layout,
+            board_revision,
+        }
+    }
+}
+
+fn cached_layer_size() -> (u32, u32) {
+    (
+        cached_texture_dimension(screen_width()),
+        cached_texture_dimension(screen_height()),
+    )
+}
+
+fn cached_board_layer_size(layout: BoardLayout) -> (u32, u32) {
+    (
+        cached_texture_dimension(layout.width),
+        cached_texture_dimension(layout.height),
+    )
+}
+
+fn cached_texture_dimension(value: f32) -> u32 {
+    value.ceil().max(1.0) as u32
+}
+
+fn render_cached_layer(width: u32, height: u32, draw_layer: impl FnOnce()) -> RenderTarget {
+    let target = render_target(width, height);
+    let mut camera = Camera2D::from_display_rect(Rect::new(0.0, 0.0, width as f32, height as f32));
+    camera.render_target = Some(target.clone());
+
+    set_camera(&camera);
+    clear_background(color(0, 0, 0, 0));
+    draw_layer();
+    set_default_camera();
+
+    target
+}
+
+fn draw_cached_target(target: &RenderTarget) {
+    draw_cached_target_at(target, 0.0, 0.0, screen_width(), screen_height());
+}
+
+fn draw_cached_target_at(target: &RenderTarget, x: f32, y: f32, width: f32, height: f32) {
+    draw_texture_ex(
+        &target.texture,
+        x,
+        y,
+        WHITE,
+        DrawTextureParams {
+            dest_size: Some(vec2(width, height)),
+            flip_y: true,
+            ..Default::default()
+        },
+    );
+}
+
+fn draw_static_gui_layer(layout: BoardLayout) {
+    draw_background();
+    draw_title_heading();
+    draw_board_frame(layout);
+    draw_history_graph_frame(layout);
+    draw_panel_frame(layout);
+}
+
 fn window_conf() -> Conf {
     Conf {
         window_title: "Aphids and Ladybugs".to_string(),
@@ -331,6 +520,8 @@ fn window_conf() -> Conf {
 #[macroquad::main(window_conf)]
 async fn main() {
     let mut app = SimulationApp::new(DEFAULT_SEED);
+    let mut static_layers = StaticGuiLayers::new();
+    let mut board_layer = BoardLayerCache::new();
 
     loop {
         if is_key_pressed(KeyCode::Escape) {
@@ -340,12 +531,13 @@ async fn main() {
         handle_input(&mut app);
         tick_simulation(&mut app);
 
-        draw_background();
-        draw_title(&app);
-
         let layout = calculate_layout(&app.board);
         let hovered = hovered_cell(layout);
         handle_board_edit(&mut app, hovered);
+
+        static_layers.draw(layout);
+        draw_title_status(&app);
+        board_layer.draw(&app, layout);
         draw_board(&app, layout, hovered);
         draw_history_graph(&app, layout);
         draw_panel(&mut app, layout);
@@ -566,7 +758,7 @@ fn draw_background() {
     );
 }
 
-fn draw_title(app: &SimulationApp) {
+fn draw_title_heading() {
     draw_text_ex(
         "Aphids & Ladybugs",
         32.0,
@@ -577,8 +769,11 @@ fn draw_title(app: &SimulationApp) {
             ..Default::default()
         },
     );
+}
+
+fn draw_title_status(app: &SimulationApp) {
     draw_text_ex(
-        &format!(
+        format!(
             "Seed {}  |  Turn {}  |  {}",
             app.seed,
             app.turn,
@@ -600,7 +795,7 @@ fn draw_title(app: &SimulationApp) {
     );
 }
 
-fn draw_board(app: &SimulationApp, layout: BoardLayout, hovered: Option<(usize, usize)>) {
+fn draw_board_frame(layout: BoardLayout) {
     draw_round_rect(
         layout.x - 14.0,
         layout.y - 14.0,
@@ -617,7 +812,39 @@ fn draw_board(app: &SimulationApp, layout: BoardLayout, hovered: Option<(usize, 
         20.0,
         color(31, 42, 38, 225),
     );
+}
 
+fn draw_board_background_layer(app: &SimulationApp, layout: BoardLayout) {
+    let gap = (layout.cell * 0.08).clamp(2.0, 7.0);
+    let inner = layout.cell - gap;
+
+    for row in 0..layout.rows {
+        for col in 0..layout.cols {
+            let Some(snapshot) = app.board.cell_snapshot(row, col) else {
+                continue;
+            };
+            let x = col as f32 * layout.cell + gap * 0.5;
+            let y = row as f32 * layout.cell + gap * 0.5;
+            draw_cell_background(x, y, inner, row, col, snapshot);
+        }
+    }
+}
+
+fn draw_board(app: &SimulationApp, layout: BoardLayout, hovered: Option<(usize, usize)>) {
+    if app.is_animating() {
+        draw_animated_creatures(app, layout);
+    } else {
+        draw_board_creatures(app, layout);
+    }
+
+    draw_cell_hover(layout, hovered);
+
+    if app.editing_enabled {
+        draw_edit_overlay(app, layout, hovered);
+    }
+}
+
+fn draw_board_creatures(app: &SimulationApp, layout: BoardLayout) {
     let gap = (layout.cell * 0.08).clamp(2.0, 7.0);
     let inner = layout.cell - gap;
 
@@ -628,30 +855,42 @@ fn draw_board(app: &SimulationApp, layout: BoardLayout, hovered: Option<(usize, 
             };
             let x = layout.x + col as f32 * layout.cell + gap * 0.5;
             let y = layout.y + row as f32 * layout.cell + gap * 0.5;
-            if app.is_animating() {
-                draw_cell_background(x, y, inner, row, col, snapshot, hovered == Some((row, col)));
-            } else {
-                draw_cell(x, y, inner, row, col, snapshot, hovered == Some((row, col)));
-            }
+            draw_creatures(x, y, inner, snapshot.aphids, snapshot.ladybugs);
         }
-    }
-
-    if app.is_animating() {
-        draw_animated_creatures(app, layout);
-    }
-
-    if app.editing_enabled {
-        draw_edit_overlay(app, layout, hovered);
     }
 }
 
-fn draw_history_graph(app: &SimulationApp, layout: BoardLayout) {
-    let rect = Rect::new(
+fn draw_cell_hover(layout: BoardLayout, hovered: Option<(usize, usize)>) {
+    let Some((row, col)) = hovered else {
+        return;
+    };
+
+    let gap = (layout.cell * 0.08).clamp(2.0, 7.0);
+    let inner = layout.cell - gap;
+    let x = layout.x + col as f32 * layout.cell + gap * 0.5;
+    let y = layout.y + row as f32 * layout.cell + gap * 0.5;
+    draw_round_rect_lines(
+        x - 1.5,
+        y - 1.5,
+        inner + 3.0,
+        inner + 3.0,
+        inner * 0.12 + 1.5,
+        3.0,
+        color(245, 228, 168, 230),
+    );
+}
+
+fn history_graph_rect(layout: BoardLayout) -> Rect {
+    Rect::new(
         layout.graph_x,
         layout.graph_y,
         layout.graph_w,
         layout.graph_h,
-    );
+    )
+}
+
+fn draw_history_graph_frame(layout: BoardLayout) {
+    let rect = history_graph_rect(layout);
     draw_round_rect(rect.x, rect.y, rect.w, rect.h, 18.0, color(15, 22, 25, 218));
     draw_round_rect_lines(
         rect.x + 1.0,
@@ -673,11 +912,14 @@ fn draw_history_graph(app: &SimulationApp, layout: BoardLayout) {
             ..Default::default()
         },
     );
+}
 
-    let Some(first) = app.history.first() else {
+fn draw_history_graph(app: &SimulationApp, layout: BoardLayout) {
+    let rect = history_graph_rect(layout);
+    let Some(first) = app.history.front() else {
         return;
     };
-    let Some(last) = app.history.last() else {
+    let Some(last) = app.history.back() else {
         return;
     };
     let max_population = app
@@ -723,7 +965,7 @@ fn draw_history_grid(plot: Rect, max_population: f32) {
     }
 
     draw_text_ex(
-        &format!("{}", max_population as usize),
+        format!("{}", max_population as usize),
         plot.x + plot.w - 24.0,
         plot.y - 5.0,
         TextParams {
@@ -745,7 +987,7 @@ fn draw_history_grid(plot: Rect, max_population: f32) {
 }
 
 fn draw_history_series(
-    history: &[HistoryPoint],
+    history: &VecDeque<HistoryPoint>,
     plot: Rect,
     max_population: f32,
     value: fn(&HistoryPoint) -> usize,
@@ -774,7 +1016,7 @@ fn draw_history_series(
         );
     }
 
-    let latest = history.last().expect("history is not empty");
+    let latest = history.back().expect("history is not empty");
     draw_circle(
         history_x(history.len() - 1, history.len(), plot),
         history_y(value(latest), plot, max_population),
@@ -816,7 +1058,7 @@ fn draw_history_legend(
         &format!("Ladybugs {}", app.summary.ladybugs),
     );
     draw_text_ex(
-        &format!("Turns {first_turn}-{last_turn} | max {max_population}"),
+        format!("Turns {first_turn}-{last_turn} | max {max_population}"),
         rect.x + rect.w - 190.0,
         y + 4.0,
         TextParams {
@@ -841,28 +1083,7 @@ fn draw_legend_item(x: f32, y: f32, item_color: Color, label: &str) {
     );
 }
 
-fn draw_cell(
-    x: f32,
-    y: f32,
-    size: f32,
-    row: usize,
-    col: usize,
-    snapshot: CellSnapshot,
-    hovered: bool,
-) {
-    draw_cell_background(x, y, size, row, col, snapshot, hovered);
-    draw_creatures(x, y, size, snapshot.aphids, snapshot.ladybugs);
-}
-
-fn draw_cell_background(
-    x: f32,
-    y: f32,
-    size: f32,
-    row: usize,
-    col: usize,
-    snapshot: CellSnapshot,
-    hovered: bool,
-) {
+fn draw_cell_background(x: f32, y: f32, size: f32, row: usize, col: usize, snapshot: CellSnapshot) {
     let food = (snapshot.food as f32 / 9.0).clamp(0.0, 1.0);
     let base = mix(color(31, 33, 34, 255), color(76, 104, 58, 255), food);
     let rim = mix(color(48, 53, 50, 255), color(135, 153, 89, 255), food);
@@ -891,18 +1112,6 @@ fn draw_cell_background(
     }
 
     draw_food_speckles(x, y, size, row, col, snapshot.food);
-
-    if hovered {
-        draw_round_rect_lines(
-            x - 1.5,
-            y - 1.5,
-            size + 3.0,
-            size + 3.0,
-            size * 0.12 + 1.5,
-            3.0,
-            color(245, 228, 168, 230),
-        );
-    }
 }
 
 fn draw_animated_creatures(app: &SimulationApp, layout: BoardLayout) {
@@ -1179,7 +1388,7 @@ fn draw_count_badge(cx: f32, cy: f32, count: usize, accent: Color) {
     );
 }
 
-fn draw_panel(app: &mut SimulationApp, layout: BoardLayout) {
+fn draw_panel_frame(layout: BoardLayout) {
     draw_round_rect(
         layout.panel_x,
         layout.panel_y,
@@ -1197,7 +1406,9 @@ fn draw_panel(app: &mut SimulationApp, layout: BoardLayout) {
         1.0,
         color(116, 137, 119, 115),
     );
+}
 
+fn draw_panel(app: &mut SimulationApp, layout: BoardLayout) {
     let content_x = layout.panel_x + 24.0;
     let content_w = layout.panel_w - 48.0;
     let mut y = layout.panel_y + 40.0;
@@ -1643,7 +1854,7 @@ fn draw_probability_slider(
     );
 
     draw_text_ex(
-        &format!("{:.2}", *value),
+        format!("{:.2}", *value),
         x + width - 38.0,
         y + 16.0,
         TextParams {
@@ -1685,7 +1896,7 @@ fn draw_hover_tooltip(app: &SimulationApp, hovered: Option<(usize, usize)>) {
         color(209, 194, 142, 125),
     );
     draw_text_ex(
-        &format!("Cell ({row}, {col})"),
+        format!("Cell ({row}, {col})"),
         x + 16.0,
         y + 26.0,
         TextParams {
@@ -1695,7 +1906,7 @@ fn draw_hover_tooltip(app: &SimulationApp, hovered: Option<(usize, usize)>) {
         },
     );
     draw_text_ex(
-        &format!(
+        format!(
             "Food {}  |  Aphids {}  |  Ladybugs {}",
             snapshot.food, snapshot.aphids, snapshot.ladybugs
         ),
