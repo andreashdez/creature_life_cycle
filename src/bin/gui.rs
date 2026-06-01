@@ -40,6 +40,7 @@ struct AnimatedCreature {
 struct CreatureRenderSlot {
     offset: Vec2,
     index: usize,
+    scale: f32,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -333,7 +334,10 @@ fn build_movement_animations(
         } else {
             (creature.location, to_slot, true)
         };
-        changed |= born || from != creature.location || from_slot.offset != to_slot.offset;
+        changed |= born
+            || from != creature.location
+            || from_slot.offset != to_slot.offset
+            || from_slot.scale != to_slot.scale;
         animations.push(AnimatedCreature {
             kind: creature.kind,
             from,
@@ -369,7 +373,12 @@ fn creature_render_slot(
     CreatureRenderSlot {
         offset: vec2(x, y),
         index,
+        scale: creature_render_scale(counts.aphids, counts.ladybugs),
     }
+}
+
+fn creature_render_scale(aphids: usize, ladybugs: usize) -> f32 {
+    if aphids + ladybugs > 5 { 0.82 } else { 1.0 }
 }
 
 fn snapshot_cell_counts(
@@ -1178,7 +1187,9 @@ fn draw_cell_background(x: f32, y: f32, size: f32, row: usize, col: usize, snaps
 
 fn draw_animated_creatures(app: &SimulationApp, layout: BoardLayout) {
     let progress = smooth_progress(app.animation_progress());
-    let base_radius = (layout.cell * 0.125).clamp(4.0, 12.0);
+    let gap = (layout.cell * 0.08).clamp(2.0, 7.0);
+    let inner = layout.cell - gap;
+    let base_radius = creature_radius(inner);
 
     for creature in &app.animations {
         let from = creature_position(layout, creature.from, creature.from_slot.offset);
@@ -1196,11 +1207,10 @@ fn draw_animated_creatures(app: &SimulationApp, layout: BoardLayout) {
             creature.from_slot.index
         };
         let scale = if creature.born {
-            progress
-        } else if moving {
-            1.0 + (std::f32::consts::PI * progress).sin() * 0.08
+            creature.to_slot.scale * progress
         } else {
-            1.0
+            creature.from_slot.scale
+                + (creature.to_slot.scale - creature.from_slot.scale) * progress
         };
 
         if moving {
@@ -1293,17 +1303,16 @@ fn draw_food_speckles(x: f32, y: f32, size: f32, row: usize, col: usize, food: i
 }
 
 fn draw_creatures(x: f32, y: f32, size: f32, aphids: usize, ladybugs: usize) {
-    let radius = (size * 0.125).clamp(4.0, 12.0);
+    let radius = creature_radius(size);
+    let scale = creature_render_scale(aphids, ladybugs);
     let aphid_slots = creature_slots(aphids, ladybugs, true);
     let ladybug_slots = creature_slots(ladybugs, aphids, false);
 
     for (index, &(dx, dy)) in aphid_slots.iter().enumerate().take(aphids.min(4)) {
-        let scale = if aphids + ladybugs > 5 { 0.82 } else { 1.0 };
         draw_aphid(x + size * dx, y + size * dy, radius * scale, index);
     }
 
     for (index, &(dx, dy)) in ladybug_slots.iter().enumerate().take(ladybugs.min(4)) {
-        let scale = if aphids + ladybugs > 5 { 0.82 } else { 1.0 };
         draw_ladybug(x + size * dx, y + size * dy, radius * scale, index);
     }
 
@@ -1324,6 +1333,10 @@ fn draw_creatures(x: f32, y: f32, size: f32, aphids: usize, ladybugs: usize) {
             color(217, 66, 52, 255),
         );
     }
+}
+
+fn creature_radius(size: f32) -> f32 {
+    (size * 0.125).clamp(4.0, 12.0)
 }
 
 fn creature_slots(primary: usize, secondary: usize, aphid: bool) -> &'static [(f32, f32); 5] {
@@ -2145,5 +2158,37 @@ mod tests {
             .expect("aphid animation exists");
         assert_eq!(aphid.from_slot.offset, vec2(0.34, 0.36));
         assert_eq!(aphid.to_slot.offset, vec2(0.50, 0.50));
+        assert_eq!(aphid.from_slot.scale, 1.0);
+        assert_eq!(aphid.to_slot.scale, 1.0);
+    }
+
+    #[test]
+    fn movement_animations_match_static_crowded_scale() {
+        let before = [
+            snapshot(0, CreatureSnapshotKind::Aphid, 0, 0, 0),
+            snapshot(1, CreatureSnapshotKind::Aphid, 0, 0, 1),
+            snapshot(2, CreatureSnapshotKind::Aphid, 0, 0, 2),
+            snapshot(3, CreatureSnapshotKind::Aphid, 0, 0, 3),
+            snapshot(4, CreatureSnapshotKind::Aphid, 0, 0, 4),
+            snapshot(5, CreatureSnapshotKind::Aphid, 0, 0, 5),
+        ];
+        let after = [
+            snapshot(0, CreatureSnapshotKind::Aphid, 0, 1, 0),
+            snapshot(1, CreatureSnapshotKind::Aphid, 0, 0, 0),
+            snapshot(2, CreatureSnapshotKind::Aphid, 0, 0, 1),
+            snapshot(3, CreatureSnapshotKind::Aphid, 0, 0, 2),
+            snapshot(4, CreatureSnapshotKind::Aphid, 0, 0, 3),
+            snapshot(5, CreatureSnapshotKind::Aphid, 0, 0, 4),
+        ];
+        let mut animations = Vec::new();
+
+        assert!(build_movement_animations(&before, &after, &mut animations));
+
+        let moving = animations
+            .iter()
+            .find(|creature| creature.from != creature.to)
+            .expect("moving animation exists");
+        assert!((moving.from_slot.scale - 0.82).abs() < f32::EPSILON);
+        assert_eq!(moving.to_slot.scale, 1.0);
     }
 }
