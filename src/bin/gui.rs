@@ -4,7 +4,7 @@ use creature_life_cycle::{
     save_configured_board,
 };
 use macroquad::prelude::*;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 
 const DEFAULT_SEED: u64 = 42;
 const HISTORY_LIMIT: usize = 240;
@@ -28,11 +28,24 @@ impl HistoryPoint {
 
 #[derive(Clone, Copy)]
 struct AnimatedCreature {
-    id: usize,
     kind: CreatureSnapshotKind,
     from: Coordinates,
     to: Coordinates,
+    from_slot: CreatureRenderSlot,
+    to_slot: CreatureRenderSlot,
     born: bool,
+}
+
+#[derive(Clone, Copy)]
+struct CreatureRenderSlot {
+    offset: Vec2,
+    index: usize,
+}
+
+#[derive(Clone, Copy, Default)]
+struct SnapshotCellCounts {
+    aphids: usize,
+    ladybugs: usize,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -292,6 +305,8 @@ fn build_movement_animations(
 ) -> bool {
     animations.clear();
     animations.reserve(after.len());
+    let before_counts = snapshot_cell_counts(before);
+    let after_counts = snapshot_cell_counts(after);
 
     let mut changed = false;
     let mut before_index = 0;
@@ -308,14 +323,23 @@ fn build_movement_animations(
         } else {
             None
         };
-        let from = previous.map_or(creature.location, |snapshot| snapshot.location);
-        let born = previous.is_none();
-        changed |= born || from != creature.location;
+        let to_slot = creature_render_slot(*creature, &after_counts);
+        let (from, from_slot, born) = if let Some(snapshot) = previous {
+            (
+                snapshot.location,
+                creature_render_slot(snapshot, &before_counts),
+                false,
+            )
+        } else {
+            (creature.location, to_slot, true)
+        };
+        changed |= born || from != creature.location || from_slot.offset != to_slot.offset;
         animations.push(AnimatedCreature {
-            id: creature.id,
             kind: creature.kind,
             from,
             to: creature.location,
+            from_slot,
+            to_slot,
             born,
         });
     }
@@ -325,6 +349,44 @@ fn build_movement_animations(
     }
 
     changed
+}
+
+fn creature_render_slot(
+    creature: CreatureSnapshot,
+    counts: &HashMap<Coordinates, SnapshotCellCounts>,
+) -> CreatureRenderSlot {
+    let counts = counts.get(&creature.location).copied().unwrap_or_default();
+    let aphid = creature.kind == CreatureSnapshotKind::Aphid;
+    let (primary, secondary) = if aphid {
+        (counts.aphids, counts.ladybugs)
+    } else {
+        (counts.ladybugs, counts.aphids)
+    };
+    let slots = creature_slots(primary, secondary, aphid);
+    let index = creature.cell_slot.min(slots.len() - 1);
+    let (x, y) = slots[index];
+
+    CreatureRenderSlot {
+        offset: vec2(x, y),
+        index,
+    }
+}
+
+fn snapshot_cell_counts(
+    snapshots: &[CreatureSnapshot],
+) -> HashMap<Coordinates, SnapshotCellCounts> {
+    let mut counts: HashMap<Coordinates, SnapshotCellCounts> = HashMap::new();
+
+    for snapshot in snapshots {
+        let count = counts.entry(snapshot.location).or_default();
+
+        match snapshot.kind {
+            CreatureSnapshotKind::Aphid => count.aphids += 1,
+            CreatureSnapshotKind::Ladybug => count.ladybugs += 1,
+        }
+    }
+
+    counts
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -1119,13 +1181,19 @@ fn draw_animated_creatures(app: &SimulationApp, layout: BoardLayout) {
     let base_radius = (layout.cell * 0.125).clamp(4.0, 12.0);
 
     for creature in &app.animations {
-        let from = animated_creature_position(layout, creature.from, creature.id, creature.kind);
-        let to = animated_creature_position(layout, creature.to, creature.id, creature.kind);
-        let moving = creature.from != creature.to;
+        let from = creature_position(layout, creature.from, creature.from_slot.offset);
+        let to = creature_position(layout, creature.to, creature.to_slot.offset);
+        let moving =
+            creature.from != creature.to || creature.from_slot.offset != creature.to_slot.offset;
         let position = if creature.born {
             to
         } else {
             from + (to - from) * progress
+        };
+        let draw_index = if creature.born {
+            creature.to_slot.index
+        } else {
+            creature.from_slot.index
         };
         let scale = if creature.born {
             progress
@@ -1151,43 +1219,25 @@ fn draw_animated_creatures(app: &SimulationApp, layout: BoardLayout) {
                 position.x,
                 position.y,
                 (base_radius * scale).max(1.0),
-                creature.id,
+                draw_index,
             ),
             CreatureSnapshotKind::Ladybug => draw_ladybug(
                 position.x,
                 position.y,
                 (base_radius * scale).max(1.0),
-                creature.id,
+                draw_index,
             ),
         }
     }
 }
 
-fn animated_creature_position(
-    layout: BoardLayout,
-    location: Coordinates,
-    id: usize,
-    kind: CreatureSnapshotKind,
-) -> Vec2 {
+fn creature_position(layout: BoardLayout, location: Coordinates, offset: Vec2) -> Vec2 {
     let gap = (layout.cell * 0.08).clamp(2.0, 7.0);
     let inner = layout.cell - gap;
     let origin_x = layout.x + location.y as f32 * layout.cell + gap * 0.5;
     let origin_y = layout.y + location.x as f32 * layout.cell + gap * 0.5;
-    let offset = animated_creature_offset(id, kind);
 
     vec2(origin_x + inner * offset.x, origin_y + inner * offset.y)
-}
-
-fn animated_creature_offset(id: usize, kind: CreatureSnapshotKind) -> Vec2 {
-    let kind_offset = match kind {
-        CreatureSnapshotKind::Aphid => 17,
-        CreatureSnapshotKind::Ladybug => 53,
-    };
-    let hash = id.wrapping_mul(97).wrapping_add(kind_offset);
-    let dx = (hash % 19) as f32 / 18.0 - 0.5;
-    let dy = ((hash / 19) % 19) as f32 / 18.0 - 0.5;
-
-    vec2(0.5 + dx * 0.42, 0.5 + dy * 0.42)
 }
 
 fn smooth_progress(progress: f32) -> f32 {
@@ -2054,4 +2104,46 @@ fn mix(from: Color, to: Color, amount: f32) -> Color {
         from.b + (to.b - from.b) * t,
         from.a + (to.a - from.a) * t,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn snapshot(
+        id: usize,
+        kind: CreatureSnapshotKind,
+        x: usize,
+        y: usize,
+        cell_slot: usize,
+    ) -> CreatureSnapshot {
+        CreatureSnapshot {
+            id,
+            kind,
+            location: Coordinates { x, y },
+            cell_slot,
+        }
+    }
+
+    #[test]
+    fn movement_animations_start_from_static_creature_slots() {
+        let before = [
+            snapshot(0, CreatureSnapshotKind::Aphid, 0, 0, 0),
+            snapshot(1, CreatureSnapshotKind::Ladybug, 0, 0, 0),
+        ];
+        let after = [
+            snapshot(0, CreatureSnapshotKind::Aphid, 0, 1, 0),
+            snapshot(1, CreatureSnapshotKind::Ladybug, 0, 0, 0),
+        ];
+        let mut animations = Vec::new();
+
+        assert!(build_movement_animations(&before, &after, &mut animations));
+
+        let aphid = animations
+            .iter()
+            .find(|creature| creature.kind == CreatureSnapshotKind::Aphid)
+            .expect("aphid animation exists");
+        assert_eq!(aphid.from_slot.offset, vec2(0.34, 0.36));
+        assert_eq!(aphid.to_slot.offset, vec2(0.50, 0.50));
+    }
 }

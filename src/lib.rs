@@ -18,7 +18,7 @@ const MAX_CELL_FOOD: i32 = 9;
 const DEFAULT_FOOD_REGEN_PROBABILITY: f64 = 0.1;
 
 /// Zero-based board coordinate: `x` is the row and `y` is the column.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Coordinates {
     pub x: usize,
     pub y: usize,
@@ -244,6 +244,8 @@ pub struct CreatureSnapshot {
     pub kind: CreatureSnapshotKind,
     /// Current board coordinate.
     pub location: Coordinates,
+    /// Index inside the creature's same-kind occupant list for its current cell.
+    pub cell_slot: usize,
 }
 
 /// Changes and totals produced by one completed turn.
@@ -478,6 +480,7 @@ impl Board {
                         CreatureKind::Ladybug => CreatureSnapshotKind::Ladybug,
                     },
                     location: creature.location(),
+                    cell_slot: self.cell_slots[id],
                 });
             }
         }
