@@ -1,13 +1,492 @@
-use creature_life_cycle::{
-    AphidParams, Board, BoardSummary, CellSnapshot, Coordinates, CreatureSnapshot,
-    CreatureSnapshotKind, FoodParams, LadybugParams, Random, load_configured_board,
-    save_configured_board,
+//! The graphical simulation: the board, a `bevy_feathers` settings sidebar, a
+//! population history chart, the food overlay and cell editing.
+//!
+//! Run with: `cargo run --bin gui`
+//!
+//! The simulation itself is untouched: `Board` lives in a resource and every
+//! turn still comes from `Board::refresh`. Much of this is a port of the
+//! earlier macroquad GUI, removed in favour of this one; `docs/bevy-board-sketch.md`
+//! records the design and the trade-offs, and comments referring to it explain
+//! where a constant or layout came from.
+
+use bevy::asset::{RenderAssetUsages, embedded_asset, load_embedded_asset};
+use bevy::camera::visibility::RenderLayers;
+use bevy::camera::{ScalingMode, Viewport};
+use bevy::ecs::system::SystemParam;
+use bevy::feathers::constants::fonts;
+use bevy::feathers::controls::{
+    ButtonVariant, FeathersButton, FeathersCheckbox, FeathersRadio, FeathersScrollbar,
+    FeathersSlider, FeathersTextInput, FeathersTextInputContainer,
 };
-use macroquad::prelude::*;
+use bevy::feathers::dark_theme::create_dark_theme;
+use bevy::feathers::display::{label, label_small};
+use bevy::feathers::theme::{ThemeBackgroundColor, ThemedText, UiTheme};
+use bevy::feathers::{FeathersPlugins, tokens};
+use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll, MouseScrollUnit};
+use bevy::input_focus::InputFocus;
+use bevy::mesh::{Indices, PrimitiveTopology};
+use bevy::prelude::*;
+use bevy::render::render_resource::AsBindGroup;
+use bevy::render::view::window::screenshot::{Screenshot, save_to_disk};
+use bevy::shader::ShaderRef;
+use bevy::sprite_render::{AlphaMode2d, Material2d, Material2dPlugin};
+use bevy::text::{EditableText, EditableTextFilter};
+use bevy::ui::Checked;
+use bevy::ui_widgets::{Activate, RadioGroup, SliderPrecision, SliderValue, ValueChange};
+use creature_life_cycle::{
+    AphidParams, Board, Coordinates, CreatureSnapshot, CreatureSnapshotKind, FoodParams,
+    LadybugParams, Random, TurnStats, load_configured_board, save_configured_board,
+};
 use std::collections::{HashMap, VecDeque};
 
+/// Width of the parameters panel, in logical pixels.
+const PANEL_WIDTH: f32 = 300.0;
+const TOOLBAR_HEIGHT: f32 = 88.0;
+const PANEL_HEADER: f32 = 122.0;
+/// Offset of the cell popup from the pointer, and the margin it keeps from the
+/// window edges, both as `draw_hover_tooltip` in the previous macroquad GUI.
+const POPUP_OFFSET: f32 = 18.0;
+const POPUP_MARGIN: f32 = 12.0;
+
+/// World-space size of one board cell, including the gap.
+const CELL: f32 = 32.0;
+/// Nominal creature body radius as a fraction of the inner cell.
+const CREATURE_RADIUS: f32 = 0.16;
+/// Includes the sprites' transparent margin and appendages. The painted
+/// silhouette stays inside the edit ring; crowded cells use the usual scale.
+const CREATURE_SPRITE_SIZE: f32 = (CELL - GAP) * CREATURE_RADIUS * 2.75;
+// Count badges, from `draw_count_badge` in the previous macroquad GUI: a small disc on a
+// dropped shadow with the count in dark text, sized relative to the cell.
+const BADGE_RADIUS: f32 = 0.157;
+const BADGE_FONT: f32 = 0.23;
+const BADGE_SHADOW_OFFSET: f32 = 0.014;
+/// Aphid and ladybug badge corners, matching the mixed-cell creature layout.
+const BADGE_SLOTS: [Vec2; 2] = [Vec2::new(0.22, 0.22), Vec2::new(0.78, 0.78)];
+/// Badge counts are rasterised in steps of this many pixels. Every distinct
+/// size builds its own font atlas, so zooming should not mint a new one per
+/// frame.
+const BADGE_RASTER_STEP: f32 = 4.0;
+const BADGE_RASTER_RANGE: (f32, f32) = (8.0, 96.0);
+/// A badge is only worth drawing once the cell is this many logical pixels
+/// across, as the `size >= 26.0` gate in the previous macroquad GUI.
+const BADGE_MIN_CELL_PIXELS: f32 = 26.0;
+/// Macroquad's five-percent gutter and twelve-percent corner radius.
+const GAP: f32 = CELL * 0.05;
+const CELL_CORNER: f32 = 0.12;
 const DEFAULT_SEED: u64 = 42;
+const STEP_SECONDS: f32 = 0.45;
+/// How long a message stays on the toolbar, matching `SaveStatus::ttl` in the
+/// macroquad GUI.
+const STATUS_SECONDS: f32 = 4.0;
+/// Digits in `u64::MAX`, so the seed field cannot hold a number that could never
+/// parse.
+const SEED_DIGITS: usize = 20;
+
+// Colours lifted from `draw_cell_background` and the palette in interface.rs.
+const EMPTY_CELL: Color = Color::srgb_u8(31, 33, 34);
+const FED_CELL: Color = Color::srgb_u8(76, 104, 58);
+const EMPTY_CELL_RIM: Color = Color::srgba_u8(48, 53, 50, 90);
+const FED_CELL_RIM: Color = Color::srgba_u8(135, 153, 89, 65);
+const HOVER: Color = Color::srgb(0.85, 0.87, 0.70);
+/// Starting life for hand-placed creatures: the same values `src/lib.rs` gives
+/// creatures loaded from the config, and that the macroquad editor uses.
+const EDIT_APHID_LIFE: i32 = 10;
+const EDIT_LADYBUG_LIFE: i32 = 15;
+/// How far the pointer may move between press and release and still count as a
+/// click (an edit) rather than a drag (a pan), in logical pixels.
+const CLICK_SLOP: f32 = 4.0;
+// Edit preview outline per tool, from `draw_edit_overlay` in the previous macroquad GUI.
+const BADGE_APHID: Color = Color::srgb_u8(93, 188, 85);
+// A step lighter than the macroquad badge red (#d94234). The count sits inside
+// the fill, and dark ink on that red measures 4.07:1, under WCAG's 4.5:1 for
+// normal text, with white no better at 4.39:1. Holding the hue and chroma and
+// lifting OKLCH lightness to 0.63 gives 4.60:1.
+const BADGE_LADYBUG: Color = Color::srgb_u8(228, 76, 61);
+/// Dark ink, chosen over white by the fills' luminance: 7.48:1 on the aphid
+/// badge and 4.60:1 on the ladybug badge.
+const BADGE_TEXT: Color = Color::srgb_u8(18, 25, 20);
+const BADGE_SHADOW: Color = Color::srgba_u8(0, 0, 0, 115);
+const EDIT_APHID: Color = Color::srgba_u8(111, 219, 91, 175);
+const EDIT_LADYBUG: Color = Color::srgba_u8(231, 78, 61, 175);
+/// Food cap per cell, mirroring `MAX_CELL_FOOD` in `src/lib.rs`.
+const MAX_FOOD: i32 = 9;
+// Food overlay marks, lifted from `draw_cell_background` and
+// `draw_food_speckles` in the previous macroquad GUI.
+const FOOD_BAR: Color = Color::srgba_u8(194, 184, 83, 130);
+const FOOD_SPECKLE: Color = Color::srgba_u8(219, 205, 116, 95);
+const TRAIL: Color = Color::srgba(0.96, 0.90, 0.69, 0.31);
+
+/// Height of the population history strip under the board, in logical pixels.
+const CHART_HEIGHT: f32 = 220.0;
+/// Turns kept in the history, matching `HISTORY_LIMIT` in the previous macroquad GUI.
 const HISTORY_LIMIT: usize = 240;
+// Plot insets inside the strip: tick gutter left, end labels right, title and
+// legend on top, x ticks below.
+const PLOT_LEFT: f32 = 52.0;
+const PLOT_RIGHT: f32 = 96.0;
+const PLOT_TOP: f32 = 44.0;
+const PLOT_BOTTOM: f32 = 34.0;
+const TOOLTIP_WIDTH: f32 = 150.0;
+
+// Chart palette. The series are the board's aphid and ladybug hues, stepped
+// down into the dark-surface lightness band (OKLCH L 0.48-0.67, hue held)
+// because the board's own steps fail that band on this surface. Checked with
+// the dataviz palette validator against `CHART_SURFACE`: every check passes,
+// worst deuteranopia delta E 10.0, normal-vision delta E 28.6. The board keeps
+// its lighter steps, which are tuned for its green cells rather than this gray.
+const CHART_SURFACE: Color = Color::srgb_u8(0x1f, 0x1f, 0x24); // feathers WINDOW_BG
+const CHART_APHID: Color = Color::srgb_u8(0x5b, 0xac, 0x43);
+const CHART_LADYBUG: Color = Color::srgb_u8(0xc2, 0x44, 0x2f);
+const CHART_SERIES: [Color; 2] = [CHART_APHID, CHART_LADYBUG];
+const CHART_SERIES_NAMES: [&str; 2] = ["aphids", "ladybugs"];
+// Text wears ink, never series colour. Contrast on the surface: primary 14.0,
+// secondary 7.66 (feathers TEXT_MAIN), muted 4.64. Feathers' own TEXT_DIM is
+// 4.34:1, just under WCAG's 4.5:1 for normal text, hence the lighter muted.
+const INK_PRIMARY: Color = Color::srgb_u8(0xed, 0xed, 0xee);
+const INK_SECONDARY: Color = Color::srgb_u8(0xb1, 0xb1, 0xb2);
+const INK_MUTED: Color = Color::srgb_u8(0x88, 0x88, 0x8b);
+const GRIDLINE: Color = Color::srgb_u8(0x36, 0x37, 0x3b); // feathers GRAY_2
+const BASELINE: Color = Color::srgb_u8(0x46, 0x47, 0x4d); // feathers GRAY_3
+const TOOLTIP_BG: Color = Color::srgb_u8(0x2a, 0x2a, 0x2e); // feathers GRAY_1
+
+/// The screenshot probe can also verify the smallest supported window.
+fn review_window_size() -> (u32, u32) {
+    if std::env::var_os("CLC_SCREENSHOT").is_some() && std::env::var_os("CLC_COMPACT").is_some() {
+        (900, 640)
+    } else {
+        (1200, 860)
+    }
+}
+
+fn main() {
+    App::new()
+        .add_plugins(DefaultPlugins.set(WindowPlugin {
+            primary_window: Some(Window {
+                title: "Aphids and Ladybugs — Bevy board prototype".into(),
+                // The cameras fit to the actual viewport, including HiDPI scaling.
+                resolution: review_window_size().into(),
+                resize_constraints: WindowResizeConstraints {
+                    min_width: 900.0,
+                    min_height: 640.0,
+                    ..default()
+                },
+                ..default()
+            }),
+            ..default()
+        }))
+        .add_plugins(board_render_assets)
+        .add_plugins(Material2dPlugin::<CellMaterial>::default())
+        .add_plugins(FeathersPlugins)
+        .insert_resource(UiTheme(create_dark_theme()))
+        // Gridlines and series need different widths, and gizmo width is set per
+        // group, so they are two groups. Both live on the chart's render layer.
+        .insert_gizmo_config(
+            ChartGridGizmos,
+            GizmoConfig {
+                render_layers: RenderLayers::layer(2),
+                line: GizmoLineConfig {
+                    width: 1.0,
+                    ..default()
+                },
+                ..default()
+            },
+        )
+        .insert_gizmo_config(
+            ChartSeriesGizmos,
+            GizmoConfig {
+                render_layers: RenderLayers::layer(2),
+                line: GizmoLineConfig {
+                    width: 2.0,
+                    joints: GizmoLineJoint::Round(8),
+                    ..default()
+                },
+                ..default()
+            },
+        )
+        .init_resource::<ChartSize>()
+        .init_resource::<ChartHover>()
+        .insert_resource(ClearColor(Color::srgb(0.086, 0.106, 0.102)))
+        .init_resource::<Hovered>()
+        .init_resource::<FoodOverlay>()
+        .init_resource::<EditMode>()
+        .init_resource::<BoardPointer>()
+        .add_message::<CellEdit>()
+        .add_message::<RunAction>()
+        .add_message::<Reseed>()
+        .init_resource::<ActiveTab>()
+        .init_resource::<StatusLine>()
+        .insert_resource(Seed(DEFAULT_SEED))
+        .insert_gizmo_config(
+            BoardEditGizmos,
+            GizmoConfig {
+                line: GizmoLineConfig {
+                    width: 2.0,
+                    ..default()
+                },
+                ..default()
+            },
+        )
+        .init_resource::<CreatureIndex>()
+        .init_resource::<BadgeIndex>()
+        .init_resource::<BadgeRaster>()
+        .insert_resource(Playing(true))
+        .insert_resource(Stats::default())
+        .insert_resource(StepTimer(Timer::from_seconds(
+            STEP_SECONDS,
+            TimerMode::Repeating,
+        )))
+        .insert_resource(Revision(0))
+        .add_systems(Startup, setup)
+        .add_systems(Update, screenshot_probe)
+        .add_systems(
+            Update,
+            (
+                // Input and simulation.
+                (
+                    keyboard_controls.run_if(not(resource_exists::<ScreenshotProbe>)),
+                    seed_field_keyboard.run_if(not(resource_exists::<ScreenshotProbe>)),
+                    // Before the playback handler, so a seed applied by key or
+                    // button restarts the run in the same frame it is asked for.
+                    apply_seed,
+                    apply_run_actions,
+                    sync_sidebar,
+                    layout_viewports,
+                    scroll_panel.run_if(not(resource_exists::<ScreenshotProbe>)),
+                    camera_controls.run_if(not(resource_exists::<ScreenshotProbe>)),
+                    hovered_cell,
+                    board_edit_input.run_if(not(resource_exists::<ScreenshotProbe>)),
+                    apply_cell_edits,
+                    exclusive_play_and_edit,
+                    sync_edit_controls,
+                    chart_hover,
+                    apply_params,
+                    // After the edits and parameters have landed, so a save
+                    // writes the board as it is on screen, and before the next
+                    // turn, so it is that board rather than the one after it.
+                    save_setup,
+                    expire_status,
+                    step_simulation,
+                )
+                    .chain(),
+                // Rendering, from the state settled above. Split in two because a
+                // system tuple holds at most 20 entries.
+                (
+                    recolor_cells,
+                    rebuild_food_overlay,
+                    sync_food_checkbox,
+                    init_seed_field,
+                    sync_creatures,
+                    sync_count_badges,
+                    scale_count_badges,
+                    advance_tweens,
+                    draw_hover,
+                    draw_chart_marks,
+                    update_chart_labels,
+                    update_hud,
+                    update_status_text,
+                    update_cell_popup,
+                    sync_scrollbar_visibility,
+                )
+                    .chain(),
+            )
+                .chain(),
+        )
+        .run();
+}
+
+// ---------------------------------------------------------------------------
+// Resources and components
+// ---------------------------------------------------------------------------
+
+#[derive(Resource)]
+struct BoardRes(Board);
+
+#[derive(Resource)]
+struct Rng(Random);
+
+#[derive(Resource)]
+struct StepTimer(Timer);
+
+#[derive(Resource)]
+struct Playing(bool);
+
+#[derive(Resource, Default)]
+struct Hovered(Option<(usize, usize)>);
+
+/// Whether the per-cell food bars and speckles are drawn. The panel checkbox
+/// and the `F` key both write this, and the checkbox is synced from it, so the
+/// two can never disagree.
+#[derive(Resource, Default)]
+struct FoodOverlay(bool);
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum EditTool {
+    #[default]
+    Aphid,
+    Ladybug,
+}
+
+/// Board editing state, as `editing_enabled` / `edit_tool` in the previous macroquad GUI.
+/// Keys and panel controls write it; the panel controls are synced from it.
+#[derive(Resource, Default)]
+struct EditMode {
+    enabled: bool,
+    tool: EditTool,
+}
+
+impl EditMode {
+    /// Picking a tool also starts editing, as `A` / `L` do in the previous macroquad GUI.
+    fn select(&mut self, tool: EditTool) {
+        self.tool = tool;
+        self.enabled = true;
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EditAction {
+    Add,
+    Remove,
+}
+
+/// One requested change to one cell. Pointer input sends these and
+/// `apply_cell_edits` applies them, so anything else that sends one (the
+/// screenshot probe) goes through exactly the same path.
+#[derive(Message, Clone, Copy, Debug)]
+struct CellEdit {
+    row: usize,
+    col: usize,
+    tool: EditTool,
+    action: EditAction,
+}
+
+/// Where a board press started and how far the pointer has wandered since, so a
+/// click can be told apart from a drag.
+#[derive(Resource, Default)]
+struct BoardPointer {
+    pressed_on_board: bool,
+    press_at: Vec2,
+    travelled: f32,
+}
+
+impl BoardPointer {
+    fn is_click(&self) -> bool {
+        self.pressed_on_board && self.travelled <= CLICK_SLOP
+    }
+}
+
+#[derive(Default, Reflect, GizmoConfigGroup)]
+struct BoardEditGizmos;
+
+#[derive(Component, Clone, Default, FromTemplate)]
+struct EditToggle;
+
+#[derive(Component, Clone, Copy, Default, FromTemplate)]
+struct EditToolRadio(EditTool);
+
+/// The panel's scrolling root.
+#[derive(Component, Clone, Default, FromTemplate)]
+struct PanelRoot;
+
+/// The size badge counts are currently rasterised at, and the entity scale that
+/// puts that raster back at the right world size.
+#[derive(Resource, Clone, Copy)]
+struct BadgeRaster {
+    font_size: f32,
+    scale: f32,
+}
+
+impl Default for BadgeRaster {
+    fn default() -> Self {
+        let (font_size, scale) = badge_text_raster(1.0);
+        Self { font_size, scale }
+    }
+}
+
+/// Badges currently on the board, keyed by cell and creature kind.
+#[derive(Resource, Default)]
+struct BadgeIndex(HashMap<(usize, usize, usize), Badge>);
+
+#[derive(Clone, Copy)]
+struct Badge {
+    root: Entity,
+    text: Entity,
+}
+
+#[derive(Component)]
+struct CountBadge;
+
+/// The single mesh holding every cell's food bar and speckles.
+#[derive(Component)]
+struct FoodLayer;
+
+/// Tags the panel's food-details checkbox.
+#[derive(Component, Clone, Default, FromTemplate)]
+struct FoodOverlayToggle;
+
+/// Maps `CreatureSnapshot::id` to the entity currently rendering it, which is
+/// what replaces the `previous_creatures` / `current_creatures` diffing in the
+/// macroquad GUI.
+#[derive(Resource, Default)]
+struct CreatureIndex(HashMap<usize, Entity>);
+
+/// Board changes that the renderers must react to. The macroquad GUI uses a
+/// `board_revision` counter for the same reason; relying on `ResMut` change
+/// detection instead would repaint on every parameter tweak, because editing a
+/// parameter also touches the board.
+#[derive(Resource)]
+struct Revision(u64);
+
+/// The nine tunable probabilities, owned by the panel and pushed into the board
+/// when they change. Indices match `probability`/`set_probability` in
+/// the previous macroquad GUI's parameter panel, so saved configs line up.
+#[derive(Resource, Clone, Copy)]
+struct Params {
+    aphid: AphidParams,
+    ladybug: LadybugParams,
+    food: FoodParams,
+}
+
+const PARAM_LABELS: [&str; 9] = [
+    "Movement",
+    "Kill probability",
+    "Accomplice bonus",
+    "Reproduction",
+    "Movement",
+    "Kill probability",
+    "Direction-change probability",
+    "Reproduction",
+    "Food regeneration",
+];
+
+impl Params {
+    fn get(&self, index: usize) -> f64 {
+        match index {
+            0 => self.aphid.prob_move,
+            1 => self.aphid.prob_kill,
+            2 => self.aphid.prob_accomplice,
+            3 => self.aphid.prob_procreate,
+            4 => self.ladybug.prob_move,
+            5 => self.ladybug.prob_kill,
+            6 => self.ladybug.prob_direction,
+            7 => self.ladybug.prob_procreate,
+            _ => self.food.prob_regenerate,
+        }
+    }
+
+    fn set(&mut self, index: usize, value: f64) {
+        match index {
+            0 => self.aphid.prob_move = value,
+            1 => self.aphid.prob_kill = value,
+            2 => self.aphid.prob_accomplice = value,
+            3 => self.aphid.prob_procreate = value,
+            4 => self.ladybug.prob_move = value,
+            5 => self.ladybug.prob_kill = value,
+            6 => self.ladybug.prob_direction = value,
+            7 => self.ladybug.prob_procreate = value,
+            _ => self.food.prob_regenerate = value,
+        }
+    }
+}
 
 #[derive(Clone, Copy)]
 struct HistoryPoint {
@@ -17,1329 +496,531 @@ struct HistoryPoint {
 }
 
 impl HistoryPoint {
-    fn new(turn: usize, summary: BoardSummary) -> Self {
-        Self {
-            turn,
-            aphids: summary.aphids,
-            ladybugs: summary.ladybugs,
+    fn series(&self, index: usize) -> usize {
+        if index == 0 {
+            self.aphids
+        } else {
+            self.ladybugs
         }
     }
 }
 
-#[derive(Clone, Copy)]
-struct AnimatedCreature {
-    kind: CreatureSnapshotKind,
-    from: Coordinates,
-    to: Coordinates,
-    from_slot: CreatureRenderSlot,
-    to_slot: CreatureRenderSlot,
-    born: bool,
+/// Rolling population history, capped like the previous macroquad GUI's.
+#[derive(Resource, Default)]
+struct History(VecDeque<HistoryPoint>);
+
+impl History {
+    fn record(&mut self, turn: usize, aphids: usize, ladybugs: usize) {
+        if self.0.len() == HISTORY_LIMIT {
+            self.0.pop_front();
+        }
+        self.0.push_back(HistoryPoint {
+            turn,
+            aphids,
+            ladybugs,
+        });
+    }
 }
 
-#[derive(Clone, Copy)]
-struct CreatureRenderSlot {
-    offset: Vec2,
-    index: usize,
-    scale: f32,
+/// Logical width of the chart strip, set by `layout_viewports`.
+#[derive(Resource, Default)]
+struct ChartSize(f32);
+
+/// History index under the crosshair, if the pointer is over the plot.
+#[derive(Resource, Default, PartialEq)]
+struct ChartHover(Option<usize>);
+
+#[derive(Default, Reflect, GizmoConfigGroup)]
+struct ChartGridGizmos;
+
+#[derive(Default, Reflect, GizmoConfigGroup)]
+struct ChartSeriesGizmos;
+
+// Cameras are told apart by marker, never by `.single()` over `Camera2d`:
+// with the board, chart, and UI cameras all being `Camera2d`, such a query
+// matches three entities and quietly returns an error.
+#[derive(Component)]
+struct BoardCamera;
+
+#[derive(Component)]
+struct ChartCamera;
+
+/// End-of-line marker (both the dot and its surface ring) for one series.
+#[derive(Component)]
+struct EndDot(usize);
+
+/// Every positioned piece of chart text, so one query can lay them all out.
+#[derive(Component, Clone, Copy)]
+enum ChartLabel {
+    YTick(usize),
+    XTick(usize),
+    EndLabel(usize),
+    EndValue(usize),
+    Tooltip,
+    TooltipTurn,
+    TooltipValue(usize),
 }
 
-#[derive(Clone, Copy, Default)]
-struct SnapshotCellCounts {
+#[derive(Resource, Default)]
+struct Stats {
+    turn: usize,
     aphids: usize,
     ladybugs: usize,
+    food: i32,
+    births: usize,
+    deaths: usize,
+    extinct: bool,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum EditTool {
-    Aphid,
-    Ladybug,
+#[derive(Component)]
+struct Cell {
+    row: usize,
+    col: usize,
 }
 
-struct SaveStatus {
+#[derive(Component)]
+struct Creature;
+
+#[derive(Component)]
+struct MoveTween {
+    from: Vec2,
+    to: Vec2,
+    from_scale: f32,
+    to_scale: f32,
+    timer: Timer,
+}
+
+impl MoveTween {
+    fn still(at: Vec2, scale: f32) -> Self {
+        Self {
+            from: at,
+            to: at,
+            from_scale: scale,
+            to_scale: scale,
+            timer: Timer::from_seconds(STEP_SECONDS, TimerMode::Once),
+        }
+    }
+
+    fn born(at: Vec2, scale: f32) -> Self {
+        Self {
+            from: at,
+            to: at,
+            from_scale: 0.0,
+            to_scale: scale,
+            timer: Timer::from_seconds(STEP_SECONDS, TimerMode::Once),
+        }
+    }
+}
+
+#[derive(Component, Clone, Default, FromTemplate)]
+struct HudText(usize);
+
+/// The board Reset returns to. Captured at launch and replaced by a save, so
+/// Reset follows the config file the way the previous macroquad GUI's reset does by
+/// reloading it from disk.
+#[derive(Resource)]
+struct StartingSetup(String);
+
+/// Seed the current run was started from. The board loaded at launch uses
+/// `DEFAULT_SEED`; the panel's seed field replaces it and restarts the run, as
+/// `set_seed` does in the previous macroquad GUI.
+#[derive(Resource, Clone, Copy)]
+struct Seed(u64);
+
+/// What the toolbar reports about the last thing the reader asked for, a save or
+/// a seed, cleared after a few seconds as the previous macroquad GUI's footer status is.
+#[derive(Resource, Default)]
+struct StatusLine {
     message: String,
     success: bool,
-    ttl: f32,
+    remaining: f32,
 }
 
-struct SimulationApp {
-    board: Board,
-    random: Random,
-    seed: u64,
-    aphid_params: AphidParams,
-    ladybug_params: LadybugParams,
-    food_params: FoodParams,
-    turn: usize,
-    summary: BoardSummary,
-    last_births: usize,
-    last_deaths: usize,
-    playing: bool,
-    extinct: bool,
-    speed: f32,
-    accumulator: f32,
-    history: VecDeque<HistoryPoint>,
-    animations: Vec<AnimatedCreature>,
-    previous_creatures: Vec<CreatureSnapshot>,
-    current_creatures: Vec<CreatureSnapshot>,
-    animation_elapsed: f32,
-    animation_duration: f32,
-    editing_enabled: bool,
-    edit_tool: EditTool,
-    save_status: Option<SaveStatus>,
-    board_revision: u64,
-}
-
-impl SimulationApp {
-    fn new(seed: u64) -> Self {
-        let mut random = Random::with_seed(seed);
-        let board = load_configured_board(&mut random);
-        let summary = board.summary();
-        let aphid_params = board.aphid_params();
-        let ladybug_params = board.ladybug_params();
-        let food_params = board.food_params();
-        let mut history = VecDeque::with_capacity(HISTORY_LIMIT);
-        history.push_back(HistoryPoint::new(0, summary));
-        Self {
-            board,
-            random,
-            seed,
-            aphid_params,
-            ladybug_params,
-            food_params,
-            turn: 0,
-            summary,
-            last_births: 0,
-            last_deaths: 0,
-            playing: true,
-            extinct: summary.is_extinct(),
-            speed: 1.0,
-            accumulator: 0.0,
-            history,
-            animations: Vec::new(),
-            previous_creatures: Vec::new(),
-            current_creatures: Vec::new(),
-            animation_elapsed: 0.0,
-            animation_duration: 0.0,
-            editing_enabled: false,
-            edit_tool: EditTool::Aphid,
-            save_status: None,
-            board_revision: 0,
-        }
-    }
-
-    fn reset(&mut self) {
-        let mut random = Random::with_seed(self.seed);
-        let mut board = load_configured_board(&mut random);
-        board.set_aphid_params(self.aphid_params);
-        board.set_ladybug_params(self.ladybug_params);
-        board.set_food_params(self.food_params);
-
-        self.summary = board.summary();
-        self.board = board;
-        self.random = random;
-        self.turn = 0;
-        self.last_births = 0;
-        self.last_deaths = 0;
-        self.extinct = self.summary.is_extinct();
-        self.accumulator = 0.0;
-        self.history.clear();
-        self.push_history();
-        self.finish_animation();
-        self.board_revision = self.board_revision.wrapping_add(1);
-    }
-
-    fn reload_config_files(&mut self) {
-        let speed = self.speed;
-        let playing = self.playing;
-        let board_revision = self.board_revision.wrapping_add(1);
-        *self = Self::new(self.seed);
-        self.speed = speed;
-        self.playing = playing;
-        self.editing_enabled = false;
-        self.board_revision = board_revision;
-    }
-
-    fn set_seed(&mut self, seed: u64) {
-        self.seed = seed;
-        self.reset();
-    }
-
-    fn adjust_seed(&mut self, delta: i64) {
-        let seed = if delta < 0 {
-            self.seed.saturating_sub(delta.unsigned_abs())
-        } else {
-            self.seed.saturating_add(delta as u64)
-        };
-        self.set_seed(seed);
-    }
-
-    fn apply_params(&mut self) {
-        self.board.set_aphid_params(self.aphid_params);
-        self.board.set_ladybug_params(self.ladybug_params);
-        self.board.set_food_params(self.food_params);
-    }
-
-    fn update_save_status(&mut self, frame_time: f32) {
-        if let Some(status) = &mut self.save_status {
-            status.ttl -= frame_time;
-            if status.ttl <= 0.0 {
-                self.save_status = None;
-            }
-        }
-    }
-
-    fn set_save_status(&mut self, message: impl Into<String>, success: bool) {
-        self.save_status = Some(SaveStatus {
-            message: message.into(),
-            success,
-            ttl: 4.0,
-        });
-    }
-
-    fn save_config(&mut self) {
-        self.apply_params();
-        match save_configured_board(&self.board) {
-            Ok(path) => self.set_save_status(format!("Saved {}", path.display()), true),
-            Err(error) => self.set_save_status(format!("Save failed: {error}"), false),
-        }
-    }
-
-    fn add_edit_creature(&mut self, row: usize, col: usize) {
-        let added = match self.edit_tool {
-            EditTool::Aphid => self.board.add_aphid(row, col, 10).is_some(),
-            EditTool::Ladybug => self
-                .board
-                .add_ladybug(row, col, 15, &mut self.random)
-                .is_some(),
-        };
-
-        if added {
-            self.after_board_edit();
-        }
-    }
-
-    fn remove_edit_creature(&mut self, row: usize, col: usize) {
-        let removed = match self.edit_tool {
-            EditTool::Aphid => self.board.remove_aphid_at(row, col),
-            EditTool::Ladybug => self.board.remove_ladybug_at(row, col),
-        };
-
-        if removed {
-            self.after_board_edit();
-        }
-    }
-
-    fn after_board_edit(&mut self) {
-        self.finish_animation();
-        self.summary = self.board.summary();
-        self.turn = 0;
-        self.last_births = 0;
-        self.last_deaths = 0;
-        self.extinct = self.summary.is_extinct();
-        self.playing = false;
-        self.accumulator = 0.0;
-        self.history.clear();
-        self.push_history();
-        self.board_revision = self.board_revision.wrapping_add(1);
-    }
-
-    fn is_animating(&self) -> bool {
-        !self.animations.is_empty()
-    }
-
-    fn finish_animation(&mut self) {
-        self.animations.clear();
-        self.animation_elapsed = 0.0;
-        self.animation_duration = 0.0;
-    }
-
-    fn animation_progress(&self) -> f32 {
-        if self.animation_duration <= 0.0 {
-            1.0
-        } else {
-            (self.animation_elapsed / self.animation_duration).clamp(0.0, 1.0)
-        }
-    }
-
-    fn push_history(&mut self) {
-        if self.history.len() == HISTORY_LIMIT {
-            self.history.pop_front();
-        }
-        self.history
-            .push_back(HistoryPoint::new(self.turn, self.summary));
-    }
-
-    fn step(&mut self) {
-        if self.extinct {
-            return;
-        }
-
-        self.finish_animation();
-        self.board
-            .write_creature_snapshots(&mut self.previous_creatures);
-        let stats = self.board.refresh(&mut self.random);
-        self.board
-            .write_creature_snapshots(&mut self.current_creatures);
-        self.turn += 1;
-        self.summary = stats.summary;
-        self.last_births = stats.births;
-        self.last_deaths = stats.deaths;
-        self.extinct = stats.summary.is_extinct();
-        self.board_revision = self.board_revision.wrapping_add(1);
-        self.push_history();
-
-        let changed = build_movement_animations(
-            &self.previous_creatures,
-            &self.current_creatures,
-            &mut self.animations,
-        );
-        if changed {
-            self.animation_elapsed = 0.0;
-            self.animation_duration = (0.42 / self.speed.sqrt()).clamp(0.12, 0.42);
-        }
+impl StatusLine {
+    fn set(&mut self, message: impl Into<String>, success: bool) {
+        self.message = message.into();
+        self.success = success;
+        self.remaining = STATUS_SECONDS;
     }
 }
 
-fn build_movement_animations(
-    before: &[CreatureSnapshot],
-    after: &[CreatureSnapshot],
-    animations: &mut Vec<AnimatedCreature>,
-) -> bool {
-    animations.clear();
-    animations.reserve(after.len());
-    let before_counts = snapshot_cell_counts(before);
-    let after_counts = snapshot_cell_counts(after);
-
-    let mut changed = false;
-    let mut before_index = 0;
-
-    for creature in after {
-        while before_index < before.len() && before[before_index].id < creature.id {
-            before_index += 1;
-        }
-
-        let previous = if before_index < before.len() && before[before_index].id == creature.id {
-            let previous = Some(before[before_index]);
-            before_index += 1;
-            previous
-        } else {
-            None
-        };
-        let to_slot = creature_render_slot(*creature, &after_counts);
-        let (from, from_slot, born) = if let Some(snapshot) = previous {
-            (
-                snapshot.location,
-                creature_render_slot(snapshot, &before_counts),
-                false,
-            )
-        } else {
-            (creature.location, to_slot, true)
-        };
-        changed |= born
-            || from != creature.location
-            || from_slot.offset != to_slot.offset
-            || from_slot.scale != to_slot.scale;
-        animations.push(AnimatedCreature {
-            kind: creature.kind,
-            from,
-            to: creature.location,
-            from_slot,
-            to_slot,
-            born,
-        });
-    }
-
-    if !changed {
-        animations.clear();
-    }
-
-    changed
+#[derive(Message, Clone, Copy)]
+enum RunAction {
+    TogglePlay,
+    Step,
+    Reset,
+    Slower,
+    Faster,
+    Fit,
+    Save,
 }
 
-fn creature_render_slot(
-    creature: CreatureSnapshot,
-    counts: &HashMap<Coordinates, SnapshotCellCounts>,
-) -> CreatureRenderSlot {
-    let counts = counts.get(&creature.location).copied().unwrap_or_default();
-    let aphid = creature.kind == CreatureSnapshotKind::Aphid;
-    let (primary, secondary) = if aphid {
-        (counts.aphids, counts.ladybugs)
-    } else {
-        (counts.ladybugs, counts.aphids)
-    };
-    let slots = creature_slots(primary, secondary, aphid);
-    let index = creature.cell_slot.min(slots.len() - 1);
-    let (x, y) = slots[index];
+/// Asks for the seed in the panel's field to be applied and the run restarted.
+#[derive(Message, Clone, Copy)]
+struct Reseed;
 
-    CreatureRenderSlot {
-        offset: vec2(x, y),
-        index,
-        scale: creature_render_scale(counts.aphids, counts.ladybugs),
-    }
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum PanelTab {
+    #[default]
+    Overview,
+    Parameters,
+    Edit,
 }
 
-fn creature_render_scale(aphids: usize, ladybugs: usize) -> f32 {
-    if aphids + ladybugs > 5 { 0.82 } else { 1.0 }
+#[derive(Resource, Default)]
+struct ActiveTab(PanelTab);
+
+#[derive(Component, Clone, FromTemplate)]
+struct TabPage(PanelTab);
+
+#[derive(Component, Clone, FromTemplate)]
+struct TabButton(PanelTab);
+
+#[derive(Component, Clone, Default, FromTemplate)]
+struct PlayLabel;
+
+#[derive(Component, Clone, Default, FromTemplate)]
+struct PlaybackStatus;
+
+#[derive(Component, Clone, Default, FromTemplate)]
+struct SpeedLabel;
+
+#[derive(Component, Clone, Default, FromTemplate)]
+struct StatusLabel;
+
+/// The panel's seed field. Its text is a draft: it reaches the run only when the
+/// reader applies it, so `Seed` and this field can disagree until then.
+#[derive(Component, Clone, Default, FromTemplate)]
+struct SeedField;
+
+/// Root of the cell inspector popup, which floats beside the pointer.
+#[derive(Component)]
+struct CellPopup;
+
+/// The popup's two lines, so one system can fill both.
+#[derive(Component, Clone, Copy)]
+enum PopupLine {
+    Heading,
+    Counts,
 }
 
-fn snapshot_cell_counts(
-    snapshots: &[CreatureSnapshot],
-) -> HashMap<Coordinates, SnapshotCellCounts> {
-    let mut counts: HashMap<Coordinates, SnapshotCellCounts> = HashMap::new();
+#[derive(Component, Clone, Default, FromTemplate)]
+struct PanelScrollbar;
 
-    for snapshot in snapshots {
-        let count = counts.entry(snapshot.location).or_default();
+/// Tags a slider with the parameter index it edits, so one observer can serve
+/// all nine rather than nine closures capturing nine fields.
+#[derive(Component, Clone, Copy, FromTemplate)]
+struct ProbSlider(usize);
 
-        match snapshot.kind {
-            CreatureSnapshotKind::Aphid => count.aphids += 1,
-            CreatureSnapshotKind::Ladybug => count.ladybugs += 1,
-        }
-    }
-
-    counts
+/// Set `CLC_SCREENSHOT=some/path.png` to let the app run a few turns, save a
+/// frame, and quit. Lets the prototype be checked without a human watching it.
+#[derive(Resource)]
+struct ScreenshotProbe {
+    path: String,
+    timer: Timer,
+    stage: u8,
 }
 
-#[derive(Clone, Copy, PartialEq)]
-struct BoardLayout {
-    x: f32,
-    y: f32,
-    width: f32,
-    height: f32,
-    cell: f32,
-    rows: usize,
-    cols: usize,
-    panel_x: f32,
-    panel_y: f32,
-    panel_w: f32,
-    panel_h: f32,
-    graph_x: f32,
-    graph_y: f32,
-    graph_w: f32,
-    graph_h: f32,
-}
-
-struct StaticGuiLayers {
-    target: Option<RenderTarget>,
-    signature: Option<StaticLayerSignature>,
-}
-
-impl StaticGuiLayers {
-    fn new() -> Self {
-        Self {
-            target: None,
-            signature: None,
-        }
-    }
-
-    fn draw(&mut self, layout: BoardLayout) {
-        let signature = StaticLayerSignature::new(layout);
-        if self.signature != Some(signature) {
-            self.target = Some(render_cached_layer(
-                signature.width,
-                signature.height,
-                || {
-                    draw_static_gui_layer(layout);
-                },
-            ));
-            self.signature = Some(signature);
-        }
-
-        if let Some(target) = &self.target {
-            draw_cached_target(target);
-        }
-    }
-}
-
-struct BoardLayerCache {
-    target: Option<RenderTarget>,
-    signature: Option<BoardLayerSignature>,
-}
-
-impl BoardLayerCache {
-    fn new() -> Self {
-        Self {
-            target: None,
-            signature: None,
-        }
-    }
-
-    fn draw(&mut self, app: &SimulationApp, layout: BoardLayout) {
-        let signature = BoardLayerSignature::new(layout, app.board_revision);
-        if self.signature != Some(signature) {
-            self.target = Some(render_cached_layer(
-                signature.width,
-                signature.height,
-                || {
-                    draw_board_background_layer(app, layout);
-                },
-            ));
-            self.signature = Some(signature);
-        }
-
-        if let Some(target) = &self.target {
-            draw_cached_target_at(target, layout.x, layout.y, layout.width, layout.height);
-        }
-    }
-}
-
-#[derive(Clone, Copy, PartialEq)]
-struct StaticLayerSignature {
-    width: u32,
-    height: u32,
-    layout: BoardLayout,
-}
-
-impl StaticLayerSignature {
-    fn new(layout: BoardLayout) -> Self {
-        let (width, height) = cached_layer_size();
-        Self {
-            width,
-            height,
-            layout,
-        }
-    }
-}
-
-#[derive(Clone, Copy, PartialEq)]
-struct BoardLayerSignature {
-    width: u32,
-    height: u32,
-    layout: BoardLayout,
-    board_revision: u64,
-}
-
-impl BoardLayerSignature {
-    fn new(layout: BoardLayout, board_revision: u64) -> Self {
-        let (width, height) = cached_board_layer_size(layout);
-        Self {
-            width,
-            height,
-            layout,
-            board_revision,
-        }
-    }
-}
-
-fn cached_layer_size() -> (u32, u32) {
-    (
-        cached_texture_dimension(screen_width()),
-        cached_texture_dimension(screen_height()),
-    )
-}
-
-fn cached_board_layer_size(layout: BoardLayout) -> (u32, u32) {
-    (
-        cached_texture_dimension(layout.width),
-        cached_texture_dimension(layout.height),
-    )
-}
-
-fn cached_texture_dimension(value: f32) -> u32 {
-    value.ceil().max(1.0) as u32
-}
-
-fn render_cached_layer(width: u32, height: u32, draw_layer: impl FnOnce()) -> RenderTarget {
-    let target = render_target(width, height);
-    let mut camera = Camera2D::from_display_rect(Rect::new(0.0, 0.0, width as f32, height as f32));
-    camera.render_target = Some(target.clone());
-
-    set_camera(&camera);
-    clear_background(color(0, 0, 0, 0));
-    draw_layer();
-    set_default_camera();
-
-    target
-}
-
-fn draw_cached_target(target: &RenderTarget) {
-    draw_cached_target_at(target, 0.0, 0.0, screen_width(), screen_height());
-}
-
-fn draw_cached_target_at(target: &RenderTarget, x: f32, y: f32, width: f32, height: f32) {
-    draw_texture_ex(
-        &target.texture,
-        x,
-        y,
-        WHITE,
-        DrawTextureParams {
-            dest_size: Some(vec2(width, height)),
-            flip_y: true,
-            ..Default::default()
-        },
-    );
-}
-
-fn draw_static_gui_layer(layout: BoardLayout) {
-    draw_background();
-    draw_title_heading();
-    draw_board_frame(layout);
-    draw_history_graph_frame(layout);
-    draw_panel_frame(layout);
-}
-
-fn window_conf() -> Conf {
-    Conf {
-        window_title: "Aphids and Ladybugs".to_string(),
-        window_width: 1120,
-        window_height: 860,
-        window_resizable: true,
-        high_dpi: true,
-        sample_count: 4,
-        ..Default::default()
-    }
-}
-
-#[macroquad::main(window_conf)]
-async fn main() {
-    let mut app = SimulationApp::new(DEFAULT_SEED);
-    let mut static_layers = StaticGuiLayers::new();
-    let mut board_layer = BoardLayerCache::new();
-
-    loop {
-        if is_key_pressed(KeyCode::Escape) {
-            break;
-        }
-
-        handle_input(&mut app);
-        tick_simulation(&mut app);
-
-        let layout = calculate_layout(&app.board);
-        let hovered = hovered_cell(layout);
-        handle_board_edit(&mut app, hovered);
-
-        static_layers.draw(layout);
-        draw_title_status(&app);
-        board_layer.draw(&app, layout);
-        draw_board(&app, layout, hovered);
-        draw_history_graph(&app, layout);
-        draw_panel(&mut app, layout);
-        draw_hover_tooltip(&app, hovered);
-
-        next_frame().await;
-    }
-}
-
-fn handle_input(app: &mut SimulationApp) {
-    if is_key_pressed(KeyCode::Space) {
-        app.playing = !app.playing;
-        app.accumulator = 0.0;
-    }
-
-    if is_key_pressed(KeyCode::N) {
-        app.finish_animation();
-        app.step();
-        app.accumulator = 0.0;
-    }
-
-    if is_key_pressed(KeyCode::R) {
-        app.reset();
-    }
-
-    if is_key_pressed(KeyCode::E) {
-        app.editing_enabled = !app.editing_enabled;
-        app.playing = false;
-        app.finish_animation();
-    }
-
-    if is_key_pressed(KeyCode::A) {
-        app.edit_tool = EditTool::Aphid;
-        app.editing_enabled = true;
-        app.playing = false;
-    }
-
-    if is_key_pressed(KeyCode::L) {
-        app.edit_tool = EditTool::Ladybug;
-        app.editing_enabled = true;
-        app.playing = false;
-    }
-
-    if is_key_pressed(KeyCode::S) {
-        app.save_config();
-    }
-
-    if is_key_pressed(KeyCode::Up) || is_key_pressed(KeyCode::Equal) {
-        app.speed = (app.speed + 0.5).min(8.0);
-    }
-
-    if is_key_pressed(KeyCode::Down) || is_key_pressed(KeyCode::Minus) {
-        app.speed = (app.speed - 0.5).max(0.5);
-    }
-}
-
-fn handle_board_edit(app: &mut SimulationApp, hovered: Option<(usize, usize)>) {
-    if !app.editing_enabled || app.is_animating() {
-        return;
-    }
-
-    let Some((row, col)) = hovered else {
-        return;
-    };
-
-    if is_mouse_button_pressed(MouseButton::Left) {
-        app.add_edit_creature(row, col);
-    }
-
-    if is_mouse_button_pressed(MouseButton::Right) {
-        app.remove_edit_creature(row, col);
-    }
-}
-
-fn tick_simulation(app: &mut SimulationApp) {
-    let frame_time = get_frame_time();
-    app.update_save_status(frame_time);
-
-    if app.is_animating() {
-        app.animation_elapsed += frame_time;
-        if app.animation_elapsed < app.animation_duration {
-            return;
-        }
-
-        app.finish_animation();
-    }
-
-    if !app.playing || app.extinct {
-        return;
-    }
-
-    app.accumulator += frame_time;
-    let step_interval = 1.0 / app.speed;
-    let mut steps = 0;
-
-    while app.accumulator >= step_interval && steps < 8 && !app.extinct && !app.is_animating() {
-        app.step();
-        app.accumulator -= step_interval;
-        steps += 1;
-    }
-}
-
-fn calculate_layout(board: &Board) -> BoardLayout {
-    let rows = board.rows().max(1);
-    let cols = board.cols().max(1);
-    let screen_w = screen_width();
-    let screen_h = screen_height();
-    let wide = screen_w >= 900.0;
-    let margin = if wide { 32.0 } else { 18.0 };
-    let top = if wide { 96.0 } else { 112.0 };
-    let panel_w = if wide { 360.0 } else { screen_w - margin * 2.0 };
-    let graph_h = if wide { 118.0 } else { 102.0 };
-    let graph_gap = if wide { 22.0 } else { 14.0 };
-    let panel_h = if wide {
-        screen_h - top - margin
-    } else {
-        (screen_h * 0.42).max(260.0)
-    };
-    let board_area_w = if wide {
-        screen_w - panel_w - margin * 3.0
-    } else {
-        screen_w - margin * 2.0
-    };
-    let board_area_h = if wide {
-        screen_h - top - margin - graph_h - graph_gap
-    } else {
-        screen_h - top - panel_h - graph_h - graph_gap - margin * 3.0
-    }
-    .max(180.0);
-    let cell = (board_area_w / cols as f32)
-        .min(board_area_h / rows as f32)
-        .floor()
-        .max(16.0);
-    let width = cell * cols as f32;
-    let height = cell * rows as f32;
-    let x = if wide {
-        margin + (board_area_w - width).max(0.0) * 0.5
-    } else {
-        (screen_w - width) * 0.5
-    };
-    let y = top + (board_area_h - height).max(0.0) * 0.5;
-    let graph_x = margin;
-    let graph_y = y + height + graph_gap;
-    let graph_w = board_area_w;
-    let panel_x = if wide {
-        screen_w - panel_w - margin
-    } else {
-        margin
-    };
-    let panel_y = if wide {
-        top
-    } else {
-        graph_y + graph_h + margin
-    };
-
-    BoardLayout {
-        x,
-        y,
-        width,
-        height,
-        cell,
-        rows,
-        cols,
-        panel_x,
-        panel_y,
-        panel_w,
-        panel_h,
-        graph_x,
-        graph_y,
-        graph_w,
-        graph_h,
-    }
-}
-
-fn hovered_cell(layout: BoardLayout) -> Option<(usize, usize)> {
-    let (mouse_x, mouse_y) = mouse_position();
-    if mouse_x < layout.x
-        || mouse_y < layout.y
-        || mouse_x >= layout.x + layout.width
-        || mouse_y >= layout.y + layout.height
-    {
-        return None;
-    }
-
-    let row = ((mouse_y - layout.y) / layout.cell) as usize;
-    let col = ((mouse_x - layout.x) / layout.cell) as usize;
-    (row < layout.rows && col < layout.cols).then_some((row, col))
-}
-
-fn draw_background() {
-    let top = color(11, 17, 27, 255);
-    let bottom = color(27, 35, 42, 255);
-    let bands = 36;
-    let band_h = screen_height() / bands as f32;
-
-    for band in 0..bands {
-        let t = band as f32 / (bands - 1) as f32;
-        draw_rectangle(
-            0.0,
-            band as f32 * band_h,
-            screen_width(),
-            band_h + 1.0,
-            mix(top, bottom, t),
-        );
-    }
-
-    draw_circle(
-        screen_width() * 0.12,
-        screen_height() * 0.12,
-        260.0,
-        color(61, 111, 78, 35),
-    );
-    draw_circle(
-        screen_width() * 0.88,
-        screen_height() * 0.78,
-        300.0,
-        color(131, 59, 48, 28),
-    );
-}
-
-fn draw_title_heading() {
-    draw_text_ex(
-        "Aphids & Ladybugs",
-        32.0,
-        44.0,
-        TextParams {
-            font_size: 34,
-            color: color(238, 232, 210, 255),
-            ..Default::default()
-        },
-    );
-}
-
-fn draw_title_status(app: &SimulationApp) {
-    draw_text_ex(
-        format!(
-            "Seed {}  |  Turn {}  |  {}",
-            app.seed,
-            app.turn,
-            if app.extinct {
-                "extinct"
-            } else if app.playing {
-                "running"
-            } else {
-                "paused"
-            }
-        ),
-        34.0,
-        70.0,
-        TextParams {
-            font_size: 18,
-            color: color(162, 176, 163, 255),
-            ..Default::default()
-        },
-    );
-}
-
-fn draw_board_frame(layout: BoardLayout) {
-    draw_round_rect(
-        layout.x - 14.0,
-        layout.y - 14.0,
-        layout.width + 28.0,
-        layout.height + 28.0,
-        24.0,
-        color(0, 0, 0, 78),
-    );
-    draw_round_rect(
-        layout.x - 8.0,
-        layout.y - 8.0,
-        layout.width + 16.0,
-        layout.height + 16.0,
-        20.0,
-        color(31, 42, 38, 225),
-    );
-}
-
-fn draw_board_background_layer(app: &SimulationApp, layout: BoardLayout) {
-    let gap = (layout.cell * 0.08).clamp(2.0, 7.0);
-    let inner = layout.cell - gap;
-
-    for row in 0..layout.rows {
-        for col in 0..layout.cols {
-            let Some(snapshot) = app.board.cell_snapshot(row, col) else {
-                continue;
-            };
-            let x = col as f32 * layout.cell + gap * 0.5;
-            let y = row as f32 * layout.cell + gap * 0.5;
-            draw_cell_background(x, y, inner, row, col, snapshot);
-        }
-    }
-}
-
-fn draw_board(app: &SimulationApp, layout: BoardLayout, hovered: Option<(usize, usize)>) {
-    if app.is_animating() {
-        draw_animated_creatures(app, layout);
-    } else {
-        draw_board_creatures(app, layout);
-    }
-
-    draw_cell_hover(layout, hovered);
-
-    if app.editing_enabled {
-        draw_edit_overlay(app, layout, hovered);
-    }
-}
-
-fn draw_board_creatures(app: &SimulationApp, layout: BoardLayout) {
-    let gap = (layout.cell * 0.08).clamp(2.0, 7.0);
-    let inner = layout.cell - gap;
-
-    for row in 0..layout.rows {
-        for col in 0..layout.cols {
-            let Some(snapshot) = app.board.cell_snapshot(row, col) else {
-                continue;
-            };
-            let x = layout.x + col as f32 * layout.cell + gap * 0.5;
-            let y = layout.y + row as f32 * layout.cell + gap * 0.5;
-            draw_creatures(x, y, inner, snapshot.aphids, snapshot.ladybugs);
-        }
-    }
-}
-
-fn draw_cell_hover(layout: BoardLayout, hovered: Option<(usize, usize)>) {
-    let Some((row, col)) = hovered else {
-        return;
-    };
-
-    let gap = (layout.cell * 0.08).clamp(2.0, 7.0);
-    let inner = layout.cell - gap;
-    let x = layout.x + col as f32 * layout.cell + gap * 0.5;
-    let y = layout.y + row as f32 * layout.cell + gap * 0.5;
-    draw_round_rect_lines(
-        x - 1.5,
-        y - 1.5,
-        inner + 3.0,
-        inner + 3.0,
-        inner * 0.12 + 1.5,
-        3.0,
-        color(245, 228, 168, 230),
-    );
-}
-
-fn history_graph_rect(layout: BoardLayout) -> Rect {
-    Rect::new(
-        layout.graph_x,
-        layout.graph_y,
-        layout.graph_w,
-        layout.graph_h,
-    )
-}
-
-fn draw_history_graph_frame(layout: BoardLayout) {
-    let rect = history_graph_rect(layout);
-    draw_round_rect(rect.x, rect.y, rect.w, rect.h, 18.0, color(15, 22, 25, 218));
-    draw_round_rect_lines(
-        rect.x + 1.0,
-        rect.y + 1.0,
-        rect.w - 2.0,
-        rect.h - 2.0,
-        17.0,
-        1.0,
-        color(112, 131, 117, 96),
-    );
-
-    draw_text_ex(
-        "Population History",
-        rect.x + 18.0,
-        rect.y + 25.0,
-        TextParams {
-            font_size: 18,
-            color: color(238, 232, 210, 255),
-            ..Default::default()
-        },
-    );
-}
-
-fn draw_history_graph(app: &SimulationApp, layout: BoardLayout) {
-    let rect = history_graph_rect(layout);
-    let Some(first) = app.history.front() else {
-        return;
-    };
-    let Some(last) = app.history.back() else {
-        return;
-    };
-    let max_population = app
-        .history
-        .iter()
-        .map(|point| point.aphids.max(point.ladybugs))
-        .max()
-        .unwrap_or(1)
-        .max(1) as f32;
-    let plot = Rect::new(rect.x + 18.0, rect.y + 39.0, rect.w - 36.0, rect.h - 60.0);
-
-    draw_history_grid(plot, max_population);
-    draw_history_series(
-        &app.history,
-        plot,
-        max_population,
-        |point| point.aphids,
-        color(111, 219, 91, 255),
-    );
-    draw_history_series(
-        &app.history,
-        plot,
-        max_population,
-        |point| point.ladybugs,
-        color(231, 78, 61, 255),
-    );
-
-    draw_history_legend(rect, app, first.turn, last.turn, max_population as usize);
-}
-
-fn draw_history_grid(plot: Rect, max_population: f32) {
-    for step in 0..=3 {
-        let t = step as f32 / 3.0;
-        let y = plot.y + plot.h * t;
-        draw_line(
-            plot.x,
-            y,
-            plot.x + plot.w,
-            y,
-            1.0,
-            color(255, 255, 255, if step == 3 { 68 } else { 28 }),
-        );
-    }
-
-    draw_text_ex(
-        format!("{}", max_population as usize),
-        plot.x + plot.w - 24.0,
-        plot.y - 5.0,
-        TextParams {
-            font_size: 12,
-            color: color(144, 158, 150, 255),
-            ..Default::default()
-        },
-    );
-    draw_text_ex(
-        "0",
-        plot.x + plot.w - 10.0,
-        plot.y + plot.h + 13.0,
-        TextParams {
-            font_size: 12,
-            color: color(144, 158, 150, 255),
-            ..Default::default()
-        },
-    );
-}
-
-fn draw_history_series(
-    history: &VecDeque<HistoryPoint>,
-    plot: Rect,
-    max_population: f32,
-    value: fn(&HistoryPoint) -> usize,
-    series_color: Color,
+/// Board cell the probe edits and hovers.
+const PROBE_CELL: (usize, usize) = (2, 3);
+
+type ProbeWidgets<'w, 's> = (
+    Query<'w, 's, (Entity, &'static ProbSlider)>,
+    Query<'w, 's, (Entity, Has<Checked>), With<FoodOverlayToggle>>,
+    Query<'w, 's, (Entity, Has<Checked>), With<EditToggle>>,
+    Query<'w, 's, Entity, With<RadioGroup>>,
+    Query<'w, 's, (Entity, &'static EditToolRadio, Has<Checked>)>,
+);
+
+type ProbeState<'w> = (
+    Res<'w, Params>,
+    Res<'w, BoardRes>,
+    Res<'w, History>,
+    Res<'w, FoodOverlay>,
+    Res<'w, EditMode>,
+    Res<'w, Stats>,
+    Res<'w, Playing>,
+);
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "debug-only probe, not a hot path"
+)]
+fn screenshot_probe(
+    mut commands: Commands,
+    time: Res<Time>,
+    probe: Option<ResMut<ScreenshotProbe>>,
+    mut board_cameras: Query<(&Camera, &GlobalTransform, &mut Projection), With<BoardCamera>>,
+    (sliders, food_toggles, edit_toggles, radio_groups, radios): ProbeWidgets,
+    (params, board, history, overlay, edit, stats, playing): ProbeState,
+    mut panel: Query<(&mut ScrollPosition, &ComputedNode), With<PanelRoot>>,
+    tabs: Query<(Entity, &TabButton)>,
+    mut edits: MessageWriter<CellEdit>,
+    mut exit: MessageWriter<AppExit>,
 ) {
-    if history.is_empty() {
+    let Some(mut probe) = probe else {
+        return;
+    };
+    if !probe.timer.tick(time.delta()).just_finished() {
         return;
     }
 
-    if history.len() == 1 {
-        let y = history_y(value(&history[0]), plot, max_population);
-        draw_circle(plot.x, y, 3.0, series_color);
-        return;
-    }
+    let (row, col) = PROBE_CELL;
+    let cell = |board: &BoardRes| {
+        board
+            .0
+            .cell_snapshot(row, col)
+            .map(|cell| (cell.aphids, cell.ladybugs))
+    };
+    let tools = || {
+        radios
+            .iter()
+            .map(|(_, radio, checked)| format!("{:?}={checked}", radio.0))
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
 
-    for index in 1..history.len() {
-        let previous = &history[index - 1];
-        let current = &history[index];
-        draw_line(
-            history_x(index - 1, history.len(), plot),
-            history_y(value(previous), plot, max_population),
-            history_x(index, history.len(), plot),
-            history_y(value(current), plot, max_population),
-            2.2,
-            series_color,
-        );
-    }
+    match probe.stage {
+        // Every change below goes through the path real input takes: widget
+        // events into their observers, and `CellEdit` messages into
+        // `apply_cell_edits`. Nothing is written into resources directly.
+        0 => {
+            if let Some((entity, _)) = sliders.iter().find(|(_, slider)| slider.0 == 0) {
+                info!(
+                    "before ValueChange: params[0]={:.3} board aphid prob_move={:.3}",
+                    params.get(0),
+                    board.0.aphid_params().prob_move,
+                );
+                commands.trigger(ValueChange {
+                    source: entity,
+                    value: 88.0f32,
+                    is_final: true,
+                });
+            }
+            if let Ok((toggle, checked)) = food_toggles.single() {
+                info!(
+                    "before toggle: overlay={} checkbox checked={checked}",
+                    overlay.0
+                );
+                commands.trigger(ValueChange {
+                    source: toggle,
+                    value: true,
+                    is_final: true,
+                });
+            }
 
-    let latest = history.back().expect("history is not empty");
-    draw_circle(
-        history_x(history.len() - 1, history.len(), plot),
-        history_y(value(latest), plot, max_population),
-        3.2,
-        series_color,
-    );
-}
-
-fn history_x(index: usize, length: usize, plot: Rect) -> f32 {
-    if length <= 1 {
-        plot.x
-    } else {
-        plot.x + plot.w * index as f32 / (length - 1) as f32
-    }
-}
-
-fn history_y(value: usize, plot: Rect, max_population: f32) -> f32 {
-    plot.y + plot.h - plot.h * value as f32 / max_population
-}
-
-fn draw_history_legend(
-    rect: Rect,
-    app: &SimulationApp,
-    first_turn: usize,
-    last_turn: usize,
-    max_population: usize,
-) {
-    let y = rect.y + rect.h - 14.0;
-    draw_legend_item(
-        rect.x + 18.0,
-        y,
-        color(111, 219, 91, 255),
-        &format!("Aphids {}", app.summary.aphids),
-    );
-    draw_legend_item(
-        rect.x + 122.0,
-        y,
-        color(231, 78, 61, 255),
-        &format!("Ladybugs {}", app.summary.ladybugs),
-    );
-    draw_text_ex(
-        format!("Turns {first_turn}-{last_turn} | max {max_population}"),
-        rect.x + rect.w - 190.0,
-        y + 4.0,
-        TextParams {
-            font_size: 12,
-            color: color(144, 158, 150, 255),
-            ..Default::default()
-        },
-    );
-}
-
-fn draw_legend_item(x: f32, y: f32, item_color: Color, label: &str) {
-    draw_circle(x, y, 4.0, item_color);
-    draw_text_ex(
-        label,
-        x + 10.0,
-        y + 4.0,
-        TextParams {
-            font_size: 12,
-            color: color(211, 219, 198, 255),
-            ..Default::default()
-        },
-    );
-}
-
-fn draw_cell_background(x: f32, y: f32, size: f32, row: usize, col: usize, snapshot: CellSnapshot) {
-    let food = (snapshot.food as f32 / 9.0).clamp(0.0, 1.0);
-    let base = mix(color(31, 33, 34, 255), color(76, 104, 58, 255), food);
-    let rim = mix(color(48, 53, 50, 255), color(135, 153, 89, 255), food);
-
-    draw_round_rect(x, y, size, size, size * 0.12, base);
-    draw_round_rect_lines(
-        x + 1.0,
-        y + 1.0,
-        size - 2.0,
-        size - 2.0,
-        size * 0.12,
-        1.0,
-        rim,
-    );
-
-    if snapshot.food > 0 {
-        let bar_w = size * (snapshot.food.min(9) as f32 / 9.0).clamp(0.0, 1.0);
-        draw_round_rect(
-            x + size * 0.14,
-            y + size * 0.82,
-            bar_w * 0.72,
-            (size * 0.055).max(2.0),
-            4.0,
-            color(194, 184, 83, 130),
-        );
-    }
-
-    draw_food_speckles(x, y, size, row, col, snapshot.food);
-}
-
-fn draw_animated_creatures(app: &SimulationApp, layout: BoardLayout) {
-    let progress = smooth_progress(app.animation_progress());
-    let gap = (layout.cell * 0.08).clamp(2.0, 7.0);
-    let inner = layout.cell - gap;
-    let base_radius = creature_radius(inner);
-
-    for creature in &app.animations {
-        let from = creature_position(layout, creature.from, creature.from_slot.offset);
-        let to = creature_position(layout, creature.to, creature.to_slot.offset);
-        let moving =
-            creature.from != creature.to || creature.from_slot.offset != creature.to_slot.offset;
-        let position = if creature.born {
-            to
-        } else {
-            from + (to - from) * progress
-        };
-        let draw_index = if creature.born {
-            creature.to_slot.index
-        } else {
-            creature.from_slot.index
-        };
-        let scale = if creature.born {
-            creature.to_slot.scale * progress
-        } else {
-            creature.from_slot.scale
-                + (creature.to_slot.scale - creature.from_slot.scale) * progress
-        };
-
-        if moving {
-            draw_line(
-                from.x,
-                from.y,
-                position.x,
-                position.y,
-                1.1,
-                color(245, 229, 177, 80),
+            info!(
+                "before edit: cell {:?}={:?} turn={} aphids={} ladybugs={} history={} playing={} editing={} tool={:?} [{}]",
+                PROBE_CELL,
+                cell(&board),
+                stats.turn,
+                stats.aphids,
+                stats.ladybugs,
+                history.0.len(),
+                playing.0,
+                edit.enabled,
+                edit.tool,
+                tools(),
             );
+            if let Ok((toggle, _)) = edit_toggles.single() {
+                commands.trigger(ValueChange {
+                    source: toggle,
+                    value: true,
+                    is_final: true,
+                });
+            }
+            if let (Ok(group), Some((ladybug, _, _))) = (
+                radio_groups.single(),
+                radios
+                    .iter()
+                    .find(|(_, radio, _)| radio.0 == EditTool::Ladybug),
+            ) {
+                commands.trigger(ValueChange {
+                    source: group,
+                    value: ladybug,
+                    is_final: true,
+                });
+            }
+            // Net effect on the cell: three aphids and two ladybugs, so both
+            // kinds end up crowded enough to earn a count badge.
+            for (tool, action) in [
+                (EditTool::Aphid, EditAction::Add),
+                (EditTool::Aphid, EditAction::Add),
+                (EditTool::Aphid, EditAction::Add),
+                (EditTool::Aphid, EditAction::Add),
+                (EditTool::Aphid, EditAction::Remove),
+                (EditTool::Ladybug, EditAction::Add),
+                (EditTool::Ladybug, EditAction::Add),
+                (EditTool::Ladybug, EditAction::Add),
+                (EditTool::Ladybug, EditAction::Remove),
+            ] {
+                edits.write(CellEdit {
+                    row,
+                    col,
+                    tool,
+                    action,
+                });
+            }
+            commands.insert_resource(ProbeCell(PROBE_CELL));
+            // Pin the chart crosshair too, so the capture shows its tooltip.
+            commands.insert_resource(ProbeHover(0));
+            probe.timer = Timer::from_seconds(0.5, TimerMode::Once);
         }
-
-        match creature.kind {
-            CreatureSnapshotKind::Aphid => draw_aphid(
-                position.x,
-                position.y,
-                (base_radius * scale).max(1.0),
-                draw_index,
-            ),
-            CreatureSnapshotKind::Ladybug => draw_ladybug(
-                position.x,
-                position.y,
-                (base_radius * scale).max(1.0),
-                draw_index,
-            ),
+        // Capture once the observers, edits and sync systems have all run.
+        1 => {
+            info!(
+                "after ValueChange: params[0]={:.3} board aphid prob_move={:.3}",
+                params.get(0),
+                board.0.aphid_params().prob_move,
+            );
+            if let Ok((_, checked)) = food_toggles.single() {
+                info!(
+                    "after toggle: overlay={} checkbox checked={checked}",
+                    overlay.0
+                );
+            }
+            let edit_checked = edit_toggles.single().map(|(_, checked)| checked).ok();
+            info!(
+                "after edit: cell {:?}={:?} turn={} aphids={} ladybugs={} history={} playing={} editing={} checkbox={:?} tool={:?} [{}]",
+                PROBE_CELL,
+                cell(&board),
+                stats.turn,
+                stats.aphids,
+                stats.ladybugs,
+                history.0.len(),
+                playing.0,
+                edit.enabled,
+                edit_checked,
+                edit.tool,
+                tools(),
+            );
+            // Zoom, pan and cell hover each need exactly one board camera.
+            info!("board cameras matched: {}", board_cameras.iter().count());
+            if let Ok((camera, camera_transform, Projection::Orthographic(ortho))) =
+                board_cameras.single()
+                && let Some(viewport) = camera.logical_viewport_size()
+            {
+                let pixels_per_unit = viewport.y / ortho.area.height();
+                info!(
+                    "cell on screen: {:.1}px  badges legible: {}  badge raster: {}px",
+                    (CELL - GAP) * pixels_per_unit,
+                    badges_legible(viewport.y, ortho.area.height()),
+                    badge_text_raster(pixels_per_unit).0,
+                );
+                // Where the aphid badge lands, so a capture can be cropped to it
+                // whatever size the window manager hands us.
+                let badge = creature_world(Coordinates { x: row, y: col }, BADGE_SLOTS[0]);
+                if let Ok(screen) = camera.world_to_viewport(camera_transform, badge.extend(0.0)) {
+                    // `world_to_viewport` already returns window coordinates,
+                    // so the panel offset must not be added again.
+                    info!(
+                        "aphid badge at physical ({:.0}, {:.0})",
+                        screen.x * 2.0,
+                        screen.y * 2.0,
+                    );
+                }
+            }
+            commands
+                .spawn(Screenshot::primary_window())
+                .observe(save_to_disk(probe.path.clone()));
+            probe.timer = Timer::from_seconds(1.5, TimerMode::Once);
+        }
+        2 => {
+            if let Some((entity, _)) = tabs.iter().find(|(_, tab)| tab.0 == PanelTab::Parameters) {
+                commands.trigger(Activate { entity });
+            }
+            probe.timer = Timer::from_seconds(0.5, TimerMode::Once);
+        }
+        3 => {
+            commands
+                .spawn(Screenshot::primary_window())
+                .observe(save_to_disk(probe.path.replace(".png", "-parameters.png")));
+            probe.timer = Timer::from_seconds(1.0, TimerMode::Once);
+        }
+        4 => {
+            if let Ok((mut position, computed)) = panel.single_mut() {
+                let content = computed.content_size() * computed.inverse_scale_factor();
+                let visible = computed.size() * computed.inverse_scale_factor();
+                position.y = scrolled_offset(
+                    position.y,
+                    -1000.0,
+                    MouseScrollUnit::Line,
+                    content.y - visible.y,
+                );
+            }
+            probe.timer = Timer::from_seconds(0.5, TimerMode::Once);
+        }
+        5 => {
+            commands
+                .spawn(Screenshot::primary_window())
+                .observe(save_to_disk(probe.path.replace(".png", "-scrolled.png")));
+            probe.timer = Timer::from_seconds(1.0, TimerMode::Once);
+        }
+        6 => {
+            if let Some((entity, _)) = tabs.iter().find(|(_, tab)| tab.0 == PanelTab::Edit) {
+                commands.trigger(Activate { entity });
+            }
+            probe.timer = Timer::from_seconds(0.5, TimerMode::Once);
+        }
+        7 => {
+            commands
+                .spawn(Screenshot::primary_window())
+                .observe(save_to_disk(probe.path.replace(".png", "-edit.png")));
+            probe.timer = Timer::from_seconds(1.0, TimerMode::Once);
+        }
+        // Exercise the shader at actual camera zoom levels, rather than
+        // scaling a screenshot, to catch border-width and antialiasing faults.
+        8 | 10 => {
+            if let Ok((_, _, mut projection)) = board_cameras.single_mut()
+                && let Projection::Orthographic(ortho) = &mut *projection
+            {
+                ortho.scale = if probe.stage == 8 { 0.35 } else { 2.0 };
+            }
+            probe.timer = Timer::from_seconds(0.5, TimerMode::Once);
+        }
+        9 | 11 => {
+            let suffix = if probe.stage == 9 {
+                "-zoomed.png"
+            } else {
+                "-distant.png"
+            };
+            commands
+                .spawn(Screenshot::primary_window())
+                .observe(save_to_disk(probe.path.replace(".png", suffix)));
+            probe.timer = Timer::from_seconds(1.0, TimerMode::Once);
+        }
+        _ => {
+            exit.write(AppExit::Success);
+            return;
         }
     }
+
+    probe.stage += 1;
 }
 
-fn creature_position(layout: BoardLayout, location: Coordinates, offset: Vec2) -> Vec2 {
-    let gap = (layout.cell * 0.08).clamp(2.0, 7.0);
-    let inner = layout.cell - gap;
-    let origin_x = layout.x + location.y as f32 * layout.cell + gap * 0.5;
-    let origin_y = layout.y + location.x as f32 * layout.cell + gap * 0.5;
+// ---------------------------------------------------------------------------
+// Geometry
+// ---------------------------------------------------------------------------
 
-    vec2(origin_x + inner * offset.x, origin_y + inner * offset.y)
+/// Board coordinates are (row, col); Bevy's 2D y-axis points up, so rows count
+/// downwards. This is the whole of the layout math that `BoardLayout` replaced.
+fn cell_to_world(row: usize, col: usize) -> Vec2 {
+    Vec2::new(col as f32 * CELL, -(row as f32) * CELL)
 }
 
-fn smooth_progress(progress: f32) -> f32 {
-    let t = progress.clamp(0.0, 1.0);
-    t * t * (3.0 - 2.0 * t)
-}
-
-fn draw_edit_overlay(app: &SimulationApp, layout: BoardLayout, hovered: Option<(usize, usize)>) {
-    let Some((row, col)) = hovered else {
-        return;
-    };
-
-    let gap = (layout.cell * 0.08).clamp(2.0, 7.0);
-    let inner = layout.cell - gap;
-    let x = layout.x + col as f32 * layout.cell + gap * 0.5;
-    let y = layout.y + row as f32 * layout.cell + gap * 0.5;
-    let preview_color = match app.edit_tool {
-        EditTool::Aphid => color(111, 219, 91, 175),
-        EditTool::Ladybug => color(231, 78, 61, 175),
-    };
-
-    draw_round_rect_lines(
-        x - 3.0,
-        y - 3.0,
-        inner + 6.0,
-        inner + 6.0,
-        inner * 0.12 + 3.0,
-        3.0,
-        preview_color,
-    );
-    draw_circle_lines(
-        x + inner * 0.5,
-        y + inner * 0.5,
-        inner * 0.22,
-        2.0,
-        preview_color,
-    );
-}
-
-fn draw_food_speckles(x: f32, y: f32, size: f32, row: usize, col: usize, food: i32) {
-    let dots = food.clamp(0, 6) as usize;
-    for dot in 0..dots {
-        let seed = row * 73 + col * 41 + dot * 19;
-        let px = x + size * (0.18 + (seed % 59) as f32 / 92.0);
-        let py = y + size * (0.18 + (seed % 43) as f32 / 78.0);
-        draw_circle(
-            px,
-            py,
-            (size * 0.018).clamp(1.0, 2.6),
-            color(219, 205, 116, 95),
-        );
-    }
-}
-
-fn draw_creatures(x: f32, y: f32, size: f32, aphids: usize, ladybugs: usize) {
-    let radius = creature_radius(size);
-    let scale = creature_render_scale(aphids, ladybugs);
-    let aphid_slots = creature_slots(aphids, ladybugs, true);
-    let ladybug_slots = creature_slots(ladybugs, aphids, false);
-
-    for (index, &(dx, dy)) in aphid_slots.iter().enumerate().take(aphids.min(4)) {
-        draw_aphid(x + size * dx, y + size * dy, radius * scale, index);
-    }
-
-    for (index, &(dx, dy)) in ladybug_slots.iter().enumerate().take(ladybugs.min(4)) {
-        draw_ladybug(x + size * dx, y + size * dy, radius * scale, index);
-    }
-
-    if aphids > 1 {
-        draw_count_badge(
-            x + size * 0.22,
-            y + size * 0.22,
-            aphids,
-            color(93, 188, 85, 255),
-        );
-    }
-
-    if ladybugs > 1 {
-        draw_count_badge(
-            x + size * 0.78,
-            y + size * 0.78,
-            ladybugs,
-            color(217, 66, 52, 255),
-        );
-    }
-}
-
-fn creature_radius(size: f32) -> f32 {
-    (size * 0.125).clamp(4.0, 12.0)
-}
-
-fn creature_slots(primary: usize, secondary: usize, aphid: bool) -> &'static [(f32, f32); 5] {
+/// Where a creature sits in its cell and how large it is drawn, ported from
+/// `creature_slots` and `creature_render_scale` in the previous macroquad GUI. The offset
+/// is a fraction of the cell from its top-left corner (x right, y down).
+///
+/// `cell_slot` counts per kind, so a mixed cell needs separate layouts: with one
+/// shared layout the first aphid and the first ladybug land on the same spot and
+/// one hides the other. Aphids take the upper left and ladybugs the lower right.
+fn creature_slot(
+    kind: CreatureSnapshotKind,
+    cell_slot: usize,
+    aphids: usize,
+    ladybugs: usize,
+) -> (Vec2, f32) {
     const CENTER: [(f32, f32); 5] = [
         (0.50, 0.50),
         (0.36, 0.38),
@@ -1362,833 +1043,3219 @@ fn creature_slots(primary: usize, secondary: usize, aphid: bool) -> &'static [(f
         (0.68, 0.58),
     ];
 
-    if primary == 0 || secondary == 0 {
+    let slots = if aphids == 0 || ladybugs == 0 {
         &CENTER
-    } else if aphid {
+    } else if kind == CreatureSnapshotKind::Aphid {
         &APHIDS
     } else {
         &LADYBUGS
-    }
-}
-
-fn draw_aphid(cx: f32, cy: f32, radius: f32, index: usize) {
-    let tilt = if index.is_multiple_of(2) { -0.8 } else { 0.8 };
-    let body = color(105, 211, 83, 255);
-    let shell = color(66, 155, 62, 255);
-    let dark = color(27, 58, 35, 230);
-
-    draw_circle(cx, cy, radius, color(12, 20, 13, 90));
-    draw_circle(cx, cy, radius * 0.86, body);
-    draw_circle(cx - radius * 0.38, cy - radius * 0.22, radius * 0.42, shell);
-    draw_circle(cx + radius * 0.52, cy + radius * 0.12, radius * 0.28, shell);
-
-    for leg in [-0.5_f32, 0.0, 0.5] {
-        draw_line(
-            cx - radius * 0.12,
-            cy + radius * leg,
-            cx - radius * (0.92 + leg.abs() * 0.18),
-            cy + radius * (leg + 0.22 * tilt),
-            1.3,
-            dark,
-        );
-        draw_line(
-            cx + radius * 0.12,
-            cy + radius * leg,
-            cx + radius * (0.92 + leg.abs() * 0.18),
-            cy + radius * (leg - 0.22 * tilt),
-            1.3,
-            dark,
-        );
-    }
-
-    draw_circle(cx + radius * 0.46, cy - radius * 0.05, radius * 0.09, dark);
-}
-
-fn draw_ladybug(cx: f32, cy: f32, radius: f32, index: usize) {
-    let shift = if index.is_multiple_of(2) { -0.08 } else { 0.08 };
-    let red = color(221, 64, 50, 255);
-    let red_hi = color(246, 99, 72, 255);
-    let dark = color(26, 23, 24, 255);
-
-    draw_circle(cx, cy, radius, color(12, 12, 12, 105));
-    draw_circle(cx, cy, radius * 0.9, red);
-    draw_circle(
-        cx - radius * 0.18,
-        cy - radius * 0.24,
-        radius * 0.42,
-        red_hi,
-    );
-    draw_circle(cx, cy - radius * 0.7, radius * 0.38, dark);
-    draw_line(cx, cy - radius * 0.72, cx, cy + radius * 0.72, 1.5, dark);
-
-    for (dx, dy) in [(-0.35, -0.12), (0.34, -0.04), (-0.22, 0.34), (0.28, 0.32)] {
-        draw_circle(
-            cx + radius * (dx + shift),
-            cy + radius * dy,
-            radius * 0.13,
-            dark,
-        );
-    }
-}
-
-fn draw_count_badge(cx: f32, cy: f32, count: usize, accent: Color) {
-    let label = count.to_string();
-    let radius = 11.0;
-    draw_circle(cx + 1.0, cy + 1.0, radius + 1.0, color(0, 0, 0, 115));
-    draw_circle(cx, cy, radius, accent);
-
-    let font_size = 16;
-    let dimensions = measure_text(&label, None, font_size, 1.0);
-    draw_text_ex(
-        &label,
-        cx - dimensions.width * 0.5,
-        cy + dimensions.height * 0.36,
-        TextParams {
-            font_size,
-            color: color(18, 25, 20, 255),
-            ..Default::default()
-        },
-    );
-}
-
-fn draw_panel_frame(layout: BoardLayout) {
-    draw_round_rect(
-        layout.panel_x,
-        layout.panel_y,
-        layout.panel_w,
-        layout.panel_h,
-        22.0,
-        color(18, 24, 29, 218),
-    );
-    draw_round_rect_lines(
-        layout.panel_x + 1.0,
-        layout.panel_y + 1.0,
-        layout.panel_w - 2.0,
-        layout.panel_h - 2.0,
-        21.0,
-        1.0,
-        color(116, 137, 119, 115),
-    );
-}
-
-fn draw_panel(app: &mut SimulationApp, layout: BoardLayout) {
-    let content_x = layout.panel_x + 24.0;
-    let content_w = layout.panel_w - 48.0;
-    let mut y = layout.panel_y + 40.0;
-    draw_text_ex(
-        "Simulation",
-        content_x,
-        y,
-        TextParams {
-            font_size: 24,
-            color: color(238, 232, 210, 255),
-            ..Default::default()
-        },
-    );
-    y += 28.0;
-
-    draw_stat(layout.panel_x, y, "Status", status_label(app));
-    y += 19.0;
-    draw_stat(layout.panel_x, y, "Turn", &app.turn.to_string());
-    y += 19.0;
-    draw_stat(layout.panel_x, y, "Aphids", &app.summary.aphids.to_string());
-    y += 19.0;
-    draw_stat(
-        layout.panel_x,
-        y,
-        "Ladybugs",
-        &app.summary.ladybugs.to_string(),
-    );
-    y += 19.0;
-    draw_stat(layout.panel_x, y, "Food", &app.summary.food.to_string());
-    y += 19.0;
-    draw_stat(
-        layout.panel_x,
-        y,
-        "Births/Deaths",
-        &format!("{} / {}", app.last_births, app.last_deaths),
-    );
-    y += 19.0;
-    draw_stat(
-        layout.panel_x,
-        y,
-        "Speed",
-        &format!("{:.1} turns/s", app.speed),
-    );
-    y += 32.0;
-
-    draw_section_title(content_x, y, "Run");
-    y += 12.0;
-
-    let gap = 8.0;
-    let button_h = 26.0;
-    let third_w = (content_w - gap * 2.0) / 3.0;
-    let play_label = if app.playing { "Pause" } else { "Play" };
-    if draw_control_button(
-        Rect::new(content_x, y, third_w, button_h),
-        play_label,
-        color(82, 116, 80, 255),
-    ) {
-        app.playing = !app.playing;
-        app.accumulator = 0.0;
-    }
-    if draw_control_button(
-        Rect::new(content_x + third_w + gap, y, third_w, button_h),
-        "Step",
-        color(78, 96, 121, 255),
-    ) {
-        app.step();
-        app.accumulator = 0.0;
-    }
-    if draw_control_button(
-        Rect::new(content_x + (third_w + gap) * 2.0, y, third_w, button_h),
-        "Reset",
-        color(127, 86, 61, 255),
-    ) {
-        app.reset();
-    }
-    y += 30.0;
-
-    let half_w = (content_w - gap) / 2.0;
-    if draw_control_button(
-        Rect::new(content_x, y, half_w, button_h),
-        "Slower",
-        color(62, 76, 92, 255),
-    ) {
-        app.speed = (app.speed - 0.5).max(0.5);
-    }
-    if draw_control_button(
-        Rect::new(content_x + half_w + gap, y, half_w, button_h),
-        "Faster",
-        color(62, 76, 92, 255),
-    ) {
-        app.speed = (app.speed + 0.5).min(8.0);
-    }
-    y += 56.0;
-
-    draw_section_title(content_x, y, "Seed");
-    y += 12.0;
-    let seed_button_w = 44.0;
-    let seed_display_w = content_w - seed_button_w * 4.0 - gap * 4.0;
-    if draw_control_button(
-        Rect::new(content_x, y, seed_button_w, button_h),
-        "-10",
-        color(74, 83, 93, 255),
-    ) {
-        app.adjust_seed(-10);
-    }
-    if draw_control_button(
-        Rect::new(content_x + seed_button_w + gap, y, seed_button_w, button_h),
-        "-1",
-        color(74, 83, 93, 255),
-    ) {
-        app.adjust_seed(-1);
-    }
-    draw_round_rect(
-        content_x + (seed_button_w + gap) * 2.0,
-        y,
-        seed_display_w,
-        button_h,
-        8.0,
-        color(32, 42, 45, 230),
-    );
-    draw_centered_text(
-        &app.seed.to_string(),
-        Rect::new(
-            content_x + (seed_button_w + gap) * 2.0,
-            y,
-            seed_display_w,
-            button_h,
-        ),
-        16,
-        color(232, 223, 188, 255),
-    );
-    if draw_control_button(
-        Rect::new(
-            content_x + (seed_button_w + gap) * 2.0 + seed_display_w + gap,
-            y,
-            seed_button_w,
-            button_h,
-        ),
-        "+1",
-        color(74, 83, 93, 255),
-    ) {
-        app.adjust_seed(1);
-    }
-    if draw_control_button(
-        Rect::new(
-            content_x + (seed_button_w + gap) * 3.0 + seed_display_w + gap,
-            y,
-            seed_button_w,
-            button_h,
-        ),
-        "+10",
-        color(74, 83, 93, 255),
-    ) {
-        app.adjust_seed(10);
-    }
-    y += 56.0;
-
-    draw_section_title(content_x, y, "Board Edit");
-    y += 12.0;
-    let edit_button_w = (content_w - gap * 2.0) / 3.0;
-    let edit_label = if app.editing_enabled {
-        "Editing"
-    } else {
-        "Edit Off"
     };
-    if draw_control_button(
-        Rect::new(content_x, y, edit_button_w, button_h),
-        edit_label,
-        if app.editing_enabled {
-            color(82, 116, 80, 255)
-        } else {
-            color(74, 83, 93, 255)
-        },
-    ) {
-        app.editing_enabled = !app.editing_enabled;
-        app.playing = false;
-        app.finish_animation();
-    }
-    if draw_control_button(
-        Rect::new(content_x + edit_button_w + gap, y, edit_button_w, button_h),
-        "Aphid",
-        if app.edit_tool == EditTool::Aphid {
-            color(85, 145, 73, 255)
-        } else {
-            color(57, 76, 59, 255)
-        },
-    ) {
-        app.edit_tool = EditTool::Aphid;
-        app.editing_enabled = true;
-        app.playing = false;
-    }
-    if draw_control_button(
-        Rect::new(
-            content_x + (edit_button_w + gap) * 2.0,
-            y,
-            edit_button_w,
-            button_h,
-        ),
-        "Ladybug",
-        if app.edit_tool == EditTool::Ladybug {
-            color(145, 73, 62, 255)
-        } else {
-            color(76, 59, 57, 255)
-        },
-    ) {
-        app.edit_tool = EditTool::Ladybug;
-        app.editing_enabled = true;
-        app.playing = false;
-    }
-    y += 40.0;
-    draw_text_ex(
-        "Left click adds, right click removes.",
-        content_x,
-        y,
-        TextParams {
-            font_size: 13,
-            color: color(154, 170, 158, 255),
-            ..Default::default()
-        },
-    );
-    y += 32.0;
+    let (x, y) = slots[cell_slot.min(slots.len() - 1)];
+    let scale = if aphids + ladybugs > 5 { 0.82 } else { 1.0 };
+    (Vec2::new(x, y), scale)
+}
 
-    draw_section_title(content_x, y, "Config Probabilities");
-    y += 12.0;
-    let mut params_changed = false;
-    params_changed |= draw_probability_slider(
-        content_x,
-        y,
-        content_w,
-        "Aphid move",
-        &mut app.aphid_params.prob_move,
-        color(98, 204, 83, 255),
-    );
-    y += 20.0;
-    params_changed |= draw_probability_slider(
-        content_x,
-        y,
-        content_w,
-        "Aphid kill",
-        &mut app.aphid_params.prob_kill,
-        color(98, 204, 83, 255),
-    );
-    y += 20.0;
-    params_changed |= draw_probability_slider(
-        content_x,
-        y,
-        content_w,
-        "Aphid help",
-        &mut app.aphid_params.prob_accomplice,
-        color(98, 204, 83, 255),
-    );
-    y += 20.0;
-    params_changed |= draw_probability_slider(
-        content_x,
-        y,
-        content_w,
-        "Aphid breed",
-        &mut app.aphid_params.prob_procreate,
-        color(98, 204, 83, 255),
-    );
-    y += 24.0;
-    params_changed |= draw_probability_slider(
-        content_x,
-        y,
-        content_w,
-        "Lady move",
-        &mut app.ladybug_params.prob_move,
-        color(221, 73, 58, 255),
-    );
-    y += 20.0;
-    params_changed |= draw_probability_slider(
-        content_x,
-        y,
-        content_w,
-        "Lady kill",
-        &mut app.ladybug_params.prob_kill,
-        color(221, 73, 58, 255),
-    );
-    y += 20.0;
-    params_changed |= draw_probability_slider(
-        content_x,
-        y,
-        content_w,
-        "Lady turn",
-        &mut app.ladybug_params.prob_direction,
-        color(221, 73, 58, 255),
-    );
-    y += 20.0;
-    params_changed |= draw_probability_slider(
-        content_x,
-        y,
-        content_w,
-        "Lady breed",
-        &mut app.ladybug_params.prob_procreate,
-        color(221, 73, 58, 255),
-    );
-    y += 24.0;
-    params_changed |= draw_probability_slider(
-        content_x,
-        y,
-        content_w,
-        "Food regrow",
-        &mut app.food_params.prob_regenerate,
-        color(194, 184, 83, 255),
-    );
-    y += 32.0;
+fn creature_world(location: Coordinates, offset: Vec2) -> Vec2 {
+    // `Coordinates.x` is the row and `.y` is the column, matching
+    // `creature_position` in the previous macroquad GUI.
+    let inner = CELL - GAP;
+    let top_left = cell_to_world(location.x, location.y) + Vec2::new(-inner * 0.5, inner * 0.5);
+    top_left + Vec2::new(inner * offset.x, -inner * offset.y)
+}
 
-    if params_changed {
-        app.apply_params();
-    }
+// ---------------------------------------------------------------------------
+// Startup
+// ---------------------------------------------------------------------------
 
-    let half_w = (content_w - gap) / 2.0;
-    if draw_control_button(
-        Rect::new(content_x, y, half_w, button_h),
-        "Save TOML",
-        color(91, 105, 73, 255),
-    ) {
-        app.save_config();
-    }
-    if draw_control_button(
-        Rect::new(content_x + half_w + gap, y, half_w, button_h),
-        "Reload TOML",
-        color(77, 91, 75, 255),
-    ) {
-        app.reload_config_files();
-    }
-    y += 28.0;
+fn setup(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<ColorMaterial>>,
+    mut cell_materials: ResMut<Assets<CellMaterial>>,
+    asset_server: Res<AssetServer>,
+) {
+    let mut random = Random::with_seed(DEFAULT_SEED);
+    let board = load_configured_board(&mut random);
+    let (rows, cols) = (board.rows(), board.cols());
+    let summary = board.summary();
+    commands.insert_resource(StartingSetup(
+        creature_life_cycle::format_simulation_config(&board),
+    ));
 
-    if let Some(status) = &app.save_status {
-        draw_text_ex(
-            &status.message,
-            content_x,
-            y,
-            TextParams {
-                font_size: 13,
-                color: if status.success {
-                    color(167, 218, 137, 255)
-                } else {
-                    color(235, 126, 102, 255)
-                },
-                ..Default::default()
+    // Centre the camera on the board and scale so the whole thing fits, which
+    // is the job `layout_for_size` does by hand in the previous macroquad GUI.
+    let board_size = Vec2::new(cols as f32 * CELL, rows as f32 * CELL);
+    let centre = Vec2::new(
+        board_size.x * 0.5 - CELL * 0.5,
+        -board_size.y * 0.5 + CELL * 0.5,
+    );
+    // `AutoMin` keeps the whole board visible whatever the window size and
+    // aspect ratio are, preserving the aspect ratio. This is the single line
+    // that replaces `layout_for_size` and its fit/clamp arithmetic.
+    let mut projection = OrthographicProjection::default_2d();
+    projection.scaling_mode = ScalingMode::AutoMin {
+        min_width: board_size.x + CELL,
+        min_height: board_size.y + CELL,
+    };
+
+    commands.spawn((
+        BoardCamera,
+        Camera2d,
+        Camera {
+            order: 0,
+            ..default()
+        },
+        Projection::Orthographic(projection),
+        Transform::from_translation(centre.extend(999.0)),
+    ));
+
+    // The chart gets its own camera so its viewport can be the strip under the
+    // board, cleared to the chart surface. `layout_viewports` sets the viewport
+    // and makes one world unit equal one logical pixel of the strip.
+    commands.spawn((
+        ChartCamera,
+        Camera2d,
+        Camera {
+            order: 1,
+            clear_color: ClearColorConfig::Custom(CHART_SURFACE),
+            ..default()
+        },
+        Projection::Orthographic(OrthographicProjection::default_2d()),
+        Transform::from_xyz(0.0, 0.0, 100.0),
+        RenderLayers::layer(2),
+    ));
+
+    // `bevy_ui` lays out relative to its camera's viewport, so the panel needs
+    // its own full-window camera. Sharing the board camera would shift the
+    // whole panel right by the viewport offset.
+    // `RenderLayers` keeps this camera from drawing the board a second time.
+    // Nothing in the world is on layer 1, so it renders only its UI.
+    let ui_camera = commands
+        .spawn((
+            Camera2d,
+            Camera {
+                order: 2,
+                clear_color: ClearColorConfig::None,
+                ..default()
             },
-        );
+            RenderLayers::layer(1),
+        ))
+        .id();
+
+    // One shared quad and ten shared materials, one for each food level.
+    // The quad extends past the fill to leave room for the outside border
+    // and its antialiasing. The visible fill keeps its original dimensions.
+    let cell_mesh = meshes.add(Rectangle::from_length(CELL + GAP));
+    let cell_palette = CellPalette(std::array::from_fn(|food| {
+        cell_materials.add(CellMaterial {
+            fill: food_colour(food as i32).to_linear(),
+            rim: EMPTY_CELL_RIM
+                .mix(&FED_CELL_RIM, food as f32 / MAX_FOOD as f32)
+                .to_linear(),
+            // Fill half-size, corner radius, quad size, maximum border width.
+            shape: Vec4::new(
+                (CELL - GAP) * 0.5,
+                (CELL - GAP) * CELL_CORNER,
+                CELL + GAP,
+                GAP * 0.25,
+            ),
+        })
+    }));
+    for row in 0..rows {
+        for col in 0..cols {
+            commands.spawn((
+                Cell { row, col },
+                Mesh2d(cell_mesh.clone()),
+                MeshMaterial2d(cell_palette.0[0].clone()),
+                Transform::from_translation(cell_to_world(row, col).extend(0.0)),
+            ));
+        }
+    }
+    commands.insert_resource(cell_palette);
+
+    // Each species shares one transparent texture. Badges remain mesh discs.
+    let inner = CELL - GAP;
+    let font: Handle<Font> = asset_server.load(fonts::REGULAR);
+    commands.insert_resource(CreatureAssets {
+        aphid: load_embedded_asset!(&*asset_server, "../../assets/sprites/aphid.png"),
+        ladybug: load_embedded_asset!(&*asset_server, "../../assets/sprites/ladybug.png"),
+        badge: meshes.add(Circle::new(inner * BADGE_RADIUS)),
+        badge_shadow_mesh: meshes.add(Circle::new(inner * (BADGE_RADIUS + BADGE_SHADOW_OFFSET))),
+        badge_colours: [
+            materials.add(ColorMaterial::from_color(BADGE_APHID)),
+            materials.add(ColorMaterial::from_color(BADGE_LADYBUG)),
+        ],
+        badge_shadow: materials.add(ColorMaterial::from_color(BADGE_SHADOW)),
+        font: font.clone(),
+    });
+
+    commands.insert_resource(Stats {
+        turn: 0,
+        aphids: summary.aphids,
+        ladybugs: summary.ladybugs,
+        food: summary.food,
+        births: 0,
+        deaths: 0,
+        extinct: summary.is_extinct(),
+    });
+    let params = Params {
+        aphid: board.aphid_params(),
+        ladybug: board.ladybug_params(),
+        food: board.food_params(),
+    };
+    spawn_panel(&mut commands, &params, ui_camera);
+    spawn_toolbar(&mut commands, ui_camera);
+    commands.insert_resource(params);
+
+    let mut history = History::default();
+    history.record(0, summary.aphids, summary.ladybugs);
+    commands.insert_resource(history);
+
+    // End-of-line dots: an 8px dot on a 2px ring of the surface colour, so the
+    // dot stays legible where the other line passes through it.
+    let dot = meshes.add(Circle::new(4.0));
+    let ring = meshes.add(Circle::new(6.0));
+    let ring_material = materials.add(ColorMaterial::from_color(CHART_SURFACE));
+    for (series, colour) in CHART_SERIES.into_iter().enumerate() {
+        commands.spawn((
+            EndDot(series),
+            Mesh2d(ring.clone()),
+            MeshMaterial2d(ring_material.clone()),
+            Transform::from_xyz(0.0, 0.0, 10.0),
+            Visibility::Hidden,
+            RenderLayers::layer(2),
+        ));
+        commands.spawn((
+            EndDot(series),
+            Mesh2d(dot.clone()),
+            MeshMaterial2d(materials.add(ColorMaterial::from_color(colour))),
+            Transform::from_xyz(0.0, 0.0, 11.0),
+            Visibility::Hidden,
+            RenderLayers::layer(2),
+        ));
+    }
+    spawn_chart_overlay(&mut commands, ui_camera, font.clone());
+    spawn_cell_popup(&mut commands, ui_camera, font);
+    // Hidden until switched on; `rebuild_food_overlay` fills it in. Sits
+    // between the cells (z 0) and the creatures (z 1).
+    commands.spawn((
+        FoodLayer,
+        Mesh2d(meshes.add(food_overlay_mesh(&board))),
+        MeshMaterial2d(materials.add(ColorMaterial::default())),
+        Transform::from_xyz(0.0, 0.0, 0.5),
+        Visibility::Hidden,
+    ));
+    commands.insert_resource(BoardRes(board));
+    commands.insert_resource(Rng(random));
+
+    if let Ok(path) = std::env::var("CLC_SCREENSHOT") {
+        // Run turns quickly so the captured chart has real history to show.
+        commands.insert_resource(StepTimer(Timer::from_seconds(0.03, TimerMode::Repeating)));
+        commands.insert_resource(ScreenshotProbe {
+            path,
+            timer: Timer::from_seconds(STEP_SECONDS * 6.0, TimerMode::Once),
+            stage: 0,
+        });
     }
 }
 
-fn draw_section_title(x: f32, y: f32, label: &str) {
-    draw_text_ex(
-        label,
-        x,
-        y,
-        TextParams {
-            font_size: 17,
-            color: color(205, 211, 184, 255),
-            ..Default::default()
-        },
-    );
+/// Bundle board art and shaders so standalone launches find their assets.
+fn board_render_assets(app: &mut App) {
+    embedded_asset!(app, "../../assets/shaders/board_cell.wgsl");
+    embedded_asset!(app, "../../assets/sprites/aphid.png");
+    embedded_asset!(app, "../../assets/sprites/ladybug.png");
 }
 
-fn draw_control_button(rect: Rect, label: &str, fill: Color) -> bool {
-    let mouse = mouse_vec();
-    let hovered = rect.contains(mouse);
-    let pressed = hovered && is_mouse_button_down(MouseButton::Left);
-    let clicked = hovered && is_mouse_button_pressed(MouseButton::Left);
-    let button_fill = if pressed {
-        mix(fill, color(255, 255, 255, 255), 0.18)
-    } else if hovered {
-        mix(fill, color(255, 255, 255, 255), 0.10)
+#[derive(Asset, TypePath, AsBindGroup, Debug, Clone)]
+struct CellMaterial {
+    #[uniform(0)]
+    fill: LinearRgba,
+    #[uniform(0)]
+    rim: LinearRgba,
+    #[uniform(0)]
+    shape: Vec4,
+}
+
+impl Material2d for CellMaterial {
+    fn fragment_shader() -> ShaderRef {
+        bevy::asset::AssetPath::from_path_buf(bevy::asset::embedded_path!(
+            "../../assets/shaders/board_cell.wgsl"
+        ))
+        .with_source("embedded")
+        .into()
+    }
+
+    fn alpha_mode(&self) -> AlphaMode2d {
+        AlphaMode2d::Blend
+    }
+}
+
+#[derive(Resource)]
+struct CellPalette([Handle<CellMaterial>; MAX_FOOD as usize + 1]);
+
+#[derive(Resource)]
+struct CreatureAssets {
+    aphid: Handle<Image>,
+    ladybug: Handle<Image>,
+    badge: Handle<Mesh>,
+    badge_shadow_mesh: Handle<Mesh>,
+    badge_colours: [Handle<ColorMaterial>; 2],
+    badge_shadow: Handle<ColorMaterial>,
+    font: Handle<Font>,
+}
+
+// ---------------------------------------------------------------------------
+// Parameters panel (bevy_feathers)
+// ---------------------------------------------------------------------------
+
+/// A quiet caption and a slider with one percentage readout.
+fn param_row(index: usize, value: f64) -> impl Scene {
+    bsn! {
+        Node {
+            flex_direction: FlexDirection::Column,
+            row_gap: px(6),
+            margin: UiRect::bottom(px(12)),
+            flex_shrink: 0.0,
+        }
+        Children [
+            label(PARAM_LABELS[index]),
+            (
+                @FeathersSlider {
+                    @min: 0.0,
+                    @max: 100.0,
+                    @value: {(value * 100.0) as f32},
+                }
+                SliderPrecision(1)
+                ProbSlider({index})
+                on(on_prob_changed)
+            ),
+        ]
+    }
+}
+
+/// Shared explicit typography prevents unstyled text falling back to Bevy's
+/// larger default font. Feathers controls keep their own inherited styles.
+fn ui_text(text: impl Into<String>, size: f32) -> impl Scene {
+    bsn! {
+        Text(text)
+        TextFont {
+            font: bevy::text::FontSourceTemplate::Handle(fonts::REGULAR),
+            font_size: FontSize::Px(size),
+        }
+        bevy::app::PropagateOver<TextFont>
+        TextColor(INK_PRIMARY)
+    }
+}
+
+fn stat_row(caption: &'static str, index: usize) -> impl Scene {
+    bsn! {
+        Node { justify_content: JustifyContent::SpaceBetween, align_items: AlignItems::Center }
+        Children [
+            label(caption),
+            ({ui_text("0", 18.0)} HudText({index})),
+        ]
+    }
+}
+
+fn section_title(title: &'static str) -> impl Scene {
+    bsn! {
+        Node { margin: UiRect::new(px(0), px(0), px(8), px(6)) }
+        Children [ui_text(title, 16.0)]
+    }
+}
+
+fn tab_button(caption: &'static str, tab: PanelTab) -> impl Scene {
+    bsn! {
+        @FeathersButton
+        Node { flex_grow: 1.0 }
+        TabButton({tab})
+        on(move |_: On<Activate>, mut active: ResMut<ActiveTab>| { active.0 = tab; })
+        Children [(Text(caption) ThemedText)]
+    }
+}
+
+/// Names the file the Save button writes, so the panel says where the setup
+/// goes rather than leaving the reader to guess at the XDG path. The home
+/// directory is abbreviated, as a shell would print it, to keep the line short.
+fn save_destination() -> String {
+    let Ok(path) = creature_life_cycle::simulation_config_path() else {
+        return "No config path is available.".into();
+    };
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    let shown = home
+        .and_then(|home| {
+            path.strip_prefix(home)
+                .ok()
+                .map(|rest| format!("~/{}", rest.display()))
+        })
+        .unwrap_or_else(|| path.display().to_string());
+    format!("Writes to {shown}")
+}
+
+fn run_button(caption: &'static str, action: RunAction) -> impl Scene {
+    bsn! {
+        @FeathersButton
+        on(move |_: On<Activate>, mut actions: MessageWriter<RunAction>| { actions.write(action); })
+        Children [(Text(caption) ThemedText)]
+    }
+}
+
+fn spawn_toolbar(commands: &mut Commands, camera: Entity) {
+    commands.spawn_scene(bsn! {
+        Node {
+            position_type: PositionType::Absolute,
+            left: px(PANEL_WIDTH), right: px(0), top: px(0),
+            height: px(TOOLBAR_HEIGHT),
+            padding: UiRect::axes(px(18), px(12)),
+            flex_direction: FlexDirection::Column, row_gap: px(10),
+        }
+        ThemeBackgroundColor(tokens::WINDOW_BG)
+        Children [
+            (
+                Node { column_gap: px(8), align_items: AlignItems::Center }
+                Children [
+                    (
+                        @FeathersButton { @variant: ButtonVariant::Primary }
+                        Node { min_width: px(72) }
+                        on(|_: On<Activate>, mut actions: MessageWriter<RunAction>| { actions.write(RunAction::TogglePlay); })
+                        Children [(Text("Pause") ThemedText PlayLabel)]
+                    ),
+                    run_button("Step", RunAction::Step),
+                    run_button("Reset", RunAction::Reset),
+                    (Node { width: px(12) }),
+                    run_button("−", RunAction::Slower),
+                    (Node { width: px(94), justify_content: JustifyContent::Center }
+                        Children [({ui_text("", 14.0)} SpeedLabel)]),
+                    run_button("+", RunAction::Faster),
+                    (Node { flex_grow: 1.0 }),
+                    run_button("Fit board", RunAction::Fit),
+                ]
+            ),
+            (
+                Node { column_gap: px(12), align_items: AlignItems::Center }
+                Children [
+                    ({ui_text("", 14.0)} PlaybackStatus),
+                    (Node { flex_grow: 1.0 }),
+                    ({ui_text("", 14.0)} StatusLabel),
+                ]
+            ),
+        ]
+    }).insert(UiTargetCamera(camera));
+}
+
+/// One step of the food scale, in the same colour as a cell with that food.
+fn food_swatch(food: i32) -> impl Scene {
+    bsn! {
+        Node { flex_grow: 1.0 }
+        BackgroundColor({food_colour(food)})
+    }
+}
+
+/// Legend for the cell shading. It is always on, whereas the overlay's bars and
+/// speckles are optional, so the scale is shown regardless of the checkbox.
+fn food_scale() -> impl Scene {
+    bsn! {
+        Node {
+            flex_direction: FlexDirection::Column,
+            row_gap: px(4),
+            margin: UiRect::vertical(px(6)),
+        }
+        Children [
+            label_small("food in each cell"),
+            (
+                // A 2px gap keeps neighbouring steps readable as steps.
+                Node { height: px(10), column_gap: px(2) }
+                Children [
+                    food_swatch(0), food_swatch(1), food_swatch(2), food_swatch(3),
+                    food_swatch(4), food_swatch(5), food_swatch(6), food_swatch(7),
+                    food_swatch(8), food_swatch(9),
+                ]
+            ),
+            (
+                Node { justify_content: JustifyContent::SpaceBetween }
+                Children [ label_small("0 empty"), label_small("9 abundant") ]
+            ),
+        ]
+    }
+}
+
+fn spawn_panel(commands: &mut Commands, params: &Params, ui_camera: Entity) {
+    let root = commands
+        .spawn_scene(bsn! {
+            Node { width: px(PANEL_WIDTH), height: percent(100) }
+            ThemeBackgroundColor(tokens::WINDOW_BG)
+                Children [
+                (
+                    Node {
+                        position_type: PositionType::Absolute,
+                        left: px(16), right: px(16), top: px(20),
+                        flex_direction: FlexDirection::Column, row_gap: px(6),
+                    }
+                    Children [
+                        ui_text("Aphids & Ladybugs", 21.0),
+                        label_small("An evolving ecosystem"),
+                        (
+                            Node { column_gap: px(4), margin: UiRect::top(px(14)) }
+                            Children [
+                                tab_button("Overview", PanelTab::Overview),
+                                tab_button("Parameters", PanelTab::Parameters),
+                                tab_button("Edit", PanelTab::Edit),
+                            ]
+                        ),
+                    ]
+                ),
+            ]
+        })
+        .insert(UiTargetCamera(ui_camera))
+        .id();
+
+    let scroll = commands.spawn_scene(bsn! {
+        Node {
+            position_type: PositionType::Absolute,
+            left: px(16), right: px(28), top: px(PANEL_HEADER), bottom: px(16),
+            flex_direction: FlexDirection::Column, overflow: Overflow::scroll_y(),
+        }
+        PanelRoot ScrollPosition
+        Children [
+            (
+                Node { flex_direction: FlexDirection::Column, row_gap: px(8), flex_shrink: 0.0 }
+                TabPage({PanelTab::Overview})
+                Children [
+                    section_title("Population"),
+                    stat_row("Aphids", 0),
+                    stat_row("Ladybugs", 1),
+                    stat_row("Food available", 2),
+                    section_title("Last turn"),
+                    stat_row("Births", 3),
+                    stat_row("Deaths", 4),
+                    section_title("Board layers"),
+                    (
+                        @FeathersCheckbox { @caption: bsn! { Text("Show food details (F)") ThemedText } }
+                        FoodOverlayToggle
+                        on(|change: On<ValueChange<bool>>, mut overlay: ResMut<FoodOverlay>| { overlay.0 = change.value; })
+                    ),
+                    food_scale(),
+                    section_title("Navigate"),
+                    label("Drag to pan · Scroll to zoom"),
+                    label("Fit board restores the full view."),
+                    section_title("Run setup"),
+                    stat_row("Run seed", 5),
+                    (
+                        Node { margin: UiRect::vertical(px(4)) }
+                        Children [
+                            (
+                                @FeathersTextInputContainer
+                                Children [(@FeathersTextInput { @max_characters: {Some(SEED_DIGITS)} } SeedField)]
+                            ),
+                        ]
+                    ),
+                    (
+                        @FeathersButton
+                        on(|_: On<Activate>, mut requests: MessageWriter<Reseed>| { requests.write(Reseed); })
+                        Children [(Text("Restart with this seed") ThemedText)]
+                    ),
+                    label_small("Digits only. Enter, or the button, restarts the run from this seed."),
+                    label("Reset restores the last saved setup, or the board loaded at launch, using the current parameters and seed."),
+                    run_button("Save setup (S)", RunAction::Save),
+                    label_small(save_destination()),
+                    label_small("Food and creature life values are not saved; they are regenerated on load."),
+                ]
+            ),
+            (
+                Node { display: Display::None, flex_direction: FlexDirection::Column, flex_shrink: 0.0 }
+                TabPage({PanelTab::Parameters})
+                Children [
+                    label("Probabilities (%) · apply to future turns"),
+                    section_title("Aphids"),
+                    param_row(0, params.get(0)), param_row(1, params.get(1)),
+                    param_row(2, params.get(2)), param_row(3, params.get(3)),
+                    section_title("Ladybugs"),
+                    param_row(4, params.get(4)), param_row(5, params.get(5)),
+                    param_row(6, params.get(6)), param_row(7, params.get(7)),
+                    section_title("Environment"),
+                    param_row(8, params.get(8)),
+                    label_small("Focus a slider and use arrow keys for precise changes."),
+                ]
+            ),
+            (
+                Node { display: Display::None, flex_direction: FlexDirection::Column, row_gap: px(12), flex_shrink: 0.0 }
+                TabPage({PanelTab::Edit})
+                Children [
+                    section_title("Edit cells"),
+                    (
+                        @FeathersCheckbox { @caption: bsn! { Text("Enable editing (E)") ThemedText } }
+                        EditToggle
+                        on(|change: On<ValueChange<bool>>, mut edit: ResMut<EditMode>| { edit.enabled = change.value; })
+                    ),
+                    label("Creature to place"),
+                    (
+                        Node { column_gap: px(16) }
+                        RadioGroup on(on_edit_tool_changed)
+                        Children [
+                            (@FeathersRadio { @caption: bsn! { Text("Aphid (A)") ThemedText } } EditToolRadio({EditTool::Aphid})),
+                            (@FeathersRadio { @caption: bsn! { Text("Ladybug (L)") ThemedText } } EditToolRadio({EditTool::Ladybug})),
+                        ]
+                    ),
+                    label("Left click to add a creature.\nRight click to remove one."),
+                    label("Editing pauses the run. Each change restarts the turn count and history."),
+                    label("Press Play to leave editing and run the simulation."),
+                ]
+            ),
+        ]
+    }).id();
+    commands.entity(root).add_child(scroll);
+    let scrollbar = commands
+        .spawn_scene(bsn! {
+            @FeathersScrollbar { @target: {scroll} }
+            PanelScrollbar
+            Node {
+                position_type: PositionType::Absolute,
+                right: px(8), top: px(PANEL_HEADER), bottom: px(16), width: px(8),
+            }
+        })
+        .id();
+    commands.entity(root).add_child(scrollbar);
+}
+
+/// Cell inspector popup. It lives outside the panel and follows the pointer, as
+/// `draw_hover_tooltip` in the previous macroquad GUI does, so hovering a cell never
+/// moves the controls. `update_cell_popup` places it and fills it in.
+fn spawn_cell_popup(commands: &mut Commands, ui_camera: Entity, font: Handle<Font>) {
+    let line = |size: f32, colour: Color| {
+        (
+            Text::new(""),
+            TextFont {
+                font: font.clone().into(),
+                font_size: FontSize::Px(size),
+                ..default()
+            },
+            TextColor(colour),
+        )
+    };
+
+    commands
+        .spawn((
+            CellPopup,
+            UiTargetCamera(ui_camera),
+            // Above the toolbar and the chart overlay, whatever the spawn order.
+            GlobalZIndex(10),
+            Visibility::Hidden,
+            // The popup sits under the pointer; it must not eat its own hover.
+            Pickable::IGNORE,
+            Node {
+                position_type: PositionType::Absolute,
+                padding: UiRect::axes(px(12), px(10)),
+                flex_direction: FlexDirection::Column,
+                row_gap: px(4),
+                border: UiRect::all(px(1)),
+                border_radius: BorderRadius::all(px(8)),
+                ..default()
+            },
+            BackgroundColor(TOOLTIP_BG),
+            BorderColor::all(GRIDLINE),
+        ))
+        .with_children(|popup| {
+            popup.spawn((PopupLine::Heading, line(14.0, INK_PRIMARY)));
+            popup.spawn((PopupLine::Counts, line(13.0, INK_SECONDARY)));
+        });
+}
+
+fn sync_scrollbar_visibility(
+    panel: Query<&ComputedNode, With<PanelRoot>>,
+    mut scrollbar: Query<&mut Visibility, With<PanelScrollbar>>,
+) {
+    if let Ok(node) = panel.single() {
+        let visible = if node.content_size().y > node.size().y + 1.0 {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
+        for mut visibility in &mut scrollbar {
+            visibility.set_if_neq(visible);
+        }
+    }
+}
+
+fn sync_sidebar(
+    active: Res<ActiveTab>,
+    mut pages: Query<(&TabPage, &mut Node)>,
+    mut tabs: Query<(&TabButton, &mut ButtonVariant)>,
+    mut scroll: Query<&mut ScrollPosition, With<PanelRoot>>,
+) {
+    if !active.is_changed() {
+        return;
+    }
+    for (page, mut node) in &mut pages {
+        node.display = if page.0 == active.0 {
+            Display::Flex
+        } else {
+            Display::None
+        };
+    }
+    for (tab, mut variant) in &mut tabs {
+        *variant = if tab.0 == active.0 {
+            ButtonVariant::Primary
+        } else {
+            ButtonVariant::Normal
+        };
+    }
+    for mut position in &mut scroll {
+        position.y = 0.0;
+    }
+}
+
+/// Single observer for all nine sliders. `slider_self_update` would write the
+/// value back for us, but we need the index anyway, so do both here.
+fn on_prob_changed(
+    change: On<ValueChange<f32>>,
+    mut commands: Commands,
+    sliders: Query<&ProbSlider>,
+    mut params: ResMut<Params>,
+) {
+    commands
+        .entity(change.source)
+        .insert(SliderValue(change.value));
+
+    if let Ok(slider) = sliders.get(change.source) {
+        params.set(slider.0, (change.value / 100.0).clamp(0.0, 1.0) as f64);
+    }
+}
+
+/// Pushes edited parameters into the board. Deliberately does not bump
+/// `Revision`, so tweaking a slider never triggers a full board repaint.
+fn apply_params(params: Res<Params>, mut board: ResMut<BoardRes>) {
+    if !params.is_changed() {
+        return;
+    }
+
+    board.0.set_aphid_params(params.aphid);
+    board.0.set_ladybug_params(params.ladybug);
+    board.0.set_food_params(params.food);
+}
+
+/// Splits the window: panel on the left, board top-right, chart bottom-right.
+/// Runs only when the window changes. Setting camera viewports also keeps
+/// hover picking right for free, since `viewport_to_world_2d` is
+/// viewport-aware.
+fn layout_viewports(
+    windows: Query<&Window, Changed<Window>>,
+    mut board_camera: Query<&mut Camera, (With<BoardCamera>, Without<ChartCamera>)>,
+    mut chart_camera: Query<(&mut Camera, &mut Projection), With<ChartCamera>>,
+    mut gizmo_config: ResMut<GizmoConfigStore>,
+    mut chart_size: ResMut<ChartSize>,
+) {
+    let (Ok(window), Ok(mut board), Ok((mut chart, mut projection))) = (
+        windows.single(),
+        board_camera.single_mut(),
+        chart_camera.single_mut(),
+    ) else {
+        return;
+    };
+
+    let scale = window.resolution.scale_factor();
+    let physical = window.resolution.physical_size();
+    let panel = (PANEL_WIDTH * scale).round() as u32;
+    let strip = (CHART_HEIGHT * scale).round() as u32;
+    let toolbar = (TOOLBAR_HEIGHT * scale).round() as u32;
+    if physical.x <= panel || physical.y <= strip + toolbar {
+        return;
+    }
+    let width = physical.x - panel;
+
+    board.viewport = Some(Viewport {
+        physical_position: UVec2::new(panel, toolbar),
+        physical_size: UVec2::new(width, physical.y - strip - toolbar),
+        ..default()
+    });
+    chart.viewport = Some(Viewport {
+        physical_position: UVec2::new(panel, physical.y - strip),
+        physical_size: UVec2::new(width, strip),
+        ..default()
+    });
+
+    // One world unit per logical pixel, so the chart can be laid out in the
+    // same units as its text overlay.
+    let logical_width = width as f32 / scale;
+    if let Projection::Orthographic(ref mut ortho) = *projection {
+        ortho.scaling_mode = ScalingMode::Fixed {
+            width: logical_width,
+            height: CHART_HEIGHT,
+        };
+    }
+    chart_size.0 = logical_width;
+
+    // Gizmo line width is in physical pixels (the line shader measures against
+    // `view.viewport`), so a 1px hairline and a 2px series line have to be
+    // scaled up on HiDPI displays or they render at half weight.
+    gizmo_config.config_mut::<ChartGridGizmos>().0.line.width = scale;
+    gizmo_config.config_mut::<ChartSeriesGizmos>().0.line.width = 2.0 * scale;
+    gizmo_config.config_mut::<BoardEditGizmos>().0.line.width = 2.0 * scale;
+}
+
+// ---------------------------------------------------------------------------
+// Population history chart
+// ---------------------------------------------------------------------------
+
+/// Plot area inside the strip, in strip-local logical pixels (origin top-left,
+/// y down), shared by the marks and the text overlay so they cannot disagree.
+fn plot_rect(width: f32) -> Rect {
+    Rect::new(
+        PLOT_LEFT,
+        PLOT_TOP,
+        (width - PLOT_RIGHT).max(PLOT_LEFT + 1.0),
+        CHART_HEIGHT - PLOT_BOTTOM,
+    )
+}
+
+fn history_x(index: usize, len: usize, plot: Rect) -> f32 {
+    if len <= 1 {
+        plot.min.x
     } else {
-        fill
-    };
-
-    draw_round_rect(rect.x, rect.y, rect.w, rect.h, 8.0, button_fill);
-    draw_round_rect_lines(
-        rect.x + 1.0,
-        rect.y + 1.0,
-        rect.w - 2.0,
-        rect.h - 2.0,
-        7.0,
-        1.0,
-        color(255, 255, 255, if hovered { 110 } else { 55 }),
-    );
-    draw_centered_text(label, rect, 15, color(240, 233, 207, 255));
-
-    clicked
+        plot.min.x + plot.width() * index as f32 / (len - 1) as f32
+    }
 }
 
-fn draw_probability_slider(
-    x: f32,
-    y: f32,
-    width: f32,
-    label: &str,
-    value: &mut f64,
-    accent: Color,
-) -> bool {
-    let track_x = x + 112.0;
-    let track_y = y + 10.0;
-    let track_w = (width - 162.0).max(40.0);
-    let track_h = 7.0;
-    let mouse = mouse_vec();
-    let hitbox = Rect::new(track_x - 8.0, y - 4.0, track_w + 16.0, 28.0);
-    let changed = hitbox.contains(mouse) && is_mouse_button_down(MouseButton::Left);
+/// Snaps a pointer x to the closest recorded turn. Readers aim at a turn, not
+/// at a 2px line.
+fn nearest_index(x: f32, len: usize, plot: Rect) -> usize {
+    if len <= 1 {
+        return 0;
+    }
+    let t = ((x - plot.min.x) / plot.width()).clamp(0.0, 1.0);
+    (t * (len - 1) as f32).round() as usize
+}
 
-    if changed {
-        *value = ((mouse.x - track_x) / track_w).clamp(0.0, 1.0) as f64;
+fn value_y(value: usize, top: usize, plot: Rect) -> f32 {
+    plot.max.y - plot.height() * value as f32 / top.max(1) as f32
+}
+
+/// Strip-local point to chart-camera world space (origin centre, y up).
+fn chart_world(point: Vec2, width: f32) -> Vec2 {
+    Vec2::new(point.x - width * 0.5, CHART_HEIGHT * 0.5 - point.y)
+}
+
+/// A clean y-axis for populations up to `max`: returns `(top, step)` with a
+/// 1/2/5 x 10^k step and at most four intervals.
+fn nice_axis(max: usize) -> (usize, usize) {
+    let max = max.max(4);
+    let raw = max.div_ceil(4);
+    let mut magnitude = 1;
+    while magnitude * 10 <= raw {
+        magnitude *= 10;
+    }
+    let step = [1, 2, 5, 10]
+        .into_iter()
+        .map(|m| m * magnitude)
+        .find(|&step| step >= raw)
+        .unwrap_or(10 * magnitude);
+    (max.div_ceil(step) * step, step)
+}
+
+fn history_peak(history: &History) -> usize {
+    history
+        .0
+        .iter()
+        .map(|point| point.aphids.max(point.ladybugs))
+        .max()
+        .unwrap_or(0)
+}
+
+fn spawn_chart_overlay(commands: &mut Commands, ui_camera: Entity, font: Handle<Font>) {
+    let text = |value: &str, size: f32, colour: Color| {
+        (
+            Text::new(value),
+            TextFont {
+                font: font.clone().into(),
+                font_size: FontSize::Px(size),
+                ..default()
+            },
+            TextColor(colour),
+        )
+    };
+    let absolute = || Node {
+        position_type: PositionType::Absolute,
+        ..default()
+    };
+
+    commands
+        .spawn((
+            UiTargetCamera(ui_camera),
+            Node {
+                position_type: PositionType::Absolute,
+                left: px(PANEL_WIDTH),
+                right: px(0),
+                bottom: px(0),
+                height: px(CHART_HEIGHT),
+                ..default()
+            },
+        ))
+        .with_children(|strip| {
+            strip.spawn((
+                Node {
+                    left: px(16),
+                    top: px(12),
+                    ..absolute()
+                },
+                text("Population history", 14.0, INK_PRIMARY),
+            ));
+
+            // Legend, always present for two series. Direct end labels only
+            // supplement it.
+            strip
+                .spawn(Node {
+                    right: px(16),
+                    top: px(15),
+                    align_items: AlignItems::Center,
+                    column_gap: px(6),
+                    ..absolute()
+                })
+                .with_children(|legend| {
+                    for (index, name) in CHART_SERIES_NAMES.into_iter().enumerate() {
+                        let margin = if index > 0 {
+                            UiRect::left(px(10))
+                        } else {
+                            UiRect::ZERO
+                        };
+                        spawn_line_key(legend, index, margin);
+                        legend.spawn(text(name, 13.0, INK_SECONDARY));
+                    }
+                });
+
+            for index in 0..6 {
+                strip.spawn((
+                    ChartLabel::YTick(index),
+                    Node {
+                        left: px(0),
+                        width: px(PLOT_LEFT - 8.0),
+                        display: Display::None,
+                        ..absolute()
+                    },
+                    TextLayout::justify(Justify::Right),
+                    text("", 12.0, INK_MUTED),
+                ));
+            }
+
+            // Axis title, right-aligned in the tick gutter on the x-tick row, so
+            // the row reads "turn  0 ... 45 ... 90".
+            strip.spawn((
+                Node {
+                    left: px(0),
+                    top: px(CHART_HEIGHT - PLOT_BOTTOM + 8.0),
+                    width: px(PLOT_LEFT - 8.0),
+                    ..absolute()
+                },
+                TextLayout::justify(Justify::Right),
+                text("turn", 12.0, INK_MUTED),
+            ));
+            for index in 0..3 {
+                strip.spawn((
+                    ChartLabel::XTick(index),
+                    Node {
+                        width: px(64),
+                        display: Display::None,
+                        ..absolute()
+                    },
+                    TextLayout::justify(Justify::Center),
+                    text("", 12.0, INK_MUTED),
+                ));
+            }
+
+            for (index, name) in CHART_SERIES_NAMES.into_iter().enumerate() {
+                strip
+                    .spawn((
+                        ChartLabel::EndLabel(index),
+                        Node {
+                            column_gap: px(4),
+                            display: Display::None,
+                            ..absolute()
+                        },
+                    ))
+                    .with_children(|label| {
+                        label.spawn((ChartLabel::EndValue(index), text("", 13.0, INK_PRIMARY)));
+                        label.spawn(text(name, 13.0, INK_SECONDARY));
+                    });
+            }
+
+            // Spawned last so it draws over the other chart text.
+            strip
+                .spawn((
+                    ChartLabel::Tooltip,
+                    Node {
+                        width: px(TOOLTIP_WIDTH),
+                        padding: UiRect::all(px(8)),
+                        flex_direction: FlexDirection::Column,
+                        row_gap: px(4),
+                        border_radius: BorderRadius::all(px(6)),
+                        display: Display::None,
+                        ..absolute()
+                    },
+                    BackgroundColor(TOOLTIP_BG),
+                ))
+                .with_children(|tooltip| {
+                    tooltip.spawn((ChartLabel::TooltipTurn, text("", 12.0, INK_SECONDARY)));
+                    for (index, name) in CHART_SERIES_NAMES.into_iter().enumerate() {
+                        tooltip
+                            .spawn(Node {
+                                align_items: AlignItems::Center,
+                                column_gap: px(6),
+                                ..default()
+                            })
+                            .with_children(|row| {
+                                spawn_line_key(row, index, UiRect::ZERO);
+                                // Values lead; the series name follows.
+                                row.spawn((
+                                    ChartLabel::TooltipValue(index),
+                                    text("", 13.0, INK_PRIMARY),
+                                ));
+                                row.spawn(text(name, 12.0, INK_SECONDARY));
+                            });
+                    }
+                });
+        });
+}
+
+/// Legends and tooltips key a line series with a short stroke rather than a
+/// box, and the stroke mirrors the mark: aphids solid, ladybugs dashed.
+fn spawn_line_key(parent: &mut ChildSpawnerCommands, series: usize, margin: UiRect) {
+    parent
+        .spawn(Node {
+            width: px(16),
+            height: px(2),
+            column_gap: px(2),
+            margin,
+            ..default()
+        })
+        .with_children(|key| {
+            for _ in 0..if series == 0 { 1 } else { 3 } {
+                key.spawn((
+                    Node {
+                        flex_grow: 1.0,
+                        height: px(2),
+                        ..default()
+                    },
+                    BackgroundColor(CHART_SERIES[series]),
+                ));
+            }
+        });
+}
+
+/// Set by the screenshot probe to pin the hovered board cell, since it has no
+/// pointer.
+#[derive(Resource)]
+struct ProbeCell((usize, usize));
+
+/// Turns clicks on the hovered cell into edits while editing: a left click adds
+/// the selected creature, a right click removes one.
+fn board_edit_input(
+    mouse: Res<ButtonInput<MouseButton>>,
+    edit: Res<EditMode>,
+    hovered: Res<Hovered>,
+    pointer: Res<BoardPointer>,
+    mut edits: MessageWriter<CellEdit>,
+) {
+    if !edit.enabled {
+        return;
+    }
+    let Some((row, col)) = hovered.0 else {
+        return;
+    };
+
+    // Add on release rather than press, so a left drag can still pan.
+    let action = if mouse.just_released(MouseButton::Left) && pointer.is_click() {
+        EditAction::Add
+    } else if mouse.just_pressed(MouseButton::Right) {
+        EditAction::Remove
+    } else {
+        return;
+    };
+    edits.write(CellEdit {
+        row,
+        col,
+        tool: edit.tool,
+        action,
+    });
+}
+
+fn apply_cell_edits(mut edits: MessageReader<CellEdit>, mut sim: Simulation) {
+    for edit in edits.read() {
+        sim.edit(*edit);
+    }
+}
+
+/// Editing pauses the run, and resuming the run ends editing, whichever control
+/// did it: a key, the panel, or an edit.
+fn exclusive_play_and_edit(mut playing: ResMut<Playing>, mut edit: ResMut<EditMode>) {
+    if edit.is_changed() && edit.enabled && playing.0 {
+        playing.0 = false;
+    } else if playing.is_changed() && playing.0 && edit.enabled {
+        edit.enabled = false;
+    }
+}
+
+fn set_checked(commands: &mut Commands, entity: Entity, checked: bool) {
+    if checked {
+        commands.entity(entity).insert(Checked);
+    } else {
+        commands.entity(entity).remove::<Checked>();
+    }
+}
+
+/// Mirrors `EditMode` onto the panel's checkbox and radios, so keys and the
+/// play button update them too.
+fn sync_edit_controls(
+    mut commands: Commands,
+    edit: Res<EditMode>,
+    toggles: Query<Entity, With<EditToggle>>,
+    radios: Query<(Entity, &EditToolRadio)>,
+) {
+    if !edit.is_changed() {
+        return;
+    }
+    for toggle in &toggles {
+        set_checked(&mut commands, toggle, edit.enabled);
+    }
+    for (radio, tool) in &radios {
+        set_checked(&mut commands, radio, tool.0 == edit.tool);
+    }
+}
+
+fn on_edit_tool_changed(
+    change: On<ValueChange<Entity>>,
+    radios: Query<&EditToolRadio>,
+    mut edit: ResMut<EditMode>,
+) {
+    if let Ok(radio) = radios.get(change.value) {
+        edit.select(radio.0);
+    }
+}
+
+/// Wheel scrolling for the panel. `bevy_ui` 0.19 has no built-in wheel handling,
+/// so `Overflow::scroll_y` alone clips the panel without ever scrolling it.
+fn scroll_panel(
+    windows: Query<&Window>,
+    scroll: Res<AccumulatedMouseScroll>,
+    mut panel: Query<(&mut ScrollPosition, &ComputedNode), With<PanelRoot>>,
+) {
+    if scroll.delta.y == 0.0 {
+        return;
+    }
+    let (Ok(window), Ok((mut position, computed))) = (windows.single(), panel.single_mut()) else {
+        return;
+    };
+    if !window
+        .cursor_position()
+        .is_some_and(|cursor| cursor.x < PANEL_WIDTH && cursor.y >= PANEL_HEADER)
+    {
+        return;
     }
 
-    draw_text_ex(
-        label,
-        x,
-        y + 16.0,
-        TextParams {
-            font_size: 14,
-            color: color(154, 170, 158, 255),
-            ..Default::default()
-        },
-    );
-
-    draw_round_rect(
-        track_x,
-        track_y,
-        track_w,
-        track_h,
-        4.0,
-        color(42, 52, 55, 255),
-    );
-    draw_round_rect(
-        track_x,
-        track_y,
-        track_w * (*value as f32),
-        track_h,
-        4.0,
-        accent,
-    );
-
-    let knob_x = track_x + track_w * (*value as f32);
-    draw_circle(knob_x, track_y + track_h * 0.5, 8.0, color(16, 21, 23, 220));
-    draw_circle(
-        knob_x,
-        track_y + track_h * 0.5,
-        5.8,
-        color(239, 232, 203, 255),
-    );
-
-    draw_text_ex(
-        format!("{:.2}", *value),
-        x + width - 38.0,
-        y + 16.0,
-        TextParams {
-            font_size: 14,
-            color: color(232, 223, 188, 255),
-            ..Default::default()
-        },
-    );
-
-    changed
+    let max_offset =
+        ((computed.content_size() - computed.size()) * computed.inverse_scale_factor()).y;
+    position.y = scrolled_offset(position.y, scroll.delta.y, scroll.unit, max_offset);
 }
 
-fn draw_hover_tooltip(app: &SimulationApp, hovered: Option<(usize, usize)>) {
-    let Some((row, col)) = hovered else {
+/// The panel's scroll offset after one wheel movement. Wheel up (positive delta)
+/// scrolls toward the top; the offset stays within the content.
+fn scrolled_offset(position: f32, delta_y: f32, unit: MouseScrollUnit, max_offset: f32) -> f32 {
+    let step = match unit {
+        MouseScrollUnit::Line => 21.0,
+        MouseScrollUnit::Pixel => 1.0,
+    };
+    (position - delta_y * step).clamp(0.0, max_offset.max(0.0))
+}
+
+/// Set by the screenshot probe to pin the crosshair, since it has no pointer.
+#[derive(Resource)]
+struct ProbeHover(usize);
+
+fn chart_hover(
+    windows: Query<&Window>,
+    history: Res<History>,
+    size: Res<ChartSize>,
+    probe: Option<Res<ProbeHover>>,
+    mut hover: ResMut<ChartHover>,
+) {
+    let Ok(window) = windows.single() else {
         return;
     };
-    let Some(snapshot) = app.board.cell_snapshot(row, col) else {
+    let len = history.0.len();
+    let plot = plot_rect(size.0);
+
+    let next = match probe {
+        Some(probe) => (len > 0).then(|| probe.0.min(len - 1)),
+        None => window.cursor_position().and_then(|cursor| {
+            let local = Vec2::new(
+                cursor.x - PANEL_WIDTH,
+                cursor.y - (window.height() - CHART_HEIGHT),
+            );
+            // A little wider than the plot, so the first and last turns are as
+            // easy to reach as the ones in the middle.
+            let target = Rect::from_corners(
+                plot.min - Vec2::new(12.0, 0.0),
+                plot.max + Vec2::new(12.0, 0.0),
+            );
+            (len > 0 && size.0 > 0.0 && target.contains(local))
+                .then(|| nearest_index(local.x, len, plot))
+        }),
+    };
+
+    // Only write on change, so the label layout below does not rerun every frame.
+    if hover.0 != next {
+        hover.0 = next;
+    }
+}
+
+fn draw_chart_marks(
+    history: Res<History>,
+    size: Res<ChartSize>,
+    hover: Res<ChartHover>,
+    mut grid: Gizmos<ChartGridGizmos>,
+    mut series: Gizmos<ChartSeriesGizmos>,
+    mut dots: Query<(&EndDot, &mut Transform, &mut Visibility)>,
+) {
+    let width = size.0;
+    let Some(last) = history.0.back() else {
+        return;
+    };
+    if width <= PLOT_LEFT + PLOT_RIGHT {
+        return;
+    }
+    let plot = plot_rect(width);
+    let len = history.0.len();
+    let (top, step) = nice_axis(history_peak(&history));
+    let world = |x: f32, y: f32| chart_world(Vec2::new(x, y), width);
+
+    // Recessive solid hairlines; the zero line is the baseline, a step brighter.
+    for value in (0..=top).step_by(step) {
+        let y = value_y(value, top, plot);
+        let colour = if value == 0 { BASELINE } else { GRIDLINE };
+        grid.line_2d(world(plot.min.x, y), world(plot.max.x, y), colour);
+    }
+
+    // Populations are small integers, so the two lines often sit on exactly
+    // the same value for many turns, and a solid line on top would hide the
+    // other completely. Ladybugs are dashed so aphids show through the gaps,
+    // as in the previous macroquad GUI. (The palette passes CVD checks on its own; the
+    // dash is for coincident values, not colour.)
+    for (index, colour) in CHART_SERIES.into_iter().enumerate() {
+        let points: Vec<Vec2> = history
+            .0
+            .iter()
+            .enumerate()
+            .map(|(i, point)| {
+                world(
+                    history_x(i, len, plot),
+                    value_y(point.series(index), top, plot),
+                )
+            })
+            .collect();
+        if index == 0 {
+            series.linestrip_2d(points, colour);
+        } else {
+            // Each dash is a two-point strip, not `line_2d`: gizmos batch lines
+            // and strips separately and draw strips last, so `line_2d` dashes
+            // would land underneath the aphid strip and vanish in the overlap.
+            // Within the strip batch, call order is draw order.
+            for (start, end) in dash_segments(&points) {
+                series.linestrip_2d([start, end], colour);
+            }
+        }
+    }
+
+    if let Some(index) = hover.0 {
+        let x = history_x(index, len, plot);
+        grid.line_2d(world(x, plot.min.y), world(x, plot.max.y), INK_MUTED);
+    }
+
+    for (dot, mut transform, mut visibility) in &mut dots {
+        let end = world(
+            history_x(len - 1, len, plot),
+            value_y(last.series(dot.0), top, plot),
+        );
+        transform.translation.x = end.x;
+        transform.translation.y = end.y;
+        visibility.set_if_neq(Visibility::Inherited);
+    }
+}
+
+const DASH: f32 = 7.0;
+const DASH_PERIOD: f32 = 12.0;
+
+/// Splits a polyline into dash pieces with the dash phase carried across
+/// vertices, so the pattern stays even however short the per-turn segments
+/// get. Gizmos' own `Dashed` style restarts the pattern on every segment, which
+/// draws a full 240-turn history (segments shorter than one dash) as solid.
+fn dash_segments(points: &[Vec2]) -> Vec<(Vec2, Vec2)> {
+    let mut dashes = Vec::new();
+    let mut travelled = 0.0;
+    for pair in points.windows(2) {
+        let (from, to) = (pair[0], pair[1]);
+        let length = from.distance(to);
+        if length <= f32::EPSILON {
+            continue;
+        }
+        let mut offset = 0.0;
+        while offset < length {
+            let phase = (travelled + offset) % DASH_PERIOD;
+            let remaining = if phase < DASH {
+                DASH - phase
+            } else {
+                DASH_PERIOD - phase
+            };
+            // The floor stops a vanishing run from stalling the loop once f32
+            // can no longer represent `offset + run` as larger than `offset`.
+            let run = remaining.min(length - offset).max(0.01);
+            if phase < DASH {
+                let end = (offset + run).min(length);
+                dashes.push((from.lerp(to, offset / length), from.lerp(to, end / length)));
+            }
+            offset += run;
+        }
+        travelled += length;
+    }
+    dashes
+}
+
+fn update_chart_labels(
+    history: Res<History>,
+    size: Res<ChartSize>,
+    hover: Res<ChartHover>,
+    mut labels: Query<(&ChartLabel, &mut Node, Option<&mut Text>)>,
+) {
+    if !(history.is_changed() || size.is_changed() || hover.is_changed()) {
+        return;
+    }
+    let width = size.0;
+    let Some(last) = history.0.back() else {
+        return;
+    };
+    if width <= PLOT_LEFT + PLOT_RIGHT {
+        return;
+    }
+    let plot = plot_rect(width);
+    let len = history.0.len();
+    let (top, step) = nice_axis(history_peak(&history));
+    let y_ticks: Vec<usize> = (0..=top).step_by(step).collect();
+    let mut x_ticks = vec![0, (len - 1) / 2, len - 1];
+    x_ticks.dedup();
+
+    // Direct end labels only while the line ends are far enough apart to label
+    // without stacking. When they converge, the legend, the tooltip, and the
+    // panel's stats carry the current values instead.
+    let end_y = [0, 1].map(|index| value_y(last.series(index), top, plot));
+    let show_end_labels = (end_y[0] - end_y[1]).abs() >= 18.0;
+    let hovered = hover
+        .0
+        .and_then(|index| history.0.get(index).map(|point| (index, *point)));
+
+    for (label, mut node, text) in &mut labels {
+        let mut show = true;
+        match *label {
+            ChartLabel::YTick(index) => match y_ticks.get(index) {
+                Some(&value) => {
+                    node.top = px(value_y(value, top, plot) - 8.0);
+                    set_text(text, value.to_string());
+                }
+                None => show = false,
+            },
+            ChartLabel::XTick(index) => match x_ticks.get(index) {
+                Some(&at) => {
+                    node.left = px(history_x(at, len, plot) - 32.0);
+                    node.top = px(plot.max.y + 8.0);
+                    set_text(text, history.0[at].turn.to_string());
+                }
+                None => show = false,
+            },
+            ChartLabel::EndLabel(index) => {
+                show = show_end_labels;
+                node.left = px(plot.max.x + 10.0);
+                node.top = px(end_y[index] - 8.0);
+            }
+            ChartLabel::EndValue(index) => set_text(text, last.series(index).to_string()),
+            ChartLabel::Tooltip => match hovered {
+                Some((index, _)) => {
+                    // Beside the crosshair, flipping left near the right edge.
+                    let x = history_x(index, len, plot);
+                    let left = if x + 12.0 + TOOLTIP_WIDTH <= width {
+                        x + 12.0
+                    } else {
+                        x - 12.0 - TOOLTIP_WIDTH
+                    };
+                    node.left = px(left.max(0.0));
+                    node.top = px(plot.min.y);
+                }
+                None => show = false,
+            },
+            ChartLabel::TooltipTurn => {
+                if let Some((_, point)) = hovered {
+                    set_text(text, format!("turn {}", point.turn));
+                }
+            }
+            ChartLabel::TooltipValue(index) => {
+                if let Some((_, point)) = hovered {
+                    set_text(text, point.series(index).to_string());
+                }
+            }
+        }
+
+        let display = if show { Display::Flex } else { Display::None };
+        if node.display != display {
+            node.display = display;
+        }
+    }
+}
+
+fn set_text(text: Option<Mut<Text>>, value: String) {
+    if let Some(mut text) = text
+        && text.0 != value
+    {
+        text.0 = value;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Input
+// ---------------------------------------------------------------------------
+
+fn keyboard_controls(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut focus: ResMut<InputFocus>,
+    mut actions: MessageWriter<RunAction>,
+    mut overlay: ResMut<FoodOverlay>,
+    mut edit: ResMut<EditMode>,
+    mut active: ResMut<ActiveTab>,
+    text_fields: Query<(), With<EditableText>>,
+) {
+    // Focused Feathers widgets own their keyboard input, including Space. Do
+    // not toggle playback a second time when Space activates a focused button.
+    if keys.just_pressed(KeyCode::Escape) {
+        focus.clear();
+    }
+    // A focused text field owns every key, not just Space: typing a seed must
+    // not also step the run or fit the board. `seed_field_keyboard` is what
+    // reads the keyboard there.
+    if focus
+        .get()
+        .is_some_and(|entity| text_fields.contains(entity))
+    {
+        return;
+    }
+    for (key, action) in [
+        (KeyCode::Space, RunAction::TogglePlay),
+        (KeyCode::KeyN, RunAction::Step),
+        (KeyCode::KeyR, RunAction::Reset),
+        (KeyCode::BracketRight, RunAction::Faster),
+        (KeyCode::BracketLeft, RunAction::Slower),
+        (KeyCode::Home, RunAction::Fit),
+        (KeyCode::KeyS, RunAction::Save),
+    ] {
+        if keys.just_pressed(key) && !(key == KeyCode::Space && focus.get().is_some()) {
+            actions.write(action);
+        }
+    }
+    if keys.just_pressed(KeyCode::KeyE) {
+        edit.enabled = !edit.enabled;
+        active.0 = PanelTab::Edit;
+        focus.clear();
+    }
+    if keys.just_pressed(KeyCode::KeyA) {
+        edit.select(EditTool::Aphid);
+        active.0 = PanelTab::Edit;
+        focus.clear();
+    }
+    if keys.just_pressed(KeyCode::KeyL) {
+        edit.select(EditTool::Ladybug);
+        active.0 = PanelTab::Edit;
+        focus.clear();
+    }
+    if keys.just_pressed(KeyCode::KeyF) {
+        overlay.0 = !overlay.0;
+    }
+}
+
+/// What a run is started from: the board, the rules, and the seed.
+#[derive(SystemParam)]
+struct RunSetup<'w> {
+    start: Res<'w, StartingSetup>,
+    params: Res<'w, Params>,
+    seed: Res<'w, Seed>,
+}
+
+fn apply_run_actions(
+    mut actions: MessageReader<RunAction>,
+    mut sim: Simulation,
+    mut timer: ResMut<StepTimer>,
+    setup: RunSetup,
+    mut edit: ResMut<EditMode>,
+    mut camera: Query<(&mut Transform, &mut Projection), With<BoardCamera>>,
+) {
+    for action in actions.read() {
+        match action {
+            RunAction::TogglePlay => {
+                if !sim.stats.extinct {
+                    sim.playing.0 = !sim.playing.0;
+                }
+                timer.0.reset();
+            }
+            RunAction::Step => {
+                sim.playing.0 = false;
+                timer.0.reset();
+                if !sim.stats.extinct {
+                    sim.step();
+                }
+            }
+            RunAction::Reset => {
+                let mut random = Random::with_seed(setup.seed.0);
+                let mut board = Board::new();
+                creature_life_cycle::parse_simulation_config(
+                    &setup.start.0,
+                    &mut board,
+                    &mut random,
+                )
+                .expect("the starting setup is generated from a valid board");
+                board.set_aphid_params(setup.params.aphid);
+                board.set_ladybug_params(setup.params.ladybug);
+                board.set_food_params(setup.params.food);
+                sim.board.0 = board;
+                sim.rng.0 = random;
+                sim.restart_from_edit();
+                timer.0.reset();
+                edit.enabled = false;
+            }
+            RunAction::Slower | RunAction::Faster => {
+                let factor = if matches!(action, RunAction::Faster) {
+                    0.5
+                } else {
+                    2.0
+                };
+                let seconds = (timer.0.duration().as_secs_f32() * factor).clamp(0.05, 4.0);
+                timer
+                    .0
+                    .set_duration(std::time::Duration::from_secs_f32(seconds));
+                timer.0.reset();
+            }
+            // `save_setup` reads the same stream and owns this one, which keeps
+            // the file writing out of the playback handler.
+            RunAction::Save => {}
+            RunAction::Fit => {
+                if let Ok((mut transform, mut projection)) = camera.single_mut() {
+                    transform.translation.x = (sim.board.0.cols() as f32 - 1.0) * CELL * 0.5;
+                    transform.translation.y = -(sim.board.0.rows() as f32 - 1.0) * CELL * 0.5;
+                    if let Projection::Orthographic(ref mut ortho) = *projection {
+                        ortho.scale = 1.0;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Feathers spawns the field empty, so fill it with the seed the run started
+/// from and hold it to digits, as the previous macroquad GUI's field does.
+fn init_seed_field(
+    mut commands: Commands,
+    seed: Res<Seed>,
+    mut fields: Query<(Entity, &mut EditableText), Added<SeedField>>,
+) {
+    for (entity, mut field) in &mut fields {
+        field.editor.set_text(&seed.0.to_string());
+        commands
+            .entity(entity)
+            .insert(EditableTextFilter::new(|character| {
+                character.is_ascii_digit()
+            }));
+    }
+}
+
+/// Applies the seed in the panel's field and restarts the run from it, as
+/// `set_seed` does in the previous macroquad GUI. The restart itself is left to
+/// `RunAction::Reset`, so there is one restart path rather than two.
+/// Enter applies the seed while the field has focus, as Enter commits the
+/// macroquad GUI's field.
+fn seed_field_keyboard(
+    keys: Res<ButtonInput<KeyCode>>,
+    focus: Res<InputFocus>,
+    fields: Query<(), With<SeedField>>,
+    mut requests: MessageWriter<Reseed>,
+) {
+    if keys.just_pressed(KeyCode::Enter)
+        && focus.get().is_some_and(|entity| fields.contains(entity))
+    {
+        requests.write(Reseed);
+    }
+}
+
+fn apply_seed(
+    mut requests: MessageReader<Reseed>,
+    mut actions: MessageWriter<RunAction>,
+    mut seed: ResMut<Seed>,
+    mut status: ResMut<StatusLine>,
+    mut fields: Query<&mut EditableText, With<SeedField>>,
+) {
+    if requests.read().next().is_none() {
+        return;
+    }
+    let Ok(mut field) = fields.single_mut() else {
         return;
     };
 
-    let (mouse_x, mouse_y) = mouse_position();
-    let width = 260.0;
-    let height = 66.0;
-    let x = (mouse_x + 18.0)
-        .min(screen_width() - width - 12.0)
-        .max(12.0);
-    let y = (mouse_y + 18.0)
-        .min(screen_height() - height - 12.0)
-        .max(12.0);
-
-    draw_round_rect(x, y, width, height, 14.0, color(22, 31, 31, 232));
-    draw_round_rect_lines(
-        x + 1.0,
-        y + 1.0,
-        width - 2.0,
-        height - 2.0,
-        13.0,
-        1.0,
-        color(209, 194, 142, 125),
-    );
-    draw_text_ex(
-        format!("Cell ({row}, {col})"),
-        x + 16.0,
-        y + 26.0,
-        TextParams {
-            font_size: 17,
-            color: color(244, 229, 177, 255),
-            ..Default::default()
-        },
-    );
-    draw_text_ex(
-        format!(
-            "Food {}  |  Aphids {}  |  Ladybugs {}",
-            snapshot.food, snapshot.aphids, snapshot.ladybugs
-        ),
-        x + 16.0,
-        y + 50.0,
-        TextParams {
-            font_size: 14,
-            color: color(178, 191, 177, 255),
-            ..Default::default()
-        },
-    );
+    match field.value().to_string().trim().parse::<u64>() {
+        Ok(value) => {
+            // Echo back what was parsed, so leading zeros and stray spaces are
+            // replaced by the seed the run actually uses.
+            field.editor.set_text(&value.to_string());
+            seed.0 = value;
+            actions.write(RunAction::Reset);
+            status.set(format!("Restarted from seed {value}."), true);
+        }
+        // An unreadable seed leaves the run alone, as a failed `commit` does in
+        // the previous macroquad GUI.
+        Err(_) => status.set(format!("Enter a whole seed from 0 to {}.", u64::MAX), false),
+    }
 }
 
-fn draw_centered_text(label: &str, rect: Rect, font_size: u16, text_color: Color) {
-    let dimensions = measure_text(label, None, font_size, 1.0);
-    draw_text_ex(
-        label,
-        rect.x + (rect.w - dimensions.width) * 0.5,
-        rect.y + (rect.h + dimensions.height) * 0.5 - 2.0,
-        TextParams {
-            font_size,
-            color: text_color,
-            ..Default::default()
-        },
-    );
+/// Writes the current board and probabilities to the XDG config file, as
+/// `save_config` does in the previous macroquad GUI.
+fn save_setup(
+    mut actions: MessageReader<RunAction>,
+    mut board: ResMut<BoardRes>,
+    mut start: ResMut<StartingSetup>,
+    mut status: ResMut<StatusLine>,
+    params: Res<Params>,
+) {
+    if !actions
+        .read()
+        .any(|action| matches!(action, RunAction::Save))
+    {
+        return;
+    }
+
+    // The file records the parameters the board holds, so push the sliders'
+    // current values in rather than depending on where this system is ordered
+    // against `apply_params`.
+    board.0.set_aphid_params(params.aphid);
+    board.0.set_ladybug_params(params.ladybug);
+    board.0.set_food_params(params.food);
+
+    match save_configured_board(&board.0) {
+        Ok(_) => {
+            // What was saved is the starting setup from now on, so Reset returns
+            // to it instead of to the board loaded at launch.
+            start.0 = creature_life_cycle::format_simulation_config(&board.0);
+            status.set("Starting setup saved.", true);
+        }
+        Err(error) => status.set(format!("Save failed: {error}"), false),
+    }
 }
 
-fn mouse_vec() -> Vec2 {
-    let (x, y) = mouse_position();
-    vec2(x, y)
+/// Clears the save message once it has had its time. The countdown bypasses
+/// change detection so a fading message does not reflag the resource every
+/// frame; only the clearing itself has to reach the label.
+fn expire_status(time: Res<Time>, mut status: ResMut<StatusLine>) {
+    if status.remaining <= 0.0 {
+        return;
+    }
+    let remaining = status.remaining - time.delta_secs();
+    if remaining > 0.0 {
+        status.bypass_change_detection().remaining = remaining;
+    } else {
+        *status = StatusLine::default();
+    }
 }
 
-fn draw_stat(panel_x: f32, y: f32, label: &str, value: &str) {
-    draw_text_ex(
-        label,
-        panel_x + 24.0,
-        y,
-        TextParams {
-            font_size: 14,
-            color: color(126, 142, 134, 255),
-            ..Default::default()
-        },
-    );
-    draw_text_ex(
-        value,
-        panel_x + 154.0,
-        y,
-        TextParams {
-            font_size: 15,
-            color: color(232, 223, 188, 255),
-            ..Default::default()
-        },
-    );
+fn camera_controls(
+    windows: Query<&Window>,
+    mut camera: Query<(&mut Transform, &mut Projection), With<BoardCamera>>,
+    scroll: Res<AccumulatedMouseScroll>,
+    motion: Res<AccumulatedMouseMotion>,
+    mouse: Res<ButtonInput<MouseButton>>,
+    mut pointer: ResMut<BoardPointer>,
+    mut focus: ResMut<InputFocus>,
+) {
+    let (Ok(window), Ok((mut transform, mut projection))) = (windows.single(), camera.single_mut())
+    else {
+        return;
+    };
+
+    // Scrolling the panel or the chart must not zoom the board, and dragging a
+    // slider must not pan it, so both only act when they start over the board.
+    let cursor = window.cursor_position();
+    let over_board = cursor.is_some_and(|cursor| board_rect(window).contains(cursor));
+    let buttons = [MouseButton::Left, MouseButton::Middle];
+    if mouse.any_just_pressed(buttons) {
+        if over_board {
+            focus.clear();
+        }
+        *pointer = BoardPointer {
+            pressed_on_board: over_board,
+            press_at: cursor.unwrap_or_default(),
+            travelled: 0.0,
+        };
+    }
+    let held = mouse.any_pressed(buttons);
+    if held && let Some(cursor) = cursor {
+        pointer.travelled = pointer.travelled.max(cursor.distance(pointer.press_at));
+    }
+
+    if let Projection::Orthographic(ref mut ortho) = *projection {
+        if over_board && scroll.delta.y != 0.0 {
+            ortho.scale = (ortho.scale * (1.0 - scroll.delta.y * 0.1)).clamp(0.05, 8.0);
+        }
+        // Pan only once the pointer has left the click slop, so a click meant as
+        // an edit never nudges the board.
+        if held && pointer.pressed_on_board && !pointer.is_click() {
+            transform.translation.x -= motion.delta.x * ortho.scale;
+            transform.translation.y += motion.delta.y * ortho.scale;
+        }
+    }
 }
 
-fn status_label(app: &SimulationApp) -> &'static str {
-    if app.extinct {
+/// The board's area in logical window coordinates: right of the panel, above
+/// the chart strip.
+fn board_rect(window: &Window) -> Rect {
+    Rect::new(
+        PANEL_WIDTH,
+        TOOLBAR_HEIGHT,
+        window.width(),
+        (window.height() - CHART_HEIGHT).max(0.0),
+    )
+}
+
+/// Replaces the inverse-layout arithmetic the previous macroquad GUI does to find the
+/// hovered cell: project the cursor back through the camera instead.
+fn hovered_cell(
+    windows: Query<&Window>,
+    camera: Query<(&Camera, &GlobalTransform), With<BoardCamera>>,
+    board: Res<BoardRes>,
+    probe: Option<Res<ProbeCell>>,
+    mut hovered: ResMut<Hovered>,
+) {
+    if let Some(probe) = probe {
+        hovered.0 = Some(probe.0);
+        return;
+    }
+    let (Ok(window), Ok((camera, camera_transform))) = (windows.single(), camera.single()) else {
+        return;
+    };
+
+    hovered.0 = window
+        .cursor_position()
+        .filter(|&cursor| board_rect(window).contains(cursor))
+        .and_then(|cursor| camera.viewport_to_world_2d(camera_transform, cursor).ok())
+        .and_then(|world| {
+            let col = (world.x / CELL + 0.5).floor();
+            let row = (-world.y / CELL + 0.5).floor();
+            (col >= 0.0 && row >= 0.0).then_some((row as usize, col as usize))
+        })
+        .filter(|&(row, col)| row < board.0.rows() && col < board.0.cols());
+}
+
+// ---------------------------------------------------------------------------
+// Simulation
+// ---------------------------------------------------------------------------
+
+fn step_simulation(time: Res<Time>, mut timer: ResMut<StepTimer>, mut sim: Simulation) {
+    if !sim.playing.0 || sim.stats.extinct || !timer.0.tick(time.delta()).just_finished() {
+        return;
+    }
+
+    sim.step();
+}
+
+/// Everything one turn touches. Shared by the timer and the panel's "step"
+/// button so the two can never drift apart.
+#[derive(SystemParam)]
+struct Simulation<'w> {
+    board: ResMut<'w, BoardRes>,
+    rng: ResMut<'w, Rng>,
+    stats: ResMut<'w, Stats>,
+    revision: ResMut<'w, Revision>,
+    history: ResMut<'w, History>,
+    playing: ResMut<'w, Playing>,
+}
+
+impl Simulation<'_> {
+    /// Applies one cell edit and returns whether the board changed. Adding
+    /// always succeeds in bounds; removing does nothing on a cell without that
+    /// kind of creature, and then the run carries on untouched.
+    fn edit(&mut self, edit: CellEdit) -> bool {
+        let board = &mut self.board.0;
+        let changed = match (edit.tool, edit.action) {
+            (EditTool::Aphid, EditAction::Add) => board
+                .add_aphid(edit.row, edit.col, EDIT_APHID_LIFE)
+                .is_some(),
+            (EditTool::Ladybug, EditAction::Add) => board
+                .add_ladybug(edit.row, edit.col, EDIT_LADYBUG_LIFE, &mut self.rng.0)
+                .is_some(),
+            (EditTool::Aphid, EditAction::Remove) => board.remove_aphid_at(edit.row, edit.col),
+            (EditTool::Ladybug, EditAction::Remove) => board.remove_ladybug_at(edit.row, edit.col),
+        };
+        if changed {
+            self.restart_from_edit();
+        }
+        changed
+    }
+
+    /// An edited board is a new starting setup, as `after_board_edit` treats it
+    /// in the previous macroquad GUI: the run pauses, and the turn count and population
+    /// history start over from what is on the board now.
+    fn restart_from_edit(&mut self) {
+        let summary = self.board.0.summary();
+        *self.stats = Stats {
+            turn: 0,
+            aphids: summary.aphids,
+            ladybugs: summary.ladybugs,
+            food: summary.food,
+            births: 0,
+            deaths: 0,
+            extinct: summary.is_extinct(),
+        };
+        self.playing.0 = false;
+        self.history.0.clear();
+        self.history.record(0, summary.aphids, summary.ladybugs);
+        self.revision.0 += 1;
+    }
+
+    /// Advances one turn, records it, and marks the board dirty for the
+    /// renderers.
+    fn step(&mut self) {
+        let TurnStats {
+            births,
+            deaths,
+            summary,
+        } = self.board.0.refresh(&mut self.rng.0);
+
+        let stats = &mut self.stats;
+        stats.turn += 1;
+        stats.births = births;
+        stats.deaths = deaths;
+        stats.aphids = summary.aphids;
+        stats.ladybugs = summary.ladybugs;
+        stats.food = summary.food;
+        stats.extinct = summary.is_extinct();
+        self.history
+            .record(stats.turn, summary.aphids, summary.ladybugs);
+        self.revision.0 += 1;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Rendering
+// ---------------------------------------------------------------------------
+
+fn recolor_cells(
+    board: Res<BoardRes>,
+    revision: Res<Revision>,
+    palette: Res<CellPalette>,
+    mut cells: Query<(&Cell, &mut MeshMaterial2d<CellMaterial>)>,
+) {
+    if !revision.is_changed() {
+        return;
+    }
+
+    for (cell, mut material) in &mut cells {
+        let Some(snapshot) = board.0.cell_snapshot(cell.row, cell.col) else {
+            continue;
+        };
+        let next = &palette.0[snapshot.food.clamp(0, MAX_FOOD) as usize];
+        if material.0 != *next {
+            material.0 = next.clone();
+        }
+    }
+}
+
+/// Cell shading by food. Shared with the panel's food scale so the legend is
+/// the same colours as the board by construction.
+fn food_colour(food: i32) -> Color {
+    let t = (food as f32 / MAX_FOOD as f32).clamp(0.0, 1.0);
+    EMPTY_CELL.mix(&FED_CELL, t)
+}
+
+/// Collects the overlay's triangles. Bars and speckles are appended in draw
+/// order, so speckles land on top of bars as in the previous macroquad GUI.
+#[derive(Default)]
+struct OverlayMesh {
+    positions: Vec<[f32; 3]>,
+    colours: Vec<[f32; 4]>,
+    indices: Vec<u32>,
+}
+
+impl OverlayMesh {
+    /// A single triangle fan avoids dark seams from overlapping translucent
+    /// rectangles and end caps. The radius is clamped for very short bars.
+    fn rounded_rect(&mut self, min: Vec2, max: Vec2, radius: f32, colour: Color) {
+        let base = self.positions.len() as u32;
+        let colour = colour.to_linear().to_f32_array();
+        let radius = radius.min((max.x - min.x) * 0.5).min((max.y - min.y) * 0.5);
+        let centre = (min + max) * 0.5;
+        self.positions.push([centre.x, centre.y, 0.0]);
+        self.colours.push(colour);
+        for (corner, start) in [
+            (Vec2::new(max.x - radius, max.y - radius), 0.0),
+            (Vec2::new(min.x + radius, max.y - radius), 1.0),
+            (Vec2::new(min.x + radius, min.y + radius), 2.0),
+            (Vec2::new(max.x - radius, min.y + radius), 3.0),
+        ] {
+            for step in 0..=6 {
+                let angle = (start + step as f32 / 6.0) * std::f32::consts::FRAC_PI_2;
+                let point = corner + Vec2::new(angle.cos(), angle.sin()) * radius;
+                self.positions.push([point.x, point.y, 0.0]);
+                self.colours.push(colour);
+            }
+        }
+        for step in 0..28 {
+            self.indices
+                .extend([base, base + 1 + step, base + 1 + (step + 1) % 28]);
+        }
+    }
+
+    /// A hexagon: at speckle size it is indistinguishable from a circle, at a
+    /// fraction of the triangles.
+    fn disc(&mut self, centre: Vec2, radius: f32, colour: Color) {
+        let base = self.positions.len() as u32;
+        let colour = colour.to_linear().to_f32_array();
+        self.positions.push([centre.x, centre.y, 0.0]);
+        self.colours.push(colour);
+        for step in 0..6 {
+            let angle = step as f32 * std::f32::consts::TAU / 6.0;
+            self.positions.push([
+                centre.x + radius * angle.cos(),
+                centre.y + radius * angle.sin(),
+                0.0,
+            ]);
+            self.colours.push(colour);
+        }
+        for step in 0..6 {
+            self.indices
+                .extend([base, base + 1 + step, base + 1 + (step + 1) % 6]);
+        }
+    }
+
+    fn into_mesh(mut self) -> Mesh {
+        // A board with no food would otherwise produce an empty vertex buffer.
+        // One zero-area, fully transparent triangle keeps the mesh valid.
+        if self.indices.is_empty() {
+            self.positions.extend([[0.0; 3]; 3]);
+            self.colours.extend([[0.0; 4]; 3]);
+            self.indices.extend([0, 1, 2]);
+        }
+        Mesh::new(
+            PrimitiveTopology::TriangleList,
+            RenderAssetUsages::default(),
+        )
+        .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, self.positions)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, self.colours)
+        .with_inserted_indices(Indices::U32(self.indices))
+    }
+}
+
+/// Builds every cell's food bar and speckles into one mesh, using the
+/// macroquad GUI's proportions (`draw_cell_background`, `draw_food_speckles`)
+/// converted from a y-down cell rectangle to y-up world space.
+fn food_overlay_mesh(board: &Board) -> Mesh {
+    let inner = CELL - GAP;
+    let mut mesh = OverlayMesh::default();
+
+    for row in 0..board.rows() {
+        for col in 0..board.cols() {
+            let Some(snapshot) = board.cell_snapshot(row, col) else {
+                continue;
+            };
+            let food = snapshot.food.clamp(0, MAX_FOOD);
+            if food == 0 {
+                continue;
+            }
+            // Top-left corner of the cell's inner square.
+            let origin = cell_to_world(row, col) + Vec2::new(-inner * 0.5, inner * 0.5);
+
+            // Bar along the bottom, its length the food level.
+            let left = origin.x + inner * 0.14;
+            let top = origin.y - inner * 0.82;
+            let width = inner * 0.72 * food as f32 / MAX_FOOD as f32;
+            let height = inner * 0.055;
+            mesh.rounded_rect(
+                Vec2::new(left, top - height),
+                Vec2::new(left + width, top),
+                height * 0.5,
+                FOOD_BAR,
+            );
+
+            for offset in speckle_offsets(row, col, food) {
+                let centre = origin + Vec2::new(inner * offset.x, -inner * offset.y);
+                mesh.disc(centre, inner * 0.02, FOOD_SPECKLE);
+            }
+        }
+    }
+
+    mesh.into_mesh()
+}
+
+/// Speckle positions for a cell, one per unit of food, as fractions of the cell
+/// measured from its top-left corner (x right, y down). Positions are fixed per
+/// cell, so speckles stay put as food changes rather than jittering every turn.
+///
+/// The macroquad GUI capped this at six, which made cells holding 6, 7, 8 and 9
+/// food look identical apart from bar length. There is room for all nine: across
+/// a 100x100 board the closest two centres are 0.17 of a cell apart against a
+/// speckle diameter of 0.04, and none comes within reach of the bar.
+fn speckle_offsets(row: usize, col: usize, food: i32) -> impl Iterator<Item = Vec2> {
+    (0..food.clamp(0, MAX_FOOD) as usize).map(move |dot| {
+        let seed = row * 73 + col * 41 + dot * 19;
+        Vec2::new(
+            0.18 + (seed % 59) as f32 / 92.0,
+            0.18 + (seed % 43) as f32 / 78.0,
+        )
+    })
+}
+
+/// Rebuilds the overlay after a turn, or when it is switched on. While it is
+/// off nothing is built at all.
+fn rebuild_food_overlay(
+    board: Res<BoardRes>,
+    revision: Res<Revision>,
+    overlay: Res<FoodOverlay>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut layer: Query<(&Mesh2d, &mut Visibility), With<FoodLayer>>,
+) {
+    if !(revision.is_changed() || overlay.is_changed()) {
+        return;
+    }
+    let Ok((handle, mut visibility)) = layer.single_mut() else {
+        return;
+    };
+
+    if !overlay.0 {
+        visibility.set_if_neq(Visibility::Hidden);
+        return;
+    }
+    if let Some(mut mesh) = meshes.get_mut(&handle.0) {
+        *mesh = food_overlay_mesh(&board.0);
+    }
+    visibility.set_if_neq(Visibility::Inherited);
+}
+
+/// Mirrors `FoodOverlay` onto the checkbox, so the `F` key updates it too.
+fn sync_food_checkbox(
+    mut commands: Commands,
+    overlay: Res<FoodOverlay>,
+    toggles: Query<Entity, With<FoodOverlayToggle>>,
+) {
+    if !overlay.is_changed() {
+        return;
+    }
+    for toggle in &toggles {
+        set_checked(&mut commands, toggle, overlay.0);
+    }
+}
+
+/// Reconciles live creature entities against `Board::creature_snapshots`,
+/// keyed by the stable snapshot id: spawn the new, despawn the gone, retarget
+/// the rest. This is the counterpart to building `AnimatedCreature` values.
+fn sync_creatures(
+    mut commands: Commands,
+    board: Res<BoardRes>,
+    revision: Res<Revision>,
+    assets: Res<CreatureAssets>,
+    mut index: ResMut<CreatureIndex>,
+    mut tweens: Query<(&mut MoveTween, &Transform), With<Creature>>,
+) {
+    if !revision.is_changed() {
+        return;
+    }
+
+    let snapshots = board.0.creature_snapshots();
+    let mut seen = HashMap::with_capacity(snapshots.len());
+
+    for snapshot in &snapshots {
+        let location = snapshot.location;
+        let (aphids, ladybugs) = board
+            .0
+            .cell_snapshot(location.x, location.y)
+            .map_or((0, 0), |cell| (cell.aphids, cell.ladybugs));
+        let (offset, scale) = creature_slot(snapshot.kind, snapshot.cell_slot, aphids, ladybugs);
+        let target = creature_world(location, offset);
+
+        match index.0.get(&snapshot.id) {
+            Some(&entity) => {
+                if let Ok((mut tween, transform)) = tweens.get_mut(entity) {
+                    *tween = MoveTween {
+                        from: transform.translation.truncate(),
+                        to: target,
+                        from_scale: transform.scale.x.max(0.001),
+                        to_scale: scale,
+                        timer: Timer::from_seconds(STEP_SECONDS, TimerMode::Once),
+                    };
+                }
+                seen.insert(snapshot.id, entity);
+            }
+            None => {
+                let image = match snapshot.kind {
+                    CreatureSnapshotKind::Aphid => assets.aphid.clone(),
+                    CreatureSnapshotKind::Ladybug => assets.ladybug.clone(),
+                };
+                let entity = commands
+                    .spawn((
+                        Creature,
+                        Sprite {
+                            image,
+                            custom_size: Some(Vec2::splat(CREATURE_SPRITE_SIZE)),
+                            ..default()
+                        },
+                        Transform::from_translation(target.extend(1.0))
+                            .with_scale(Vec3::splat(0.001)),
+                        if index.0.is_empty() {
+                            MoveTween::still(target, scale)
+                        } else {
+                            MoveTween::born(target, scale)
+                        },
+                    ))
+                    .id();
+                seen.insert(snapshot.id, entity);
+            }
+        }
+    }
+
+    for (id, entity) in index.0.iter() {
+        if !seen.contains_key(id) {
+            commands.entity(*entity).despawn();
+        }
+    }
+
+    index.0 = seen;
+}
+
+/// Cells holding more than one creature of a kind, as `(location, kind index,
+/// count)`. Kind index 0 is aphids and 1 ladybugs, matching `BADGE_SLOTS`.
+fn crowded_cells(snapshots: &[CreatureSnapshot]) -> Vec<(Coordinates, usize, usize)> {
+    let mut counts: HashMap<(Coordinates, usize), usize> = HashMap::new();
+    for snapshot in snapshots {
+        let kind = usize::from(snapshot.kind == CreatureSnapshotKind::Ladybug);
+        *counts.entry((snapshot.location, kind)).or_default() += 1;
+    }
+    let mut crowded: Vec<(Coordinates, usize, usize)> = counts
+        .into_iter()
+        .filter(|&(_, count)| count > 1)
+        .map(|((location, kind), count)| (location, kind, count))
+        .collect();
+    // A stable order keeps spawning deterministic, which the tests rely on.
+    crowded.sort_by_key(|&(location, kind, _)| (location.x, location.y, kind));
+    crowded
+}
+
+/// Keeps one badge per crowded cell and kind, spawning, relabelling and
+/// despawning as the board changes.
+fn sync_count_badges(
+    mut commands: Commands,
+    board: Res<BoardRes>,
+    revision: Res<Revision>,
+    assets: Res<CreatureAssets>,
+    mut badges: ResMut<BadgeIndex>,
+    raster: Res<BadgeRaster>,
+    mut labels: Query<&mut Text2d, With<CountBadge>>,
+) {
+    if !revision.is_changed() {
+        return;
+    }
+
+    let inner = CELL - GAP;
+    let mut seen = HashMap::new();
+    for (location, kind, count) in crowded_cells(&board.0.creature_snapshots()) {
+        let key = (location.x, location.y, kind);
+        let label = count.to_string();
+
+        let badge = match badges.0.get(&key) {
+            Some(&badge) => {
+                if let Ok(mut text) = labels.get_mut(badge.text)
+                    && text.0 != label
+                {
+                    text.0 = label;
+                }
+                badge
+            }
+            None => {
+                // Above the creatures, which sit at z 1.
+                let position = creature_world(location, BADGE_SLOTS[kind]).extend(2.0);
+                let offset = inner * BADGE_SHADOW_OFFSET;
+                let root = commands
+                    .spawn((
+                        CountBadge,
+                        Mesh2d(assets.badge.clone()),
+                        MeshMaterial2d(assets.badge_colours[kind].clone()),
+                        Transform::from_translation(position),
+                    ))
+                    .id();
+                let text = commands
+                    .spawn((
+                        CountBadge,
+                        Text2d::new(label),
+                        TextFont {
+                            font: assets.font.clone().into(),
+                            font_size: FontSize::Px(raster.font_size),
+                            ..default()
+                        },
+                        TextColor(BADGE_TEXT),
+                        Transform::from_xyz(0.0, 0.0, 0.02).with_scale(Vec3::splat(raster.scale)),
+                        ChildOf(root),
+                    ))
+                    .id();
+                commands.spawn((
+                    CountBadge,
+                    Mesh2d(assets.badge_shadow_mesh.clone()),
+                    MeshMaterial2d(assets.badge_shadow.clone()),
+                    Transform::from_xyz(offset, -offset, -0.01),
+                    ChildOf(root),
+                ));
+                Badge { root, text }
+            }
+        };
+        seen.insert(key, badge);
+    }
+
+    for (key, badge) in badges.0.iter() {
+        if !seen.contains_key(key) {
+            commands.entity(badge.root).despawn();
+        }
+    }
+    badges.0 = seen;
+}
+
+/// Badges are only legible once a cell covers enough of the screen, so they
+/// follow the camera's zoom rather than being drawn at every scale.
+fn scale_count_badges(
+    camera: Query<(&Camera, &Projection), With<BoardCamera>>,
+    badges: Res<BadgeIndex>,
+    mut raster: ResMut<BadgeRaster>,
+    mut visibility: Query<&mut Visibility, With<CountBadge>>,
+    mut labels: BadgeLabels,
+) {
+    let Ok((camera, Projection::Orthographic(ortho))) = camera.single() else {
+        return;
+    };
+    let viewport_height = camera.logical_viewport_size().map(|viewport| viewport.y);
+    let legible = viewport_height.is_some_and(|height| badges_legible(height, ortho.area.height()));
+
+    // Rasterise the counts at the size they are actually drawn. `Text2d` builds
+    // its glyph atlas from the font size and the window's scale factor alone,
+    // ignoring camera zoom, so a font size in world units is upscaled on screen
+    // and looks pixelated. The entity is scaled back down to keep the badge the
+    // same size on the board.
+    if let Some(height) = viewport_height
+        && ortho.area.height() > 0.0
+    {
+        let (font_size, scale) = badge_text_raster(height / ortho.area.height());
+        if font_size != raster.font_size {
+            *raster = BadgeRaster { font_size, scale };
+            for (mut font, mut transform) in &mut labels {
+                font.font_size = FontSize::Px(font_size);
+                transform.scale = Vec3::splat(scale);
+            }
+        }
+    }
+
+    let wanted = if legible {
+        Visibility::Inherited
+    } else {
+        Visibility::Hidden
+    };
+    for badge in badges.0.values() {
+        if let Ok(mut visibility) = visibility.get_mut(badge.root) {
+            visibility.set_if_neq(wanted);
+        }
+    }
+}
+
+/// The badge count labels, whose raster size follows the zoom.
+type BadgeLabels<'w, 's> = Query<
+    'w,
+    's,
+    (&'static mut TextFont, &'static mut Transform),
+    (With<CountBadge>, With<Text2d>),
+>;
+
+/// The font size to rasterise a badge count at, with the entity scale that keeps
+/// its world size unchanged, for a board drawn at `pixels_per_unit` logical
+/// pixels per world unit. `font_size * scale` is always the badge's world height.
+fn badge_text_raster(pixels_per_unit: f32) -> (f32, f32) {
+    let height = (CELL - GAP) * BADGE_FONT;
+    let (min, max) = BADGE_RASTER_RANGE;
+    let wanted = height * pixels_per_unit.max(0.0);
+    let font_size = ((wanted / BADGE_RASTER_STEP).round() * BADGE_RASTER_STEP).clamp(min, max);
+    (font_size, height / font_size)
+}
+
+/// Whether a cell is wide enough on screen for a badge to be readable, given the
+/// camera's viewport height and the world height it shows.
+fn badges_legible(viewport_height: f32, area_height: f32) -> bool {
+    if area_height <= 0.0 {
+        return false;
+    }
+    (CELL - GAP) * (viewport_height / area_height) >= BADGE_MIN_CELL_PIXELS
+}
+
+/// Replaces `draw_animated_creatures`, `animation_elapsed`, `animation_progress`
+/// and `smooth_progress` with one system over a component.
+fn advance_tweens(
+    time: Res<Time>,
+    mut creatures: Query<(&mut Transform, &mut MoveTween)>,
+    mut gizmos: Gizmos,
+) {
+    for (mut transform, mut tween) in &mut creatures {
+        tween.timer.tick(time.delta());
+
+        let t = tween.timer.fraction().clamp(0.0, 1.0);
+        let progress = t * t * (3.0 - 2.0 * t); // same smoothstep as gui.rs:1280
+
+        let position = tween.from.lerp(tween.to, progress);
+        transform.translation = position.extend(1.0);
+        let scale = tween.from_scale + (tween.to_scale - tween.from_scale) * progress;
+        transform.scale = Vec3::splat(scale.max(0.001));
+
+        // Movement trail, carried over from `draw_animated_creatures`. Gizmos
+        // is immediate-mode, so this stays a per-frame line draw.
+        if tween.from.distance_squared(tween.to) > 0.01 && t < 1.0 {
+            gizmos.line_2d(tween.from, position, TRAIL);
+        }
+    }
+}
+
+fn draw_hover(
+    hovered: Res<Hovered>,
+    edit: Res<EditMode>,
+    mut gizmos: Gizmos,
+    mut edit_gizmos: Gizmos<BoardEditGizmos>,
+) {
+    let Some((row, col)) = hovered.0 else {
+        return;
+    };
+    let centre = cell_to_world(row, col);
+    gizmos
+        .rounded_rect_2d(centre, Vec2::splat(CELL - GAP), HOVER)
+        .corner_radius((CELL - GAP) * CELL_CORNER);
+
+    // While editing, preview what a click would place: an outline just outside
+    // the cell and a creature-sized ring, in the selected tool's colour.
+    if edit.enabled {
+        let colour = match edit.tool {
+            EditTool::Aphid => EDIT_APHID,
+            EditTool::Ladybug => EDIT_LADYBUG,
+        };
+        edit_gizmos
+            .rounded_rect_2d(centre, Vec2::splat(CELL - GAP + 6.0), colour)
+            .corner_radius((CELL - GAP) * CELL_CORNER + 3.0);
+        edit_gizmos.circle_2d(centre, (CELL - GAP) * 0.22, colour);
+    }
+}
+
+/// Fills the cell inspector popup and parks it beside the pointer, hiding it
+/// whenever no cell is hovered. This is the Bevy counterpart to
+/// `draw_hover_tooltip` in the previous macroquad GUI, down to the 18px offset and the
+/// clamp that keeps the popup on screen near the window edges.
+fn update_cell_popup(
+    windows: Query<&Window>,
+    cameras: Query<(&Camera, &GlobalTransform), With<BoardCamera>>,
+    hovered: Res<Hovered>,
+    board: Res<BoardRes>,
+    mut popup: Query<(&mut Node, &ComputedNode, &mut Visibility), With<CellPopup>>,
+    mut lines: Query<(&PopupLine, &mut Text)>,
+) {
+    let (Ok(window), Ok((mut node, computed, mut visibility))) =
+        (windows.single(), popup.single_mut())
+    else {
+        return;
+    };
+
+    let cell = hovered
+        .0
+        .and_then(|(row, col)| board.0.cell_snapshot(row, col).map(|cell| (row, col, cell)));
+    let Some((row, col, snapshot)) = cell else {
+        visibility.set_if_neq(Visibility::Hidden);
+        return;
+    };
+    let Some(anchor) = popup_anchor(window, cameras.single().ok(), row, col) else {
+        visibility.set_if_neq(Visibility::Hidden);
+        return;
+    };
+
+    // Hidden rather than `Display::None`, so the popup is still laid out while
+    // it is away and its measured size can place it the frame it comes back.
+    let size = computed.size() * computed.inverse_scale_factor();
+    let left = px(clamp_to_window(anchor.x, size.x, window.width()));
+    let top = px(clamp_to_window(anchor.y, size.y, window.height()));
+    if node.left != left || node.top != top {
+        node.left = left;
+        node.top = top;
+    }
+    visibility.set_if_neq(Visibility::Inherited);
+
+    for (line, text) in &mut lines {
+        let next = match line {
+            PopupLine::Heading => format!("Row {row} · Column {col}"),
+            PopupLine::Counts => format!(
+                "Aphids {}    Ladybugs {}    Food {} / {MAX_FOOD}",
+                snapshot.aphids, snapshot.ladybugs, snapshot.food
+            ),
+        };
+        set_text(Some(text), next);
+    }
+}
+
+/// What the popup points at: the pointer while it is over the board, and
+/// otherwise the hovered cell itself, which is what the screenshot probe pins
+/// since it has no pointer.
+fn popup_anchor(
+    window: &Window,
+    camera: Option<(&Camera, &GlobalTransform)>,
+    row: usize,
+    col: usize,
+) -> Option<Vec2> {
+    window
+        .cursor_position()
+        .filter(|&cursor| board_rect(window).contains(cursor))
+        .or_else(|| {
+            let (camera, transform) = camera?;
+            camera
+                .world_to_viewport(transform, cell_to_world(row, col).extend(0.0))
+                .ok()
+        })
+}
+
+/// One axis of the popup's placement: `POPUP_OFFSET` past the anchor, pulled
+/// back so the whole popup stays inside the window.
+fn clamp_to_window(anchor: f32, size: f32, window: f32) -> f32 {
+    (anchor + POPUP_OFFSET)
+        .min(window - size - POPUP_MARGIN)
+        .max(POPUP_MARGIN)
+}
+
+type HudTexts<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static mut Text,
+        Option<&'static HudText>,
+        Has<PlayLabel>,
+        Has<PlaybackStatus>,
+        Has<SpeedLabel>,
+    ),
+>;
+
+fn update_hud(
+    stats: Res<Stats>,
+    playing: Res<Playing>,
+    timer: Res<StepTimer>,
+    edit: Res<EditMode>,
+    seed: Res<Seed>,
+    mut texts: HudTexts,
+) {
+    if !(stats.is_changed()
+        || playing.is_changed()
+        || timer.is_changed()
+        || edit.is_changed()
+        || seed.is_changed())
+    {
+        return;
+    }
+    let state = if stats.extinct {
         "Extinct"
-    } else if app.playing {
+    } else if edit.enabled {
+        "Editing"
+    } else if playing.0 {
         "Running"
     } else {
         "Paused"
+    };
+    for (mut text, hud, play, status, speed) in &mut texts {
+        let next = if let Some(hud) = hud {
+            match hud.0 {
+                0 => stats.aphids.to_string(),
+                1 => stats.ladybugs.to_string(),
+                2 => stats.food.to_string(),
+                3 => format!("+{}", stats.births),
+                4 => format!("−{}", stats.deaths),
+                _ => seed.0.to_string(),
+            }
+        } else if play {
+            if playing.0 && !stats.extinct {
+                "Pause".into()
+            } else {
+                "Play".into()
+            }
+        } else if status {
+            format!(
+                "{state}  ·  Turn {}  ·  Space: play/pause  ·  N: step",
+                stats.turn
+            )
+        } else if speed {
+            format!("{:.2} turns/s", 1.0 / timer.0.duration().as_secs_f32())
+        } else {
+            continue;
+        };
+        if text.0 != next {
+            text.0 = next;
+        }
     }
 }
 
-fn draw_round_rect(x: f32, y: f32, w: f32, h: f32, radius: f32, fill: Color) {
-    let r = radius.min(w * 0.5).min(h * 0.5);
-    draw_rectangle(x + r, y, w - r * 2.0, h, fill);
-    draw_rectangle(x, y + r, w, h - r * 2.0, fill);
-    draw_circle(x + r, y + r, r, fill);
-    draw_circle(x + w - r, y + r, r, fill);
-    draw_circle(x + r, y + h - r, r, fill);
-    draw_circle(x + w - r, y + h - r, r, fill);
-}
-
-fn draw_round_rect_lines(
-    x: f32,
-    y: f32,
-    w: f32,
-    h: f32,
-    radius: f32,
-    thickness: f32,
-    line_color: Color,
+/// Fills the toolbar's status line. The toolbar and the chart share a surface, so
+/// the chart's contrast-checked green and red are the right pair here too.
+fn update_status_text(
+    status: Res<StatusLine>,
+    mut labels: Query<(&mut Text, &mut TextColor), With<StatusLabel>>,
 ) {
-    let half = thickness * 0.5;
-    let left = x + half;
-    let right = x + w - half;
-    let top = y + half;
-    let bottom = y + h - half;
-    let r = (radius - half)
-        .max(0.0)
-        .min((right - left) * 0.5)
-        .min((bottom - top) * 0.5);
-
-    if r <= 0.0 {
-        draw_rectangle_lines(x, y, w, h, thickness, line_color);
+    if !status.is_changed() {
         return;
     }
-
-    draw_line(left + r, top, right - r, top, thickness, line_color);
-    draw_line(right, top + r, right, bottom - r, thickness, line_color);
-    draw_line(right - r, bottom, left + r, bottom, thickness, line_color);
-    draw_line(left, bottom - r, left, top + r, thickness, line_color);
-
-    draw_arc_lines(left + r, top + r, r, 180.0, 270.0, thickness, line_color);
-    draw_arc_lines(right - r, top + r, r, 270.0, 360.0, thickness, line_color);
-    draw_arc_lines(right - r, bottom - r, r, 0.0, 90.0, thickness, line_color);
-    draw_arc_lines(left + r, bottom - r, r, 90.0, 180.0, thickness, line_color);
-}
-
-fn draw_arc_lines(
-    cx: f32,
-    cy: f32,
-    radius: f32,
-    start_degrees: f32,
-    end_degrees: f32,
-    thickness: f32,
-    line_color: Color,
-) {
-    let segments = (radius * 0.6).ceil().clamp(6.0, 16.0) as usize;
-    let start = start_degrees.to_radians();
-    let end = end_degrees.to_radians();
-    let step = (end - start) / segments as f32;
-
-    let mut previous = vec2(cx + radius * start.cos(), cy + radius * start.sin());
-    for segment in 1..=segments {
-        let angle = start + step * segment as f32;
-        let current = vec2(cx + radius * angle.cos(), cy + radius * angle.sin());
-        draw_line(
-            previous.x, previous.y, current.x, current.y, thickness, line_color,
-        );
-        previous = current;
+    let tint = if status.success {
+        CHART_APHID
+    } else {
+        CHART_LADYBUG
+    };
+    for (text, mut colour) in &mut labels {
+        set_text(Some(text), status.message.clone());
+        if colour.0 != tint {
+            colour.0 = tint;
+        }
     }
-}
-
-fn color(red: u8, green: u8, blue: u8, alpha: u8) -> Color {
-    Color::from_rgba(red, green, blue, alpha)
-}
-
-fn mix(from: Color, to: Color, amount: f32) -> Color {
-    let t = amount.clamp(0.0, 1.0);
-    Color::new(
-        from.r + (to.r - from.r) * t,
-        from.g + (to.g - from.g) * t,
-        from.b + (to.b - from.b) * t,
-        from.a + (to.a - from.a) * t,
-    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bevy::ecs::system::RunSystemOnce;
 
-    fn snapshot(
-        id: usize,
-        kind: CreatureSnapshotKind,
-        x: usize,
-        y: usize,
-        cell_slot: usize,
-    ) -> CreatureSnapshot {
+    #[test]
+    fn axis_uses_clean_steps_and_at_most_four_intervals() {
+        for max in [0, 1, 4, 6, 9, 45, 100, 101, 999, 12_345] {
+            let (top, step) = nice_axis(max);
+            assert!(top >= max, "max {max}: top {top}");
+            assert_eq!(top % step, 0, "max {max}: top {top} step {step}");
+            assert!(top / step <= 4, "max {max}: top {top} step {step}");
+            let magnitude = 10usize.pow(step.ilog10());
+            assert!([1, 2, 5].contains(&(step / magnitude)), "step {step}");
+        }
+        assert_eq!(nice_axis(45), (60, 20));
+        assert_eq!(nice_axis(0), (4, 1));
+    }
+
+    #[test]
+    fn nearest_index_snaps_to_turns_and_clamps() {
+        let plot = Rect::new(0.0, 0.0, 100.0, 50.0);
+        assert_eq!(nearest_index(-20.0, 11, plot), 0);
+        assert_eq!(nearest_index(49.0, 11, plot), 5);
+        assert_eq!(nearest_index(500.0, 11, plot), 10);
+        assert_eq!(nearest_index(30.0, 1, plot), 0);
+    }
+
+    #[test]
+    fn history_drops_the_oldest_turn_past_the_limit() {
+        let mut history = History::default();
+        for turn in 0..HISTORY_LIMIT + 5 {
+            history.record(turn, turn, 0);
+        }
+        assert_eq!(history.0.len(), HISTORY_LIMIT);
+        assert_eq!(history.0.front().map(|point| point.turn), Some(5));
+        assert_eq!(
+            history.0.back().map(|point| point.turn),
+            Some(HISTORY_LIMIT + 4)
+        );
+    }
+
+    #[test]
+    fn dashes_stay_dashed_when_segments_are_shorter_than_a_dash() {
+        // A full history across a narrow plot: 240 turns at 3px per turn, far
+        // shorter than the 7px dash. Restarting per segment would draw this
+        // solid; carrying the phase keeps the ink at DASH / DASH_PERIOD.
+        let points: Vec<Vec2> = (0..HISTORY_LIMIT)
+            .map(|turn| Vec2::new(turn as f32 * 3.0, 0.0))
+            .collect();
+        let total = 3.0 * (HISTORY_LIMIT - 1) as f32;
+        let inked: f32 = dash_segments(&points)
+            .iter()
+            .map(|(start, end)| start.distance(*end))
+            .sum();
+        let expected = total * DASH / DASH_PERIOD;
+        assert!(
+            (inked - expected).abs() < DASH,
+            "inked {inked}, expected about {expected} of {total}"
+        );
+    }
+
+    #[test]
+    fn dashes_follow_the_line_through_its_corners() {
+        let points = [Vec2::ZERO, Vec2::new(10.0, 0.0), Vec2::new(10.0, 10.0)];
+        // 20px of line: dash at 0..7, gap to 12, dash at 12..19. The second dash
+        // starts 2px up the vertical leg; restarting the pattern at the corner
+        // would have started it at (10, 0) instead.
+        assert_eq!(
+            dash_segments(&points),
+            vec![
+                (Vec2::new(0.0, 0.0), Vec2::new(7.0, 0.0)),
+                (Vec2::new(10.0, 2.0), Vec2::new(10.0, 9.0)),
+            ]
+        );
+    }
+
+    #[test]
+    fn one_speckle_per_unit_of_food_inside_the_cell_and_above_the_bar() {
+        for food in 0..=MAX_FOOD {
+            for (row, col) in [(0, 0), (29, 61), (99, 99)] {
+                let offsets: Vec<Vec2> = speckle_offsets(row, col, food).collect();
+                assert_eq!(
+                    offsets.len(),
+                    food as usize,
+                    "food {food} at ({row}, {col})"
+                );
+                for offset in offsets {
+                    assert!((0.0..1.0).contains(&offset.x), "{offset:?}");
+                    assert!(
+                        offset.y + 0.02 < 0.82,
+                        "speckle reaches the bar: {offset:?}"
+                    );
+                }
+            }
+        }
+        assert_eq!(speckle_offsets(0, 0, -3).count(), 0);
+        assert_eq!(speckle_offsets(0, 0, 40).count(), MAX_FOOD as usize);
+    }
+
+    /// A 4x4 board with no creatures, mid-run: turn 12, playing, 12 turns of
+    /// history.
+    fn world_mid_run() -> World {
+        let config = "[board]\nrows = 4\ncolumns = 4\naphids = []\nladybugs = []\n";
+        let mut random = Random::with_seed(7);
+        let mut board = Board::new();
+        creature_life_cycle::parse_simulation_config(config, &mut board, &mut random).unwrap();
+
+        let mut history = History::default();
+        for turn in 0..12 {
+            history.record(turn, 5, 5);
+        }
+        let mut world = World::new();
+        world.insert_resource(StartingSetup(
+            creature_life_cycle::format_simulation_config(&board),
+        ));
+        world.insert_resource(Params {
+            aphid: board.aphid_params(),
+            ladybug: board.ladybug_params(),
+            food: board.food_params(),
+        });
+        world.insert_resource(StepTimer(Timer::from_seconds(
+            STEP_SECONDS,
+            TimerMode::Repeating,
+        )));
+        world.init_resource::<EditMode>();
+        world.init_resource::<StatusLine>();
+        world.insert_resource(Seed(DEFAULT_SEED));
+        world.init_resource::<Messages<RunAction>>();
+        world.init_resource::<Messages<Reseed>>();
+        world.insert_resource(BoardRes(board));
+        world.insert_resource(Rng(random));
+        world.insert_resource(Stats {
+            turn: 12,
+            births: 3,
+            deaths: 2,
+            ..default()
+        });
+        world.insert_resource(Revision(0));
+        world.insert_resource(Playing(true));
+        world.insert_resource(history);
+        world
+    }
+
+    fn edit(world: &mut World, row: usize, col: usize, tool: EditTool, action: EditAction) -> bool {
+        world
+            .run_system_once(move |mut sim: Simulation| {
+                sim.edit(CellEdit {
+                    row,
+                    col,
+                    tool,
+                    action,
+                })
+            })
+            .unwrap()
+    }
+
+    fn run_action(world: &mut World, action: RunAction) {
+        world.resource_mut::<Messages<RunAction>>().clear();
+        world.write_message(action);
+        world.run_system_once(apply_run_actions).unwrap();
+    }
+
+    fn reseed(world: &mut World, typed: &str) {
+        world.resource_mut::<Messages<Reseed>>().clear();
+        world.resource_mut::<Messages<RunAction>>().clear();
+        let field = world.spawn((SeedField, EditableText::new(typed))).id();
+        world.write_message(Reseed);
+        world.run_system_once(apply_seed).unwrap();
+        world.despawn(field);
+    }
+
+    /// Every cell's food, which the seed decides when a run is built.
+    fn food_layout(world: &World) -> Vec<i32> {
+        let board = &world.resource::<BoardRes>().0;
+        (0..board.rows())
+            .flat_map(|row| (0..board.cols()).map(move |col| (row, col)))
+            .filter_map(|(row, col)| board.cell_snapshot(row, col).map(|cell| cell.food))
+            .collect()
+    }
+
+    #[test]
+    fn a_typed_seed_is_normalised_and_restarts_the_run_from_itself() {
+        let mut world = world_mid_run();
+        reseed(&mut world, " 007 ");
+
+        assert_eq!(world.resource::<Seed>().0, 7);
+        let status = world.resource::<StatusLine>();
+        assert!(status.success, "{}", status.message);
+        assert_eq!(status.message, "Restarted from seed 7.");
+
+        // The restart itself is `RunAction::Reset`, so there is one restart path.
+        assert_eq!(world.resource::<Messages<RunAction>>().len(), 1);
+        world.run_system_once(apply_run_actions).unwrap();
+        let from_seven = food_layout(&world);
+        assert_eq!(world.resource::<Stats>().turn, 0);
+
+        // The same seed rebuilds the same field; a different one does not.
+        run_action(&mut world, RunAction::Reset);
+        assert_eq!(food_layout(&world), from_seven);
+        reseed(&mut world, "12345");
+        world.run_system_once(apply_run_actions).unwrap();
+        assert_ne!(food_layout(&world), from_seven);
+    }
+
+    #[test]
+    fn an_unreadable_seed_is_reported_and_leaves_the_run_alone() {
+        let mut world = world_mid_run();
+        reseed(&mut world, "");
+
+        assert_eq!(world.resource::<Seed>().0, DEFAULT_SEED);
+        assert!(
+            world.resource::<Messages<RunAction>>().is_empty(),
+            "a seed that cannot be read must not restart the run"
+        );
+        let status = world.resource::<StatusLine>();
+        assert!(!status.success);
+        assert_eq!(
+            status.message,
+            "Enter a whole seed from 0 to 18446744073709551615."
+        );
+    }
+
+    #[test]
+    fn a_focused_seed_field_keeps_the_keyboard_to_itself() {
+        let mut world = world_mid_run();
+        world.init_resource::<InputFocus>();
+        world.init_resource::<FoodOverlay>();
+        world.init_resource::<ActiveTab>();
+        let field = world.spawn((SeedField, EditableText::new("7"))).id();
+        world
+            .resource_mut::<InputFocus>()
+            .set(field, bevy::input_focus::FocusCause::Navigated);
+
+        let mut keys = ButtonInput::<KeyCode>::default();
+        keys.press(KeyCode::KeyN);
+        keys.press(KeyCode::Enter);
+        world.insert_resource(keys);
+
+        world.run_system_once(keyboard_controls).unwrap();
+        assert!(
+            world.resource::<Messages<RunAction>>().is_empty(),
+            "typing a seed must not step the run"
+        );
+        world.run_system_once(seed_field_keyboard).unwrap();
+        assert_eq!(world.resource::<Messages<Reseed>>().len(), 1);
+    }
+
+    fn save_action(world: &mut World) {
+        world.resource_mut::<Messages<RunAction>>().clear();
+        world.write_message(RunAction::Save);
+        world.run_system_once(save_setup).unwrap();
+    }
+
+    /// Both the save and the failure case live in one test: they set
+    /// `XDG_CONFIG_HOME`, which is process-wide, so they cannot run in parallel.
+    #[test]
+    fn saving_writes_the_edited_board_and_makes_it_what_reset_restores() {
+        let output = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("test-output");
+        let config_home = output.join("bevy_save_setup");
+        let _ = std::fs::remove_dir_all(&config_home);
+        std::fs::create_dir_all(&output).unwrap();
+        // `save_configured_board` resolves its own path from the environment, and
+        // this is the only test in this binary that reads it.
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", &config_home) };
+
+        let mut world = world_mid_run();
+        world.resource_mut::<Params>().aphid.prob_move = 0.31;
+        assert!(edit(&mut world, 1, 2, EditTool::Aphid, EditAction::Add));
+        save_action(&mut world);
+
+        let status = world.resource::<StatusLine>();
+        assert!(status.success, "{}", status.message);
+        assert_eq!(status.remaining, STATUS_SECONDS);
+
+        // The slider values reach the file even though `apply_params` never ran.
+        let saved = std::fs::read_to_string(
+            config_home
+                .join("creature_life_cycle")
+                .join("simulation.toml"),
+        )
+        .unwrap();
+        let mut random = Random::with_seed(1);
+        let mut reloaded = Board::new();
+        creature_life_cycle::parse_simulation_config(&saved, &mut reloaded, &mut random).unwrap();
+        assert_eq!(reloaded.cell_counts(1, 2), Some((1, 0)));
+        assert_eq!(reloaded.aphid_params().prob_move, 0.31);
+
+        // Reset follows the save, as the previous macroquad GUI's reset does by reloading
+        // the config file.
+        let saved_setup = world.resource::<StartingSetup>().0.clone();
+        run_action(&mut world, RunAction::Reset);
+        let board = &world.resource::<BoardRes>().0;
+        assert_eq!(board.cell_counts(1, 2), Some((1, 0)));
+        assert_eq!(board.summary().aphids, 1);
+
+        // A config home that is a file, not a directory, so the write fails. A
+        // failed save is reported and changes nothing.
+        let blocked = output.join("bevy_save_blocked");
+        std::fs::write(&blocked, "not a directory").unwrap();
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", &blocked) };
+        save_action(&mut world);
+
+        let status = world.resource::<StatusLine>();
+        assert!(!status.success);
+        assert!(
+            status.message.starts_with("Save failed:"),
+            "{}",
+            status.message
+        );
+        assert_eq!(world.resource::<StartingSetup>().0, saved_setup);
+    }
+
+    #[test]
+    fn a_save_message_clears_itself_once_it_has_had_its_time() {
+        let mut world = world_mid_run();
+        world.resource_mut::<StatusLine>().set("Saved.", true);
+        let mut time = Time::<()>::default();
+        time.advance_by(std::time::Duration::from_secs_f32(STATUS_SECONDS / 2.0));
+        world.insert_resource(time);
+
+        world.run_system_once(expire_status).unwrap();
+        assert_eq!(world.resource::<StatusLine>().message, "Saved.");
+
+        world.run_system_once(expire_status).unwrap();
+        assert!(world.resource::<StatusLine>().message.is_empty());
+        assert_eq!(world.resource::<StatusLine>().remaining, 0.0);
+    }
+
+    #[test]
+    fn focused_widgets_do_not_also_trigger_global_space_shortcut() {
+        let mut world = world_mid_run();
+        world.init_resource::<InputFocus>();
+        world.init_resource::<FoodOverlay>();
+        world.init_resource::<ActiveTab>();
+        let focused_button = world.spawn_empty().id();
+        world
+            .resource_mut::<InputFocus>()
+            .set(focused_button, bevy::input_focus::FocusCause::Navigated);
+        let mut keys = ButtonInput::<KeyCode>::default();
+        keys.press(KeyCode::Space);
+        world.insert_resource(keys);
+        world.run_system_once(keyboard_controls).unwrap();
+        assert!(world.resource::<Messages<RunAction>>().is_empty());
+        world.resource_mut::<InputFocus>().clear();
+        world.run_system_once(keyboard_controls).unwrap();
+        assert_eq!(world.resource::<Messages<RunAction>>().len(), 1);
+    }
+
+    #[test]
+    fn single_step_pauses_and_clears_the_pending_timer() {
+        let mut world = world_mid_run();
+        world
+            .resource_mut::<StepTimer>()
+            .0
+            .tick(std::time::Duration::from_secs_f32(0.4));
+        run_action(&mut world, RunAction::Step);
+        assert_eq!(world.resource::<Stats>().turn, 13);
+        assert!(!world.resource::<Playing>().0);
+        assert_eq!(world.resource::<StepTimer>().0.elapsed_secs(), 0.0);
+        // An extinct run cannot keep adding empty history points via Step.
+        run_action(&mut world, RunAction::Step);
+        assert_eq!(world.resource::<Stats>().turn, 13);
+    }
+
+    #[test]
+    fn reset_restores_starting_board_and_keeps_rules_with_repeatable_rng() {
+        let mut world = world_mid_run();
+        world.resource_mut::<StartingSetup>().0 =
+            "[board]\nrows=4\ncolumns=4\naphids=[{x=1,y=2}]\nladybugs=[{x=2,y=1}]\n".into();
+        world.resource_mut::<Params>().aphid.prob_move = 0.88;
+        edit(&mut world, 3, 3, EditTool::Ladybug, EditAction::Add);
+        world.resource_mut::<EditMode>().enabled = true;
+        run_action(&mut world, RunAction::Reset);
+        let first = world.resource::<BoardRes>().0.summary();
+        assert_eq!((first.aphids, first.ladybugs), (1, 1));
+        assert_eq!(world.resource::<Stats>().turn, 0);
+        assert_eq!(world.resource::<History>().0.len(), 1);
+        assert_eq!(
+            world.resource::<BoardRes>().0.aphid_params().prob_move,
+            0.88
+        );
+        assert!(!world.resource::<Playing>().0);
+        assert!(!world.resource::<EditMode>().enabled);
+        run_action(&mut world, RunAction::Step);
+        let after_step = world.resource::<BoardRes>().0.creature_snapshots();
+        run_action(&mut world, RunAction::Reset);
+        assert_eq!(world.resource::<BoardRes>().0.summary(), first);
+        run_action(&mut world, RunAction::Step);
+        assert_eq!(
+            world.resource::<BoardRes>().0.creature_snapshots(),
+            after_step
+        );
+    }
+
+    #[test]
+    fn fit_restores_camera_and_toolbar_is_outside_board_hit_area() {
+        let mut world = world_mid_run();
+        let camera = world
+            .spawn((
+                BoardCamera,
+                Transform::from_xyz(99.0, 99.0, 999.0),
+                Projection::Orthographic(OrthographicProjection {
+                    scale: 3.0,
+                    ..OrthographicProjection::default_2d()
+                }),
+            ))
+            .id();
+        run_action(&mut world, RunAction::Fit);
+        assert_eq!(
+            world.get::<Transform>(camera).unwrap().translation,
+            Vec3::new(48.0, -48.0, 999.0)
+        );
+        let Projection::Orthographic(projection) = world.get::<Projection>(camera).unwrap() else {
+            panic!()
+        };
+        assert_eq!(projection.scale, 1.0);
+        let window = Window {
+            resolution: (900u32, 640u32).into(),
+            ..default()
+        };
+        assert!(!board_rect(&window).contains(Vec2::new(500.0, 40.0)));
+        assert!(board_rect(&window).contains(Vec2::new(500.0, TOOLBAR_HEIGHT + 10.0)));
+    }
+
+    #[test]
+    fn an_edit_restarts_the_run_from_the_edited_board() {
+        let mut world = world_mid_run();
+        assert!(edit(&mut world, 1, 2, EditTool::Ladybug, EditAction::Add));
+        assert!(edit(&mut world, 1, 2, EditTool::Aphid, EditAction::Add));
+
+        let cell = world.resource::<BoardRes>().0.cell_snapshot(1, 2).unwrap();
+        assert_eq!((cell.aphids, cell.ladybugs), (1, 1));
+
+        let stats = world.resource::<Stats>();
+        assert_eq!((stats.turn, stats.births, stats.deaths), (0, 0, 0));
+        assert_eq!((stats.aphids, stats.ladybugs), (1, 1));
+        assert!(!stats.extinct);
+        assert!(!world.resource::<Playing>().0, "editing pauses the run");
+
+        let history = &world.resource::<History>().0;
+        assert_eq!(history.len(), 1, "history starts over");
+        assert_eq!(
+            history.front().map(|p| (p.turn, p.aphids, p.ladybugs)),
+            Some((0, 1, 1))
+        );
+        assert_eq!(world.resource::<Revision>().0, 2, "renderers see each edit");
+    }
+
+    #[test]
+    fn removing_takes_one_creature_of_the_selected_kind_only() {
+        let mut world = world_mid_run();
+        edit(&mut world, 0, 0, EditTool::Aphid, EditAction::Add);
+        edit(&mut world, 0, 0, EditTool::Aphid, EditAction::Add);
+        edit(&mut world, 0, 0, EditTool::Ladybug, EditAction::Add);
+
+        assert!(edit(&mut world, 0, 0, EditTool::Aphid, EditAction::Remove));
+        let cell = world.resource::<BoardRes>().0.cell_snapshot(0, 0).unwrap();
+        assert_eq!((cell.aphids, cell.ladybugs), (1, 1));
+    }
+
+    #[test]
+    fn a_no_op_edit_leaves_the_run_alone() {
+        let mut world = world_mid_run();
+        assert!(!edit(
+            &mut world,
+            3,
+            3,
+            EditTool::Ladybug,
+            EditAction::Remove
+        ));
+
+        assert_eq!(world.resource::<Stats>().turn, 12);
+        assert!(world.resource::<Playing>().0);
+        assert_eq!(world.resource::<History>().0.len(), 12);
+        assert_eq!(world.resource::<Revision>().0, 0);
+    }
+
+    #[test]
+    fn editing_and_playing_exclude_each_other() {
+        let mut world = World::new();
+        world.insert_resource(Playing(true));
+        world.insert_resource(EditMode::default());
+        let system = world.register_system(exclusive_play_and_edit);
+        world.run_system(system).unwrap();
+        assert!(world.resource::<Playing>().0, "nothing to do at startup");
+
+        // Starting to edit pauses the run...
+        world.resource_mut::<EditMode>().select(EditTool::Ladybug);
+        world.run_system(system).unwrap();
+        assert!(!world.resource::<Playing>().0);
+        assert!(world.resource::<EditMode>().enabled);
+
+        // ...and pressing play ends editing, keeping the chosen tool.
+        world.resource_mut::<Playing>().0 = true;
+        world.run_system(system).unwrap();
+        assert!(world.resource::<Playing>().0);
+        let edit = world.resource::<EditMode>();
+        assert!(!edit.enabled);
+        assert_eq!(edit.tool, EditTool::Ladybug);
+    }
+
+    #[test]
+    fn a_press_is_a_click_until_it_leaves_the_slop() {
+        let mut pointer = BoardPointer {
+            pressed_on_board: true,
+            ..default()
+        };
+        assert!(pointer.is_click());
+        pointer.travelled = CLICK_SLOP;
+        assert!(pointer.is_click());
+        pointer.travelled = CLICK_SLOP + 0.5;
+        assert!(!pointer.is_click(), "a drag pans instead");
+
+        pointer.travelled = 0.0;
+        pointer.pressed_on_board = false;
+        assert!(
+            !pointer.is_click(),
+            "presses that start off the board never edit"
+        );
+    }
+
+    #[test]
+    fn mixed_cells_keep_aphids_and_ladybugs_apart() {
+        use CreatureSnapshotKind::{Aphid, Ladybug};
+
+        // The case that hid a creature: the first of each kind in one cell.
+        let (aphid, _) = creature_slot(Aphid, 0, 1, 1);
+        let (ladybug, _) = creature_slot(Ladybug, 0, 1, 1);
+        assert!(
+            aphid.distance(ladybug) > 2.0 * CREATURE_RADIUS,
+            "{aphid:?} and {ladybug:?} overlap"
+        );
+
+        // A cell with one kind centres its first creature.
+        assert_eq!(creature_slot(Ladybug, 0, 0, 1).0, Vec2::new(0.5, 0.5));
+        assert_eq!(creature_slot(Aphid, 0, 3, 0).0, Vec2::new(0.5, 0.5));
+
+        // Crowded cells shrink creatures; extra creatures reuse the last slot.
+        assert_eq!(creature_slot(Aphid, 0, 3, 2).1, 1.0);
+        assert_eq!(creature_slot(Aphid, 0, 3, 3).1, 0.82);
+        assert_eq!(
+            creature_slot(Aphid, 40, 50, 1).0,
+            creature_slot(Aphid, 4, 50, 1).0
+        );
+    }
+
+    fn snapshot(id: usize, row: usize, col: usize, kind: CreatureSnapshotKind) -> CreatureSnapshot {
         CreatureSnapshot {
             id,
             kind,
-            location: Coordinates { x, y },
-            cell_slot,
+            location: Coordinates { x: row, y: col },
+            cell_slot: 0,
         }
     }
 
     #[test]
-    fn movement_animations_start_from_static_creature_slots() {
-        let before = [
-            snapshot(0, CreatureSnapshotKind::Aphid, 0, 0, 0),
-            snapshot(1, CreatureSnapshotKind::Ladybug, 0, 0, 0),
+    fn badges_mark_only_cells_holding_more_than_one_of_a_kind() {
+        use CreatureSnapshotKind::{Aphid, Ladybug};
+        let snapshots = [
+            // Three aphids and two ladybugs share (1, 1): both get a badge.
+            snapshot(0, 1, 1, Aphid),
+            snapshot(1, 1, 1, Aphid),
+            snapshot(2, 1, 1, Aphid),
+            snapshot(3, 1, 1, Ladybug),
+            snapshot(4, 1, 1, Ladybug),
+            // One of each in (2, 2), and a lone aphid: no badges.
+            snapshot(5, 2, 2, Aphid),
+            snapshot(6, 2, 2, Ladybug),
+            snapshot(7, 0, 3, Aphid),
         ];
-        let after = [
-            snapshot(0, CreatureSnapshotKind::Aphid, 0, 1, 0),
-            snapshot(1, CreatureSnapshotKind::Ladybug, 0, 0, 0),
-        ];
-        let mut animations = Vec::new();
-
-        assert!(build_movement_animations(&before, &after, &mut animations));
-
-        let aphid = animations
-            .iter()
-            .find(|creature| creature.kind == CreatureSnapshotKind::Aphid)
-            .expect("aphid animation exists");
-        assert_eq!(aphid.from_slot.offset, vec2(0.34, 0.36));
-        assert_eq!(aphid.to_slot.offset, vec2(0.50, 0.50));
-        assert_eq!(aphid.from_slot.scale, 1.0);
-        assert_eq!(aphid.to_slot.scale, 1.0);
+        assert_eq!(
+            crowded_cells(&snapshots),
+            vec![
+                (Coordinates { x: 1, y: 1 }, 0, 3),
+                (Coordinates { x: 1, y: 1 }, 1, 2),
+            ]
+        );
+        assert!(crowded_cells(&[]).is_empty());
     }
 
     #[test]
-    fn movement_animations_match_static_crowded_scale() {
-        let before = [
-            snapshot(0, CreatureSnapshotKind::Aphid, 0, 0, 0),
-            snapshot(1, CreatureSnapshotKind::Aphid, 0, 0, 1),
-            snapshot(2, CreatureSnapshotKind::Aphid, 0, 0, 2),
-            snapshot(3, CreatureSnapshotKind::Aphid, 0, 0, 3),
-            snapshot(4, CreatureSnapshotKind::Aphid, 0, 0, 4),
-            snapshot(5, CreatureSnapshotKind::Aphid, 0, 0, 5),
-        ];
-        let after = [
-            snapshot(0, CreatureSnapshotKind::Aphid, 0, 1, 0),
-            snapshot(1, CreatureSnapshotKind::Aphid, 0, 0, 0),
-            snapshot(2, CreatureSnapshotKind::Aphid, 0, 0, 1),
-            snapshot(3, CreatureSnapshotKind::Aphid, 0, 0, 2),
-            snapshot(4, CreatureSnapshotKind::Aphid, 0, 0, 3),
-            snapshot(5, CreatureSnapshotKind::Aphid, 0, 0, 4),
-        ];
-        let mut animations = Vec::new();
+    fn badges_appear_relabel_and_are_cleaned_up() {
+        let mut world = World::new();
+        let mut meshes = Assets::<Mesh>::default();
+        let mut materials = Assets::<ColorMaterial>::default();
+        let circle = meshes.add(Circle::new(1.0));
+        let colour = materials.add(ColorMaterial::default());
+        world.insert_resource(CreatureAssets {
+            aphid: Handle::default(),
+            ladybug: Handle::default(),
+            badge: circle.clone(),
+            badge_shadow_mesh: circle.clone(),
+            badge_colours: [colour.clone(), colour.clone()],
+            badge_shadow: colour.clone(),
+            font: Handle::default(),
+        });
+        world.insert_resource(meshes);
+        world.insert_resource(materials);
+        world.init_resource::<BadgeIndex>();
+        world.init_resource::<BadgeRaster>();
+        world.insert_resource(Revision(0));
 
-        assert!(build_movement_animations(&before, &after, &mut animations));
+        let config = "[board]\nrows = 4\ncolumns = 4\naphids = []\nladybugs = []\n";
+        let mut random = Random::with_seed(7);
+        let mut board = Board::new();
+        creature_life_cycle::parse_simulation_config(config, &mut board, &mut random).unwrap();
+        for _ in 0..3 {
+            board.add_aphid(1, 1, EDIT_APHID_LIFE);
+        }
+        board.add_aphid(2, 2, EDIT_APHID_LIFE);
+        world.insert_resource(BoardRes(board));
 
-        let moving = animations
-            .iter()
-            .find(|creature| creature.from != creature.to)
-            .expect("moving animation exists");
-        assert!((moving.from_slot.scale - 0.82).abs() < f32::EPSILON);
-        assert_eq!(moving.to_slot.scale, 1.0);
+        let count_badges = |world: &mut World| {
+            world
+                .query_filtered::<Entity, With<CountBadge>>()
+                .iter(world)
+                .count()
+        };
+        let label = |world: &mut World| {
+            let badge = *world.resource::<BadgeIndex>().0.values().next().unwrap();
+            world.get::<Text2d>(badge.text).unwrap().0.clone()
+        };
+
+        world.run_system_once(sync_count_badges).unwrap();
+        assert_eq!(
+            world.resource::<BadgeIndex>().0.len(),
+            1,
+            "only (1, 1) is crowded"
+        );
+        assert_eq!(label(&mut world), "3");
+        // Disc, shadow and text per badge.
+        assert_eq!(count_badges(&mut world), 3);
+
+        // Down to two aphids: the badge stays but is relabelled.
+        world.resource_mut::<BoardRes>().0.remove_aphid_at(1, 1);
+        world.run_system_once(sync_count_badges).unwrap();
+        assert_eq!(label(&mut world), "2");
+        assert_eq!(
+            count_badges(&mut world),
+            3,
+            "no second badge for the same cell"
+        );
+
+        // Down to one: the badge and its children go away.
+        world.resource_mut::<BoardRes>().0.remove_aphid_at(1, 1);
+        world.run_system_once(sync_count_badges).unwrap();
+        assert!(world.resource::<BadgeIndex>().0.is_empty());
+        assert_eq!(count_badges(&mut world), 0, "badge entities are despawned");
+    }
+
+    #[test]
+    fn badge_counts_are_rasterised_at_the_size_they_are_drawn() {
+        let height = (CELL - GAP) * BADGE_FONT;
+        // Whatever the zoom, the badge keeps its size on the board...
+        for pixels_per_unit in [0.5, 1.0, 2.333, 4.0, 12.0] {
+            let (font_size, scale) = badge_text_raster(pixels_per_unit);
+            assert!(
+                (font_size * scale - height).abs() < 1e-3,
+                "{pixels_per_unit}: {font_size} x {scale} is not {height}"
+            );
+        }
+
+        // ...while the raster follows the zoom, in steps, within its range.
+        let (zoomed_out, _) = badge_text_raster(1.0);
+        let (default_zoom, _) = badge_text_raster(2.333);
+        let (zoomed_in, _) = badge_text_raster(8.0);
+        assert!(zoomed_out < default_zoom && default_zoom < zoomed_in);
+        assert!(default_zoom >= height * 2.0, "atlas must not be upscaled");
+        assert_eq!(default_zoom % BADGE_RASTER_STEP, 0.0);
+        assert_eq!(badge_text_raster(0.01).0, BADGE_RASTER_RANGE.0);
+        assert_eq!(badge_text_raster(1000.0).0, BADGE_RASTER_RANGE.1);
+    }
+
+    #[test]
+    fn badges_hide_once_cells_are_too_small_to_read() {
+        let cell = CELL - GAP;
+        // A viewport showing 10 cells' worth of world is plenty at 800px tall.
+        assert!(badges_legible(800.0, cell * 10.0));
+        // The same viewport zoomed out to 40 cells is not.
+        assert!(!badges_legible(800.0, cell * 40.0));
+        // Exactly at the threshold counts as legible.
+        assert!(badges_legible(BADGE_MIN_CELL_PIXELS * 10.0, cell * 10.0));
+        assert!(
+            !badges_legible(800.0, 0.0),
+            "a collapsed viewport never draws"
+        );
+    }
+
+    #[test]
+    fn every_creature_slot_stays_inside_its_cell() {
+        use CreatureSnapshotKind::{Aphid, Ladybug};
+        for (aphids, ladybugs) in [(5, 0), (0, 5), (5, 5)] {
+            for kind in [Aphid, Ladybug] {
+                for slot in 0..5 {
+                    let (offset, scale) = creature_slot(kind, slot, aphids, ladybugs);
+                    let radius = CREATURE_RADIUS * scale;
+                    assert!(
+                        offset.min_element() - radius >= 0.0
+                            && offset.max_element() + radius <= 1.0,
+                        "{kind:?} slot {slot} in ({aphids}, {ladybugs}) spills out: {offset:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn panel_scrolling_stays_within_the_content() {
+        use MouseScrollUnit::{Line, Pixel};
+        // Wheel down (negative delta) moves further into the content.
+        assert_eq!(scrolled_offset(0.0, -2.0, Line, 500.0), 42.0);
+        assert_eq!(scrolled_offset(100.0, 30.0, Pixel, 500.0), 70.0);
+        assert_eq!(scrolled_offset(490.0, -3.0, Line, 500.0), 500.0);
+        assert_eq!(scrolled_offset(10.0, 5.0, Line, 500.0), 0.0);
+        // Content that fits never scrolls.
+        assert_eq!(scrolled_offset(0.0, -5.0, Line, -80.0), 0.0);
+    }
+
+    #[test]
+    fn the_cell_popup_stays_on_screen() {
+        // Room to spare: the popup sits just past the pointer.
+        assert_eq!(clamp_to_window(400.0, 200.0, 1200.0), 418.0);
+        // Near the far edge it is pulled back inside, margin and all.
+        assert_eq!(clamp_to_window(1100.0, 200.0, 1200.0), 988.0);
+        // Never off the near edge, however tight the window is.
+        assert_eq!(clamp_to_window(-40.0, 200.0, 1200.0), 12.0);
+        assert_eq!(clamp_to_window(400.0, 200.0, 150.0), 12.0);
+    }
+
+    #[test]
+    fn values_map_into_the_plot_with_zero_on_the_baseline() {
+        let plot = plot_rect(800.0);
+        assert_eq!(value_y(0, 60, plot), plot.max.y);
+        assert_eq!(value_y(60, 60, plot), plot.min.y);
+        assert_eq!(history_x(0, 10, plot), plot.min.x);
+        assert_eq!(history_x(9, 10, plot), plot.max.x);
     }
 }
