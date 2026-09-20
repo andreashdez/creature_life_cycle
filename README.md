@@ -1,5 +1,7 @@
 # Aphids and Ladybugs
 
+[![CI](https://github.com/andreashdez/creature_life_cycle/actions/workflows/ci.yml/badge.svg)](https://github.com/andreashdez/creature_life_cycle/actions/workflows/ci.yml)
+
 This is a small Rust simulation of aphids and ladybugs moving around a two-dimensional board, sharing food, reproducing, starving, and fighting when predator and prey occupy the same cell.
 
 The project uses `clap` for command-line parsing, `bevy` for the GUI, `rand` for random number generation, and TOML for runtime configuration.
@@ -143,17 +145,20 @@ Text is set in Fira Sans, which ships embedded in `bevy_feathers`.
 
 ## CI
 
-Codeberg CI/Woodpecker is configured in `.woodpecker.yml`.
+GitHub Actions is configured in `.github/workflows/ci.yml`.
 
-The pipeline runs on pushes and pull requests, installs the Linux libraries Bevy needs to compile, then checks:
+The workflow runs on pushes to `main` and on pull requests, installs the Linux
+libraries Bevy needs to compile, then checks:
 
 ```sh
 cargo fmt --check
 cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked
+cargo check --locked --no-default-features --all-targets
 ```
 
-After Codeberg CI access is enabled for your account or organization, add this repository at `https://ci.codeberg.org/repos/add`.
+The last check keeps the `gui` feature gate honest: the library, CLI, benches,
+and tests must still build without Bevy.
 
 ## Run
 
