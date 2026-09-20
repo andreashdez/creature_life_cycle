@@ -2,7 +2,7 @@
 
 This is a small Rust simulation of aphids and ladybugs moving around a two-dimensional board, sharing food, reproducing, starving, and fighting when predator and prey occupy the same cell.
 
-The project uses `clap` for command-line parsing, `macroquad` for the GUI, `rand` for random number generation, and TOML for runtime configuration.
+The project uses `clap` for command-line parsing, `bevy` for the GUI, `rand` for random number generation, and TOML for runtime configuration.
 
 ## Project Layout
 
@@ -14,6 +14,9 @@ The repository is organized around a CLI executable, a GUI executable, and one e
 |-- Cargo.lock
 |-- README.md
 |-- simulation.example.toml
+|-- assets/
+|   |-- shaders/
+|   `-- sprites/
 `-- src/
     |-- bin/
     |   `-- gui.rs
@@ -25,7 +28,15 @@ The repository is organized around a CLI executable, a GUI executable, and one e
 
 `src/main.rs` contains command-line parsing, board rendering, turn-summary printing, sleeping, and CLI tests.
 
-`src/bin/gui.rs` contains the Macroquad visual simulation.
+`src/bin/gui.rs` contains the Bevy visual simulation: the board, a
+`bevy_feathers` settings sidebar, a population history chart, the food overlay,
+cell editing, illustrated aphid/ladybug sprites, and count badges for crowded
+cells. `docs/bevy-board-sketch.md` records the design and the trade-offs behind
+it.
+
+`assets/` holds the sprite artwork with its generation prompts and the cell
+shader. All of it is embedded into the executable at build time, so a packaged
+build needs no asset directory beside it.
 
 `simulation.example.toml` mirrors the built-in default board size, starting creature positions, and creature probabilities.
 
@@ -35,15 +46,29 @@ The active runtime config lives at `${XDG_CONFIG_HOME:-$HOME/.config}/creature_l
 
 ## Dependencies
 
-Runtime dependencies are intentionally small:
-
 ```text
+bevy   realtime GUI visualization, windowing, and UI widgets
 clap   command-line parsing and help output
-macroquad   realtime GUI visualization
 rand   seeded and unseeded random number generation
 serde   TOML deserialization
 toml   runtime configuration parsing
 ```
+
+Everything except `bevy` is small. Bevy is a game engine and brings a large
+dependency tree with it, which makes the first build slow; later builds are
+incremental.
+
+Bevy is optional, behind the default-on `gui` feature, because only the GUI
+needs it. Building without default features leaves the library, the CLI, the
+benches and the tests untouched and skips Bevy entirely: 49 crates instead of
+the full tree.
+
+```sh
+cargo build --no-default-features   # CLI and library only, no Bevy
+```
+
+The `gui` binary declares `required-features = ["gui"]`, so asking for it
+without the feature reports that rather than failing to compile.
 
 ## Build
 
@@ -59,11 +84,68 @@ Build an optimized release executable:
 cargo build --release
 ```
 
+Build only the CLI, without Bevy:
+
+```sh
+cargo build --no-default-features
+```
+
+Run the GUI. The first build compiles Bevy and takes a while:
+
+```sh
+cargo run --bin gui
+```
+
+## GUI Controls
+
+The Bevy UI has a persistent toolbar with Play/Pause, Step, Reset, speed controls,
+and Fit board. Step pauses and advances one turn. Reset pauses and restores the
+last saved setup, or the board loaded at launch if nothing has been saved, using
+the current seed and probabilities. The toolbar's second line reports the outcome
+of the most recent save or seed change for a few seconds.
+
+The sidebar has **Overview**, **Parameters**, and **Edit** tabs. Parameters are
+grouped by Aphids, Ladybugs, and Environment; each slider displays its percentage
+once and supports arrow-key adjustment when focused. The settings area scrolls
+with the wheel or its scrollbar, while the tabs and toolbar stay visible.
+Hovering a cell opens the cell inspector as a popup beside the pointer, so
+inspecting a cell never moves the controls.
+
+The Overview tab's Run setup section shows the seed the run started from and a
+field holding a draft of it. The field takes digits only, up to the 20 of
+`u64::MAX`. **Restart with this seed**, or Enter while the field has focus,
+applies what is typed and restarts the run from it. A seed that cannot be read
+is reported and leaves the run untouched. While the field has focus it keeps the keyboard, so
+the playback shortcuts below do not fire as you type.
+
+**Save setup** (or `S`), in the same section, writes the current creature
+positions and probabilities to the same
+`${XDG_CONFIG_HOME:-$HOME/.config}/creature_life_cycle/simulation.toml` the CLI
+uses, creating parent directories as needed. Food
+values, creature life values, and the current turn are not saved. What is saved
+becomes what Reset restores.
+
+Shortcuts: `Space` plays/pauses, `N` steps, `R` resets, `S` saves the setup,
+`[` / `]` change speed, `Home` fits the board, `F` toggles food details, and
+`E` / `A` / `L` open the edit controls. Space activates the focused widget when one
+has focus; click the board or press Escape to return to global Space playback.
+The GUI reads and writes the same XDG `simulation.toml` as the CLI. Reloading a
+saved setup from disk without restarting is not implemented; Reset restores the
+last setup saved in this session, or the board loaded at launch.
+
+Scroll over the board to zoom, drag with the left or middle mouse button to pan,
+and use **Fit board** (or `Home`) to frame the whole board again.
+
+The population chart draws aphids as a solid line and ladybugs as a dashed one,
+keeping the latest 240 turns. Hover it to read both counts at a turn.
+
+Text is set in Fira Sans, which ships embedded in `bevy_feathers`.
+
 ## CI
 
 Codeberg CI/Woodpecker is configured in `.woodpecker.yml`.
 
-The pipeline runs on pushes and pull requests, installs the Linux libraries needed to compile the Macroquad GUI target, then checks:
+The pipeline runs on pushes and pull requests, installs the Linux libraries Bevy needs to compile, then checks:
 
 ```sh
 cargo fmt --check
@@ -87,7 +169,7 @@ Run a short deterministic simulation:
 cargo run -- --turns 10 --delay-ms 0 --seed 42
 ```
 
-Run the Macroquad GUI visualizer. It starts from fixed seed `42` by default:
+Run the GUI visualizer. It starts from fixed seed `42` by default:
 
 ```sh
 cargo run --bin gui
@@ -112,28 +194,6 @@ The executable accepts these optional flags:
 ```
 
 `clap` validates command-line arguments. Invalid flags, missing values, and invalid numeric values are reported as errors. The process exits with status code `2` after printing usage text.
-
-## GUI Controls
-
-The GUI uses the same XDG `simulation.toml` file as the CLI.
-
-```text
-Space     pause or resume
-N         advance one turn
-R         reset to the selected seed and probabilities
-Up/Down   adjust simulation speed
-E         toggle board editing
-A         select aphid edit tool
-L         select ladybug edit tool
-S         save current board and probabilities to the XDG config file
-Esc       quit
-```
-
-The side panel also provides mouse controls for play, step, reset, speed, seed, board editing, saving, reloading, and all aphid, ladybug, and food probabilities. Changing a probability affects future turns immediately; reset restarts the run with the selected seed and probabilities.
-
-When board editing is enabled, left-click a board cell to add the selected creature type and right-click a board cell to remove one selected creature type from that cell. Editing pauses the simulation and resets the displayed turn history to treat the edited board as a new starting point.
-
-`Save TOML` writes the current board creature positions and active probability values to `${XDG_CONFIG_HOME:-$HOME/.config}/creature_life_cycle/simulation.toml`, creating parent directories as needed. Food values, creature life values, and current turn number are not saved; they are regenerated when the simulation is loaded. Creature movement is animated between turns, and a population history graph below the board tracks recent aphid and ladybug counts. Hover over a board cell to inspect its coordinates, food, aphids, and ladybugs.
 
 ## Simulation Configuration
 

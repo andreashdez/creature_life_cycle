@@ -4,15 +4,32 @@ version = "0.1.0"
 edition = "2024"
 default-run = "creature_life_cycle"
 
+[features]
+default = ["gui"]
+# The GUI is the only thing that needs Bevy. `--no-default-features` builds the
+# library, the CLI, the benches and the tests without it.
+gui = ["dep:bevy"]
+
 [dependencies]
+bevy = { version = "0.19", optional = true, default-features = false, features = [
+    "2d",
+    "ui",
+    "mouse",
+    "keyboard",
+    "bevy_feathers",
+] }
 clap = { version = "4.6", features = ["derive"] }
-macroquad = "0.4"
 rand = "0.9"
 serde = { version = "1", features = ["derive"] }
 toml = "1.1"
 
 [dev-dependencies]
 criterion = { version = "0.8", features = ["html_reports"] }
+
+[[bin]]
+name = "gui"
+path = "src/bin/gui.rs"
+required-features = ["gui"]
 
 [[bench]]
 name = "board_refresh"
