@@ -1,0 +1,142 @@
+.docname {Graphical interface}
+.include {docs}
+
+```sh
+cargo run --bin gui
+```
+
+The Bevy front end shows the same simulation as the CLI, but lets you watch it,
+steer it, and edit the board while it runs. It starts from fixed seed `42`.
+
+## Toolbar
+
+A persistent toolbar sits above everything else:
+
+| Control | Behavior |
+|---------|----------|
+| Play / Pause | Starts and stops automatic turn advancement |
+| Step | Pauses, then advances exactly one turn |
+| Reset | Pauses and restores the last saved setup, or the board loaded at launch |
+| Speed | Slows down or speeds up automatic playback |
+| Fit board | Frames the whole board in the viewport |
+
+Reset reuses the current seed and probabilities. The toolbar's status line
+reports the outcome of the most recent save or seed change for a few seconds.
+
+## Sidebar tabs
+
+The sidebar has three tabs: **Overview**, **Parameters**, and **Edit**. Aphid,
+ladybug, and food totals stay visible above the board in every tab, alongside
+how each changed in the last turn.
+
+### Overview
+
+Keeps recent births and deaths and the food layer controls in view. **Run
+setup** and **Controls & shortcuts** expand when needed.
+
+**Run setup** shows the seed the run started from plus a field holding a draft
+of it. The field takes digits only, up to the 20 digits of `u64::MAX`.
+**Restart with this seed**, or .keybinding {Enter} while the field has focus,
+applies what is typed and restarts the run from it. A seed that cannot be read
+is reported and leaves the run untouched. While the field has focus it keeps
+the keyboard, so the playback shortcuts below do not fire as you type.
+
+**Save setup** (.keybinding {S}), in the same section, writes the current
+creature positions and probabilities to the same configuration file the CLI
+uses, creating parent directories as needed. Food values, creature life values,
+and the current turn are not saved. What is saved becomes what Reset restores.
+
+> Note: Reloading a setup from disk without restarting is not implemented.
+> Reset restores the last setup saved in this session, or the board loaded at
+> launch.
+
+### Parameters
+
+Parameters are grouped by Aphids, Ladybugs, and Environment. Each one has a
+slider, an editable percentage, and a short explanation.
+
+- .keybinding {Enter} or leaving the field applies a value from 0 to 100.
+- Invalid input restores the previous value and reports an error.
+- Sliders also respond to the arrow keys.
+- A bullet marks values changed from the saved setup.
+- Each group has **Restore defaults** for the built-in values.
+- A successful Save setup updates the saved-value baseline.
+
+The settings area scrolls with the wheel or its scrollbar, while the tabs and
+toolbar stay visible.
+
+### Edit
+
+Illustrated **Aphid** (.keybinding {A}) and **Ladybug** (.keybinding {L}) tools
+place creatures; **Erase** (.keybinding {X}) clears them.
+
+Choosing a tool pauses the simulation and shows a placement preview on the
+board. Left click places a creature, right click removes one of the selected
+species, and Erase removes all creatures in the cell while leaving its food.
+Dragging still pans the board. **Done** leaves editing paused; Play resumes it.
+
+Each edit restarts the turn count and chart. **Undo edit** (.keybinding {Z})
+restores the previous board, creature life, food, random-number state, and
+history, keeping the run paused and the current parameter settings. Up to 20
+edits can be undone; advancing a turn or resetting clears that undo history.
+
+## Board views
+
+**Population** view uses neutral cells to emphasize creatures. **Food** view
+shades cells by food supply and offers optional, subdued bars and speckles.
+Creatures get a dark backing for contrast in both views. .keybinding {F}
+switches to Food view and toggles its details.
+
+When cells are smaller than 28 logical pixels, illustrated creatures collapse
+into one marker per occupied cell and species: green circles for aphids and red
+diamonds for ladybugs. Mixed cells keep both markers. Zooming in restores the
+detailed sprites and the count badges for crowded cells.
+
+Hovering a cell opens the cell inspector as a popup beside the pointer, so
+inspecting a cell never moves the controls.
+
+Scroll over the board to zoom, drag with the left or middle mouse button to
+pan, and use **Fit board** (.keybinding {Home}) to frame the whole board again.
+
+## Population chart
+
+The chart draws aphids as a solid line and ladybugs as a dashed one, keeping
+the latest 240 turns.
+
+- Diamonds mark rule changes after a turn.
+- Crosses mark a species going extinct on that turn.
+- Hovering reads out population counts and event summaries.
+- Changes to the same parameter between turns share one event, and reverting
+  them removes that change.
+- Events expire with the rolling history and are restored along with history by
+  edit Undo.
+
+**Hide chart** / **Show chart** gives the board more room, **Height −** and
+**Height +** resize it, and the chart's top edge can be dragged. Resizing keeps
+at least 180 logical pixels for the board. Until a run has enough history to
+plot, the chart displays a prompt; collapsing it keeps collecting history.
+
+## Keyboard shortcuts
+
+| Key | Action |
+|-----|--------|
+| .keybinding {Space} | Play / pause |
+| .keybinding {N} | Step one turn |
+| .keybinding {R} | Reset |
+| .keybinding {S} | Save setup |
+| .keybinding {[} / .keybinding {]} | Slower / faster |
+| .keybinding {Home} | Fit board |
+| .keybinding {F} | Toggle Food view and its details |
+| .keybinding {E} | Open the edit controls |
+| .keybinding {A} / .keybinding {L} / .keybinding {X} | Aphid, ladybug, erase tool |
+| .keybinding {Z} | Undo edit |
+
+.keybinding {Space} activates the focused widget when one has focus. Click the
+board or press .keybinding {Escape} to return to global .keybinding {Space}
+playback.
+
+## Appearance
+
+Text is set in Fira Sans, which ships embedded in `bevy_feathers`. The design
+notes and trade-offs behind the board renderer are recorded in
+.repolink {notes/bevy-board-rendering.md} {blob/main/notes/bevy-board-rendering.md}.

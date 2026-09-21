@@ -5,9 +5,9 @@
 //!
 //! The simulation itself is untouched: `Board` lives in a resource and every
 //! turn still comes from `Board::refresh`. Much of this is a port of the
-//! earlier macroquad GUI, removed in favour of this one; `docs/bevy-board-sketch.md`
-//! records the design and the trade-offs, and comments referring to it explain
-//! where a constant or layout came from.
+//! earlier macroquad GUI, removed in favour of this one;
+//! `notes/bevy-board-rendering.md` records the design and the trade-offs, and
+//! comments referring to it explain where a constant or layout came from.
 
 use bevy::asset::{RenderAssetUsages, embedded_asset, load_embedded_asset};
 use bevy::camera::visibility::RenderLayers;

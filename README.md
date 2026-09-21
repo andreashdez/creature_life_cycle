@@ -4,6 +4,8 @@
 
 This is a small Rust simulation of aphids and ladybugs moving around a two-dimensional board, sharing food, reproducing, starving, and fighting when predator and prey occupy the same cell.
 
+Full documentation is published at <https://andreashdez.github.io/creature_life_cycle>, covering getting started, the CLI, the GUI, configuration, the simulation rules, the architecture, and development. The source is a [Quarkdown](https://quarkdown.com) site in [`docs/`](docs/); build it locally with `cd docs && quarkdown c main.qd`.
+
 The project uses `clap` for command-line parsing, `bevy` for the GUI, `rand` for random number generation, and TOML for runtime configuration.
 
 ## Project Layout
@@ -19,6 +21,8 @@ The repository is organized around a CLI executable, a GUI executable, and one e
 |-- assets/
 |   |-- shaders/
 |   `-- sprites/
+|-- docs/
+|-- notes/
 `-- src/
     |-- bin/
     |   `-- gui.rs
@@ -33,12 +37,17 @@ The repository is organized around a CLI executable, a GUI executable, and one e
 `src/bin/gui.rs` contains the Bevy visual simulation: the board, a
 `bevy_feathers` settings sidebar, a population history chart, the food overlay,
 cell editing, illustrated aphid/ladybug sprites, and count badges for crowded
-cells. `docs/bevy-board-sketch.md` records the design and the trade-offs behind
-it.
+cells. `notes/bevy-board-rendering.md` records the design and the trade-offs
+behind it.
 
 `assets/` holds the sprite artwork with its generation prompts and the cell
 shader. All of it is embedded into the executable at build time, so a packaged
 build needs no asset directory beside it.
+
+`docs/` is the Quarkdown documentation site. `notes/` holds engineering
+records: numbered decision records explaining why the project is built the way
+it is, plus longer design sketches. See [`notes/README.md`](notes/README.md)
+for the index.
 
 `simulation.example.toml` mirrors the built-in default board size, starting creature positions, and creature probabilities.
 

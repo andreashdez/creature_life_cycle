@@ -1,0 +1,124 @@
+.docname {Development}
+.include {docs}
+
+## Everyday commands
+
+```sh
+cargo test                  # run the test suite
+cargo fmt                   # apply formatting
+cargo fmt -- --check        # check formatting
+cargo clippy -- -D warnings # lint, warnings as errors
+cargo clean                 # remove build artifacts
+```
+
+## Tests
+
+| Location | Covers |
+|----------|--------|
+| `src/lib.rs`, `tests` module | Deterministic randomness, TOML parsing, probability validation, edge movement, combat, procreation, starvation, phased turn order |
+| `src/main.rs` | CLI argument parsing |
+| `tests/seeded_e2e_snapshots.rs` | End-to-end runs against a fixed config and seed |
+
+The end-to-end test builds a throwaway `XDG_CONFIG_HOME` under `target/` and
+seeds it from `simulation.example.toml`, so it never touches your real
+configuration file.
+
+## Benchmarks
+
+.repolink {benches/board_refresh.rs} {blob/main/benches/board_refresh.rs} uses
+Criterion to measure `Board::refresh` on a 25×25 board and a 100×100 board with
+800 creatures per species, over single and multi-turn runs, from seed `42`.
+
+```sh
+cargo bench
+```
+
+Criterion writes HTML reports to `target/criterion`.
+
+## Continuous integration
+
+GitHub Actions is configured in
+[`.github/workflows/ci.yml`](https://github.com/andreashdez/creature_life_cycle/blob/main/.github/workflows/ci.yml). The
+workflow runs on pushes to `main` and on pull requests, installs the Linux
+libraries Bevy needs to compile, then runs:
+
+```sh
+cargo fmt --check
+cargo clippy --locked --all-targets -- -D warnings
+cargo test --locked
+cargo check --locked --no-default-features --all-targets
+```
+
+The last check keeps the `gui` feature gate honest: the library, CLI, benches,
+and tests must still build without Bevy.
+
+> Tip: Running those four commands locally before pushing reproduces CI exactly.
+
+## Packaging
+
+```sh
+sh scripts/package_gui.sh
+```
+
+The script refuses to run outside macOS, builds `--release`, assembles
+`target/package/Creature Life Cycle.app`, and zips it to
+`target/package/creature_life_cycle_gui-macos.zip`. The version in `Info.plist`
+comes from `cargo pkgid`, so bumping `Cargo.toml` is enough.
+
+## Working on this documentation site
+
+The site is written in [Quarkdown](https://quarkdown.com) and lives in `docs/`.
+
+.filetree
+    - docs
+      - _setup.qd
+      - _nav.qd
+      - **main.qd**
+      - getting-started.qd
+      - cli.qd
+      - gui.qd
+      - configuration.qd
+      - simulation-rules.qd
+      - architecture.qd
+      - development.qd
+      - assets/
+
+`_setup.qd` holds the theme and shared helpers, `_nav.qd` defines the sidebar,
+and `main.qd` is the entry point. Every other page is a subdocument reached
+through the navigation.
+
+Everything in `docs/` is site source. Internal engineering notes live in
+`notes/` instead, as plain Markdown, so that they are not compiled into the
+site; see [Architecture](architecture.qd#engineering-notes).
+
+Build the site:
+
+```sh
+cd docs
+quarkdown c main.qd --strict
+```
+
+Preview it with live reload while editing:
+
+```sh
+cd docs
+quarkdown c main.qd -p -w
+```
+
+> Note: A page is only compiled if something links to it. When you add a page,
+> add it to `_nav.qd` as well, or it stays an orphan and is skipped.
+
+### Publishing
+
+[`.github/workflows/docs.yml`](https://github.com/andreashdez/creature_life_cycle/blob/main/.github/workflows/docs.yml)
+builds the site and deploys it to GitHub Pages on every push to `main` that
+touches `docs/`. The workflow pins the Quarkdown version it builds with, caches
+that toolchain, and builds with `--strict`, so an unresolved function call
+fails the run rather than publishing a degraded page.
+
+Pull requests build the site but do not deploy it, which catches breakage
+before it reaches `main`.
+
+Bumping the Quarkdown version is a one-line change to `QUARKDOWN_VERSION` in
+the workflow. Do it deliberately: a new release can change the rendered
+output.

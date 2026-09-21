@@ -1,0 +1,114 @@
+.docname {Configuration}
+.include {docs}
+
+The board layout and the behavior probabilities live in a single TOML file that
+both front ends read and write.
+
+## File location
+
+```text
+${XDG_CONFIG_HOME:-$HOME/.config}/creature_life_cycle/simulation.toml
+```
+
+With the default environment, that is
+`~/.config/creature_life_cycle/simulation.toml`.
+
+If the file is missing, the program creates it from built-in standard board
+data and default behavior parameters. If it exists but is invalid, the program
+loads those defaults **without overwriting the file**, so a typo never costs
+you your setup.
+
+The repository ships .repolink {simulation.example.toml} {blob/main/simulation.example.toml},
+which mirrors the built-in defaults.
+
+## Example
+
+```toml
+[board]
+rows = 10
+columns = 10
+
+aphids = [
+  { x = 3, y = 5 },
+  { x = 4, y = 8 },
+]
+
+ladybugs = [
+  { x = 5, y = 9 },
+  { x = 1, y = 1 },
+]
+
+[aphid]
+move_probability = 0.7
+kill_probability = 0.2
+accomplice_probability = 0.1
+procreation_probability = 0.4
+
+[ladybug]
+move_probability = 0.7
+kill_probability = 0.2
+direction_change_probability = 0.4
+procreation_probability = 0.2
+
+[food]
+regeneration_probability = 0.1
+```
+
+## `[board]`
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `rows` | integer | Board height; must be greater than zero |
+| `columns` | integer | Board width; must be greater than zero |
+| `aphids` | array of `{ x, y }` | Starting aphid positions |
+| `ladybugs` | array of `{ x, y }` | Starting ladybug positions |
+
+Coordinates are zero-based: `x` is the row and `y` is the column. Positions
+outside the board are skipped with a warning rather than rejected.
+
+Starting aphids have `10` life and starting ladybugs have `15` life. Each cell
+starts with a random food value from `0` through `9`.
+
+## `[aphid]`
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `move_probability` | `0.7` | Chance the aphid moves during the movement phase |
+| `kill_probability` | `0.2` | Base chance of killing a ladybug in the same cell |
+| `accomplice_probability` | `0.1` | Extra kill chance per other aphid in the cell |
+| `procreation_probability` | `0.4` | Chance of producing a child when sharing a cell |
+
+## `[ladybug]`
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `move_probability` | `0.7` | Chance the ladybug moves during the movement phase |
+| `kill_probability` | `0.2` | Chance of killing an aphid in the same cell |
+| `direction_change_probability` | `0.4` | Chance of picking a new preferred direction set |
+| `procreation_probability` | `0.2` | Chance of producing a child when sharing a cell |
+
+## `[food]`
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `regeneration_probability` | `0.1` | Chance a cell below the cap regains one food after a turn |
+
+Food is capped at `9` per cell and never drops below `0`.
+
+## Validation
+
+- `rows` and `columns` must both be greater than zero.
+- All probability values must be from `0.0` through `1.0`.
+- The `[aphid]`, `[ladybug]`, and `[food]` sections are optional. An omitted
+  section falls back to its default probabilities.
+- Creature positions outside the board are skipped with a warning.
+
+> Warning: An invalid file is not repaired automatically. The run continues on
+> built-in defaults, and your file stays exactly as written so you can fix it.
+
+## Saving from the GUI
+
+**Save setup** in the GUI's Overview tab (.keybinding {S}) writes the current
+creature positions and probabilities back to this same file, creating parent
+directories as needed. Food values, creature life values, and the current turn
+are not saved. See [Graphical interface](gui.qd) for the surrounding controls.

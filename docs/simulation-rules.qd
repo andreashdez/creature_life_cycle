@@ -1,0 +1,126 @@
+.docname {Simulation rules}
+.include {docs}
+
+This page describes exactly what happens during a turn. Every probability
+mentioned here is configurable; see [Configuration](configuration.qd) for the
+keys and their defaults.
+
+## Turn order
+
+Each turn starts by taking a snapshot of all creatures that existed at the
+beginning of the turn. Creatures born during the turn do not act until the next
+turn.
+
+The simulation then runs these phases, in order:
+
+1. Movement for all original turn creatures.
+2. Combat for all surviving original turn creatures.
+3. Removal of creatures killed in combat.
+4. Procreation for all surviving original turn creatures.
+5. Starvation for all surviving original turn creatures.
+6. Removal of creatures killed by starvation.
+7. Random food regeneration for board cells below the food cap.
+
+Within each phase, creatures are processed in creation order.
+
+The simulation stops when either all creatures are extinct or the configured
+turn limit is reached.
+
+## Movement
+
+Aphids may move once per turn. If the move succeeds, an aphid picks one of the
+eight surrounding directions at random.
+
+Ladybugs may change their preferred direction set once per turn. A preferred
+direction set holds three adjacent directions, such as northwest, north, and
+northeast. If the move succeeds, a ladybug picks one of its three preferred
+directions at random. This gives ladybugs a persistent heading, so they sweep
+across the board instead of jittering in place.
+
+.mermaid caption:{Aphids wander freely; ladybugs commit to a heading.}
+    flowchart TD
+        A[Creature acts] --> B{Aphid or ladybug?}
+        B -- Aphid --> C[Any of 8 directions]
+        B -- Ladybug --> D{Change heading?}
+        D -- Yes --> E[New set of 3 adjacent directions]
+        D -- No --> F[Keep current set]
+        E --> G[Pick 1 of the 3]
+        F --> G
+
+### Edges
+
+When a creature attempts to move outside the board, it bounces back into the
+board instead of wrapping around. On a one-row or one-column board, the bounced
+coordinate is clamped to the only valid coordinate.
+
+## Combat
+
+Combat can happen when aphids and ladybugs occupy the same cell.
+
+An aphid can kill one ladybug in its cell. Its kill probability grows with the
+number of other aphids sharing the cell:
+
+$ p_{kill} = \min(1,\; p_{kill}^{aphid} + n_{others} \cdot p_{accomplice}) $
+
+The acting aphid does not count as its own accomplice, and the final
+probability is capped at `1.0`. A crowd of aphids is therefore genuinely
+dangerous to a lone ladybug, while a single aphid rarely wins.
+
+A ladybug can kill one aphid in its cell using the configured ladybug kill
+probability, with no crowd bonus.
+
+Killed creatures are removed after the combat phase, so they cannot procreate
+or starve later in the same turn.
+
+## Procreation
+
+Aphids can procreate when more than one aphid occupies the same cell. A new
+aphid is created in that cell with `2` life.
+
+Ladybugs can procreate when more than one ladybug occupies the same cell. A new
+ladybug is created in that cell with `5` life and a random preferred direction
+set.
+
+New creatures do not move, fight, procreate, or starve until the next turn.
+
+| | Starting life | Newborn life |
+|---|---|---|
+| Aphid | `10` | `2` |
+| Ladybug | `15` | `5` |
+
+## Starvation and food
+
+During starvation, each surviving original turn creature consumes from the food
+value of its current cell.
+
+- If the cell has food, the cell food value drops by `1` and the creature keeps
+  its life for that turn.
+- If the cell has no food, the creature loses `1` life.
+- Food values never drop below `0`.
+
+A creature dies when its life drops below `1`.
+
+After starvation deaths are removed, each cell below the food cap has a
+configured chance to regain `1` food. The default regeneration probability is
+`0.1`, and food is capped at `9` per cell.
+
+> Note: Food is the real constraint on population growth. A dense cluster of
+> creatures strips its cells bare within a few turns and then starves, which is
+> what produces the boom-and-bust cycles visible in the GUI's chart.
+
+## Randomness
+
+The simulation uses `rand::rngs::StdRng` through a small wrapper in
+.repolink {src/lib.rs} {blob/main/src/lib.rs}.
+
+Without a seed, the generator is seeded from operating-system randomness. With
+a seed, the same starting configuration and seed produce the same sequence of
+random decisions:
+
+```sh
+cargo run -- --turns 20 --delay-ms 0 --seed 12345
+```
+
+The GUI exposes the same mechanism through its Run setup section, and its undo
+history restores the random-number state along with the board, so an undone
+edit replays identically.

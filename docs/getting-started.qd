@@ -1,0 +1,96 @@
+.docname {Getting started}
+.include {docs}
+
+## Requirements
+
+The project needs a stable Rust toolchain with support for edition 2024, which
+ships with Rust 1.85 and later. Everything else is fetched by Cargo.
+
+The GUI additionally needs a working graphics stack. On Linux that means Bevy's
+usual development libraries:
+
+```sh
+sudo apt-get install -y \
+    libgl1-mesa-dev libudev-dev libwayland-dev libx11-dev \
+    libxcursor-dev libxi-dev libxkbcommon-dev libxrandr-dev pkg-config
+```
+
+## Get the source
+
+```sh
+git clone https://github.com/andreashdez/creature_life_cycle.git
+cd creature_life_cycle
+```
+
+## Build
+
+```sh
+cargo build             # debug build, GUI included
+cargo build --release   # optimized build
+```
+
+### Building without Bevy
+
+Bevy is a game engine and brings a large dependency tree, which makes the first
+build slow. It is therefore optional, behind the default-on `gui` feature, and
+only the GUI needs it.
+
+```sh
+cargo build --no-default-features   # library, CLI, benches and tests only
+```
+
+Without default features the build pulls 49 crates instead of the full tree.
+The `gui` binary declares `required-features = ["gui"]`, so asking for it
+without the feature reports that rather than failing to compile.
+
+| Feature | Default | Enables |
+|---------|---------|---------|
+| `gui` | on | The `bevy` dependency and the `gui` binary |
+
+## Run
+
+Run the CLI with the configuration file. If the file is absent, the program
+creates it from built-in defaults first:
+
+```sh
+cargo run
+```
+
+Run a short, fully deterministic simulation:
+
+```sh
+cargo run -- --turns 10 --delay-ms 0 --seed 42
+```
+
+Run the visual explorer. It starts from fixed seed `42` by default, and the
+first build compiles Bevy, so expect a wait:
+
+```sh
+cargo run --bin gui
+```
+
+> Note: Both front ends read and write the same configuration file. See
+> [Configuration](configuration.qd) for its location and contents.
+
+## Package the GUI for macOS
+
+```sh
+sh scripts/package_gui.sh
+```
+
+The script builds `--release`, assembles an app bundle, and zips it:
+
+.filetree
+    - target
+      - package
+        - **Creature Life Cycle.app**
+        - **creature_life_cycle_gui-macos.zip**
+
+Sprites and shaders are embedded into the executable at build time, so a
+packaged build needs no asset directory beside it.
+
+## Where to go next
+
+- [Command line](cli.qd) for flags and output format.
+- [Graphical interface](gui.qd) for the interactive explorer.
+- [Simulation rules](simulation-rules.qd) for what actually happens each turn.

@@ -1,0 +1,93 @@
+.docname {Command line}
+.include {docs}
+
+The default binary runs the simulation in the terminal, printing the board at
+startup and after every turn.
+
+```sh
+cargo run -- --turns 20 --delay-ms 0 --seed 12345
+```
+
+## Options
+
+| Flag | Value | Default | Description |
+|------|-------|---------|-------------|
+| `--turns` | number | `60` | Maximum number of turns to simulate |
+| `--delay-ms` | number | `400` | Delay between printed turns, in milliseconds |
+| `--seed` | number | none | Seed for reproducible random behavior |
+| `-h`, `--help` | | | Print help text |
+| `-V`, `--version` | | | Print the package version |
+
+Arguments are parsed and validated by `clap`. Invalid flags, missing values,
+and unparseable numbers are reported as errors; the process then prints usage
+text and exits with status code `2`.
+
+## Board output
+
+Each cell is printed as two symbols, aphids first and ladybugs second:
+
+```text
+<aphid-count><ladybug-count>
+```
+
+| Symbol | Meaning |
+|--------|---------|
+| `_` | zero creatures |
+| `1`-`9` | exact creature count |
+| `~` | more than nine creatures |
+
+.example
+    ```text
+    __   empty cell
+    1_   one aphid and no ladybugs
+    _1   no aphids and one ladybug
+    23   two aphids and three ladybugs
+    ~1   more than nine aphids and one ladybug
+    ```
+
+A full board is printed row by row, one line per board row:
+
+```text
+ __ __ __ __ __ 1_ __ __ __ __
+ __ _1 __ __ __ __ __ __ __ 1_
+ __ __ __ __ __ __ __ __ __ 1_
+ __ __ __ __ __ 1_ __ __ _1 __
+ __ __ __ __ __ __ __ __ 1_ __
+```
+
+## Turn summary
+
+After each completed turn, the simulation prints a numeric summary:
+
+```text
+Turn: 1 | Aphids: 5 | Ladybugs: 4 | Births: 0 | Deaths: 0 | Food: 432
+```
+
+| Field | Meaning |
+|-------|---------|
+| `Turn` | Turns completed so far |
+| `Aphids` | Living aphids at the end of the turn |
+| `Ladybugs` | Living ladybugs at the end of the turn |
+| `Births` | Creatures born during that turn |
+| `Deaths` | Creatures that died during that turn, from combat or starvation |
+| `Food` | Total food remaining across the whole board |
+
+## When the run stops
+
+The loop ends as soon as either condition holds:
+
+1. Every creature is extinct.
+2. The configured turn limit is reached.
+
+## Reproducing a run
+
+Without `--seed`, the generator is seeded from operating-system randomness, so
+every run differs. With `--seed`, the same starting configuration and seed
+produce the same sequence of random decisions, every time and on every machine.
+
+```sh
+cargo run -- --turns 20 --delay-ms 0 --seed 12345
+```
+
+> Tip: `--delay-ms 0` removes the sleep between turns, which is what you want
+> for scripted runs and for diffing output between two builds.

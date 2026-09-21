@@ -1,0 +1,108 @@
+name: Docs
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - docs/**
+      - .github/workflows/docs.yml
+  pull_request:
+    paths:
+      - docs/**
+      - .github/workflows/docs.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Pull request builds are throwaway checks, so a new push supersedes them.
+concurrency:
+  group: docs-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Quarkdown release to build the site with. Bump deliberately: a new release
+  # can change the rendered output.
+  QUARKDOWN_VERSION: 2.6.1
+
+jobs:
+  build:
+    name: Build the site
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # The release archive ships its own JRE, so no Java setup is needed. It
+      # is large, which is why it is cached on the pinned version.
+      - name: Cache the Quarkdown toolchain
+        id: toolchain
+        uses: actions/cache@v6
+        with:
+          path: ~/.quarkdown
+          key: quarkdown-${{ env.QUARKDOWN_VERSION }}-linux-x64
+
+      - name: Install Quarkdown
+        if: steps.toolchain.outputs.cache-hit != 'true'
+        run: |
+          curl -fsSL -o /tmp/quarkdown.zip \
+            "https://github.com/iamgio/quarkdown/releases/download/v${QUARKDOWN_VERSION}/quarkdown-linux-x64.zip"
+          mkdir -p ~/.quarkdown
+          unzip -q /tmp/quarkdown.zip -d ~/.quarkdown
+
+      - name: Put Quarkdown on the PATH
+        run: |
+          # The archive's top-level directory name is not part of its contract,
+          # so find the launcher rather than assuming a path.
+          launcher=$(find ~/.quarkdown -type f -path '*/bin/quarkdown' | head -n 1)
+          if [ -z "$launcher" ]; then
+            echo "No quarkdown launcher found in the downloaded archive." >&2
+            exit 1
+          fi
+          bin_dir=$(dirname "$launcher")
+          # unzip does not always restore the executable bit.
+          chmod +x "$launcher"
+          if [ -d "$bin_dir/../runtime/bin" ]; then
+            chmod +x "$bin_dir"/../runtime/bin/*
+          fi
+          echo "$bin_dir" >> "$GITHUB_PATH"
+
+      - name: Build the site
+        working-directory: docs
+        run: quarkdown c main.qd --strict --out ../_build
+
+      - name: Collect the output
+        run: |
+          # Quarkdown writes the site into a directory named after .docname.
+          site=$(find _build -maxdepth 2 -name index.html -printf '%h\n' | head -n 1)
+          if [ -z "$site" ]; then
+            echo "The build produced no index.html." >&2
+            exit 1
+          fi
+          mv "$site" _site
+
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: _site
+
+  deploy:
+    name: Deploy to GitHub Pages
+    needs: build
+    # Pull requests are built to catch breakage, but never published.
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    # Deployments queue rather than cancel, so a run never publishes a site
+    # that a newer run has already replaced.
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/configure-pages@v6
+
+      - id: deployment
+        uses: actions/deploy-pages@v5

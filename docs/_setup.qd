@@ -1,0 +1,27 @@
+.doclang {English}
+.theme {paperwhite} layout:{minimal}
+
+.htmloptions baseurl:{https://andreashdez.github.io/creature_life_cycle}
+
+.ifnot {.docname::equals {Aphids and Ladybugs}}
+    .htmloptions title:{.docname | Aphids and Ladybugs}
+
+.var {repourl} {https://github.com/andreashdez/creature_life_cycle}
+
+.function {repolink}
+    content href:
+    .text {.content} url:{.repourl/.href}
+
+.function {example}
+    content:
+    .box type:{tip}
+        .content
+
+.pagemargin {topleft}
+    .row gap:{10px} cross:{center}
+        !(26)[](assets/ladybug.png)
+
+        [**Aphids and Ladybugs**](https://andreashdez.github.io/creature_life_cycle)
+
+.pagemargin {topright}
+    [.icon {github}](https://github.com/andreashdez/creature_life_cycle)

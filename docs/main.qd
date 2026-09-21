@@ -1,0 +1,77 @@
+.docname {Aphids and Ladybugs}
+.include {docs}
+
+.row gap:{18px} cross:{center} alignment:{center}
+    !(120)[Aphid](assets/aphid.png)
+
+    !(120)[Ladybug](assets/ladybug.png)
+
+**Aphids and Ladybugs** is a small Rust simulation of two species sharing a
+two-dimensional board. Aphids and ladybugs move, eat the food under them,
+reproduce when they crowd a cell, starve when the cell runs dry, and fight
+whenever predator and prey meet.
+
+The same simulation core drives two front ends: a printing command-line runner
+and a Bevy-powered visual explorer with live parameter controls.
+
+## Start here
+
+.grid columns:{2} gap:{16px}
+    .box {Getting started} type:{tip}
+        Install the toolchain, build the project, and run your first turns.
+
+        [Read the guide](getting-started.qd)
+
+    .box {Command line} type:{tip}
+        Flags, board output symbols, and the per-turn summary line.
+
+        [Read the guide](cli.qd)
+
+    .box {Graphical interface} type:{tip}
+        Toolbar, parameter sliders, population chart, board editing, shortcuts.
+
+        [Read the guide](gui.qd)
+
+    .box {Simulation rules} type:{tip}
+        Turn phases, movement, combat, procreation, starvation, randomness.
+
+        [Read the reference](simulation-rules.qd)
+
+## A turn at a glance
+
+Every turn snapshots the creatures alive at its start, then walks them through
+seven phases in a fixed order. Creatures born during a turn wait until the next
+one before they act.
+
+.mermaid caption:{The seven phases of a single simulation turn.}
+    flowchart TD
+        A([Turn start: snapshot]) --> B[1 - Movement]
+        B --> C[2 - Combat]
+        C --> D[3 - Remove the slain]
+        D --> E[4 - Procreation]
+        E --> F[5 - Starvation]
+        F --> G[6 - Remove the starved]
+        G --> H[7 - Food regrowth]
+        H --> I([Turn end])
+
+## Try it in one command
+
+```sh
+cargo run -- --turns 10 --delay-ms 0 --seed 42
+```
+
+With a seed, the same starting board always produces the same run, which makes
+the simulation reproducible for tests, benchmarks, and bug reports.
+
+## Project facts
+
+| | |
+|---|---|
+| Language | Rust, edition 2024 |
+| Binaries | `creature_life_cycle` (CLI), `gui` (Bevy) |
+| GUI engine | Bevy 0.19 with `bevy_feathers` widgets |
+| Configuration | TOML at `~/.config/creature_life_cycle/simulation.toml` |
+| Repository | [andreashdez/creature_life_cycle](https://github.com/andreashdez/creature_life_cycle) |
+
+> Tip: This site is written in Quarkdown. The sources live in the
+> .repolink {docs/} {tree/main/docs} directory of the repository.
