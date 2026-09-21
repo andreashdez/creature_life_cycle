@@ -339,6 +339,7 @@ impl Creature {
 }
 
 /// Complete simulation state.
+#[derive(Clone)]
 pub struct Board {
     /// Number of board rows.
     rows: usize,
@@ -1060,6 +1061,7 @@ impl Board {
 ///
 /// `StdRng` gives deterministic seeded runs while `from_os_rng` provides non-deterministic default
 /// runs from the operating system.
+#[derive(Clone)]
 pub struct Random {
     /// Internal generator from the `rand` crate.
     rng: StdRng,

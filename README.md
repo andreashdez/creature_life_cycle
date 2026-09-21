@@ -103,17 +103,34 @@ cargo run --bin gui
 The Bevy UI has a persistent toolbar with Play/Pause, Step, Reset, speed controls,
 and Fit board. Step pauses and advances one turn. Reset pauses and restores the
 last saved setup, or the board loaded at launch if nothing has been saved, using
-the current seed and probabilities. The toolbar's second line reports the outcome
+the current seed and probabilities. The toolbar's status line reports the outcome
 of the most recent save or seed change for a few seconds.
 
 The sidebar has **Overview**, **Parameters**, and **Edit** tabs. Parameters are
-grouped by Aphids, Ladybugs, and Environment; each slider displays its percentage
-once and supports arrow-key adjustment when focused. The settings area scrolls
+grouped by Aphids, Ladybugs, and Environment. Each parameter has a slider, an
+editable percentage, and a short explanation. Enter or leaving the field applies
+a value from 0 to 100; invalid input restores the previous value and reports an
+error. Sliders also support arrow-key adjustment. A bullet marks values changed
+from the saved setup, and each group has **Restore defaults** for the built-in
+values. A successful Save setup updates the saved-value baseline. The settings area scrolls
 with the wheel or its scrollbar, while the tabs and toolbar stay visible.
 Hovering a cell opens the cell inspector as a popup beside the pointer, so
 inspecting a cell never moves the controls.
 
-The Overview tab's Run setup section shows the seed the run started from and a
+Aphid, ladybug, and food totals stay visible above the board in every tab,
+alongside their changes in the last turn. Overview keeps recent births and
+deaths and the food layer controls in view; **Run setup** and **Controls &
+shortcuts** expand when needed.
+
+**Population** view uses neutral cells to emphasize creatures. **Food** view
+shades cells by food supply and offers optional, subdued bars and speckles.
+Creatures have a dark backing for contrast in both views. When cells are smaller
+than 28 logical pixels, illustrated creatures become one marker per occupied
+cell and species: green circles for aphids and red diamonds for ladybugs. Mixed
+cells retain both markers. Zooming in restores the detailed sprites and counts.
+`F` switches to Food view and toggles its details.
+
+The Overview tab's expandable Run setup section shows the seed the run started from and a
 field holding a draft of it. The field takes digits only, up to the 20 of
 `u64::MAX`. **Restart with this seed**, or Enter while the field has focus,
 applies what is typed and restarts the run from it. A seed that cannot be read
@@ -129,17 +146,37 @@ becomes what Reset restores.
 
 Shortcuts: `Space` plays/pauses, `N` steps, `R` resets, `S` saves the setup,
 `[` / `]` change speed, `Home` fits the board, `F` toggles food details, and
-`E` / `A` / `L` open the edit controls. Space activates the focused widget when one
+`E` / `A` / `L` / `X` open the edit controls. Space activates the focused widget when one
 has focus; click the board or press Escape to return to global Space playback.
 The GUI reads and writes the same XDG `simulation.toml` as the CLI. Reloading a
 saved setup from disk without restarting is not implemented; Reset restores the
 last setup saved in this session, or the board loaded at launch.
 
+The Edit tab has illustrated **Aphid** (`A`) and **Ladybug** (`L`) tools and an
+**Erase** (`X`) tool. Choosing a tool pauses the simulation and shows a placement
+preview on the board. Left click places a creature; right click removes one of
+the selected species. Erase removes all creatures in the cell, leaving its food.
+Dragging still pans the board. **Done** leaves editing paused; Play resumes it.
+
+Each edit restarts the turn count and chart. **Undo edit** (`Z`) restores the
+previous board, creature life, food, random-number state, and history, keeping the
+run paused and the current parameter settings. Up to 20 edits can be undone;
+advancing a simulation turn or resetting clears this undo history.
+
 Scroll over the board to zoom, drag with the left or middle mouse button to pan,
 and use **Fit board** (or `Home`) to frame the whole board again.
 
 The population chart draws aphids as a solid line and ladybugs as a dashed one,
-keeping the latest 240 turns. Hover it to read both counts at a turn.
+keeping the latest 240 turns. Diamonds mark rule changes after a turn; crosses
+mark a species becoming extinct on that turn. Hover to read population counts
+and event summaries. Changes to the same parameter between turns share one event;
+reverting them removes that change. Events expire with the rolling history and
+are restored along with history by edit Undo.
+
+Use **Hide chart** / **Show chart** to give the board more room, the **Height − / +**
+buttons for smaller or larger charts, or drag the chart's top edge. Resizing keeps
+at least 180 logical pixels for the board. The chart displays a prompt until a
+run has enough history to plot; collapsing it continues collecting history.
 
 Text is set in Fira Sans, which ships embedded in `bevy_feathers`.
 

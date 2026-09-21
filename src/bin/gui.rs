@@ -15,8 +15,8 @@ use bevy::camera::{ScalingMode, Viewport};
 use bevy::ecs::system::SystemParam;
 use bevy::feathers::constants::fonts;
 use bevy::feathers::controls::{
-    ButtonVariant, FeathersButton, FeathersCheckbox, FeathersRadio, FeathersScrollbar,
-    FeathersSlider, FeathersTextInput, FeathersTextInputContainer,
+    ButtonVariant, FeathersButton, FeathersCheckbox, FeathersScrollbar, FeathersSlider,
+    FeathersTextInput, FeathersTextInputContainer,
 };
 use bevy::feathers::dark_theme::create_dark_theme;
 use bevy::feathers::display::{label, label_small};
@@ -31,8 +31,8 @@ use bevy::render::view::window::screenshot::{Screenshot, save_to_disk};
 use bevy::shader::ShaderRef;
 use bevy::sprite_render::{AlphaMode2d, Material2d, Material2dPlugin};
 use bevy::text::{EditableText, EditableTextFilter};
-use bevy::ui::Checked;
-use bevy::ui_widgets::{Activate, RadioGroup, SliderPrecision, SliderValue, ValueChange};
+use bevy::ui::{Checked, InteractionDisabled};
+use bevy::ui_widgets::{Activate, SliderPrecision, SliderValue, ValueChange};
 use creature_life_cycle::{
     AphidParams, Board, Coordinates, CreatureSnapshot, CreatureSnapshotKind, FoodParams,
     LadybugParams, Random, TurnStats, load_configured_board, save_configured_board,
@@ -41,7 +41,7 @@ use std::collections::{HashMap, VecDeque};
 
 /// Width of the parameters panel, in logical pixels.
 const PANEL_WIDTH: f32 = 300.0;
-const TOOLBAR_HEIGHT: f32 = 88.0;
+const TOOLBAR_HEIGHT: f32 = 160.0;
 const PANEL_HEADER: f32 = 122.0;
 /// Offset of the cell popup from the pointer, and the margin it keeps from the
 /// window edges, both as `draw_hover_tooltip` in the previous macroquad GUI.
@@ -84,7 +84,7 @@ const SEED_DIGITS: usize = 20;
 
 // Colours lifted from `draw_cell_background` and the palette in interface.rs.
 const EMPTY_CELL: Color = Color::srgb_u8(31, 33, 34);
-const FED_CELL: Color = Color::srgb_u8(76, 104, 58);
+const FED_CELL: Color = Color::srgb_u8(53, 70, 48);
 const EMPTY_CELL_RIM: Color = Color::srgba_u8(48, 53, 50, 90);
 const FED_CELL_RIM: Color = Color::srgba_u8(135, 153, 89, 65);
 const HOVER: Color = Color::srgb(0.85, 0.87, 0.70);
@@ -112,9 +112,27 @@ const EDIT_LADYBUG: Color = Color::srgba_u8(231, 78, 61, 175);
 const MAX_FOOD: i32 = 9;
 // Food overlay marks, lifted from `draw_cell_background` and
 // `draw_food_speckles` in the previous macroquad GUI.
-const FOOD_BAR: Color = Color::srgba_u8(194, 184, 83, 130);
-const FOOD_SPECKLE: Color = Color::srgba_u8(219, 205, 116, 95);
-const TRAIL: Color = Color::srgba(0.96, 0.90, 0.69, 0.31);
+const FOOD_BAR: Color = Color::srgba_u8(194, 184, 83, 85);
+const FOOD_SPECKLE: Color = Color::srgba_u8(219, 205, 116, 42);
+/// The streak a creature drags behind it while a move plays. A bright core sits
+/// on a wider, fainter glow so the edges fall off instead of ending in a hard
+/// rectangle; both ramp to nothing at the tail.
+const TRAIL: Color = Color::srgba(0.96, 0.90, 0.69, 0.42);
+const TRAIL_GLOW: Color = Color::srgba(0.96, 0.90, 0.69, 0.12);
+/// Core and glow width as a fraction of the inner cell, so the streak keeps its
+/// proportion to the creature it trails as the camera zooms.
+const TRAIL_WIDTH: f32 = 0.15;
+const TRAIL_GLOW_WIDTH: f32 = 0.34;
+/// Physical-pixel clamp on those widths: under the minimum the streak is back to
+/// the hairline it used to be, over the maximum it swamps the creature.
+const TRAIL_WIDTH_RANGE: (f32, f32) = (1.5, 22.0);
+/// How much of the move passes before the tail starts catching up. The streak
+/// grows, holds its length, then collapses into the creature as it settles,
+/// rather than popping out of existence when the tween ends.
+const TRAIL_LAG: f32 = 0.64;
+/// Points along the streak: enough for the alpha ramp to read as a gradient
+/// rather than a staircase, few enough to stay cheap per creature.
+const TRAIL_POINTS: usize = 8;
 
 /// Height of the population history strip under the board, in logical pixels.
 const CHART_HEIGHT: f32 = 220.0;
@@ -124,9 +142,13 @@ const HISTORY_LIMIT: usize = 240;
 // legend on top, x ticks below.
 const PLOT_LEFT: f32 = 52.0;
 const PLOT_RIGHT: f32 = 96.0;
-const PLOT_TOP: f32 = 44.0;
+const PLOT_TOP: f32 = 68.0;
 const PLOT_BOTTOM: f32 = 34.0;
-const TOOLTIP_WIDTH: f32 = 150.0;
+const TOOLTIP_WIDTH: f32 = 240.0;
+const CHART_COLLAPSED_HEIGHT: f32 = 40.0;
+const CHART_MIN_HEIGHT: f32 = 180.0;
+const DETAIL_MIN_CELL_PIXELS: f32 = 28.0;
+const EVENT_RULES: Color = Color::srgb_u8(190, 173, 115);
 
 // Chart palette. The series are the board's aphid and ladybug hues, stepped
 // down into the dark-surface lightness band (OKLCH L 0.48-0.67, hue held)
@@ -165,6 +187,8 @@ fn main() {
                 title: "Aphids and Ladybugs — Bevy board prototype".into(),
                 // The cameras fit to the actual viewport, including HiDPI scaling.
                 resolution: review_window_size().into(),
+                // Keep tiling window managers from enlarging review captures.
+                resizable: std::env::var_os("CLC_SCREENSHOT").is_none(),
                 resize_constraints: WindowResizeConstraints {
                     min_width: 900.0,
                     min_height: 640.0,
@@ -205,14 +229,20 @@ fn main() {
         )
         .init_resource::<ChartSize>()
         .init_resource::<ChartHover>()
+        .init_resource::<ChartPanel>()
         .insert_resource(ClearColor(Color::srgb(0.086, 0.106, 0.102)))
         .init_resource::<Hovered>()
         .init_resource::<FoodOverlay>()
+        .init_resource::<BoardView>()
+        .init_resource::<BoardDetail>()
         .init_resource::<EditMode>()
+        .init_resource::<EditHistory>()
+        .init_resource::<PanelSections>()
         .init_resource::<BoardPointer>()
         .add_message::<CellEdit>()
         .add_message::<RunAction>()
         .add_message::<Reseed>()
+        .add_message::<ParameterReset>()
         .init_resource::<ActiveTab>()
         .init_resource::<StatusLine>()
         .insert_resource(Seed(DEFAULT_SEED))
@@ -226,6 +256,10 @@ fn main() {
                 ..default()
             },
         )
+        // The trail groups keep the gizmo defaults: their widths follow the
+        // camera's zoom and are set every frame by `scale_trail_gizmos`.
+        .init_gizmo_group::<TrailGizmos>()
+        .init_gizmo_group::<TrailGlowGizmos>()
         .init_resource::<CreatureIndex>()
         .init_resource::<BadgeIndex>()
         .init_resource::<BadgeRaster>()
@@ -250,6 +284,7 @@ fn main() {
                     apply_seed,
                     apply_run_actions,
                     sync_sidebar,
+                    chart_resize_input.run_if(not(resource_exists::<ScreenshotProbe>)),
                     layout_viewports,
                     scroll_panel.run_if(not(resource_exists::<ScreenshotProbe>)),
                     camera_controls.run_if(not(resource_exists::<ScreenshotProbe>)),
@@ -259,6 +294,7 @@ fn main() {
                     exclusive_play_and_edit,
                     sync_edit_controls,
                     chart_hover,
+                    commit_parameter_fields,
                     apply_params,
                     // After the edits and parameters have landed, so a save
                     // writes the board as it is on screen, and before the next
@@ -286,6 +322,17 @@ fn main() {
                     update_status_text,
                     update_cell_popup,
                     sync_scrollbar_visibility,
+                    sync_panel_sections,
+                    update_edit_palette,
+                    update_edit_preview,
+                )
+                    .chain(),
+                (
+                    sync_parameter_widgets,
+                    sync_board_view,
+                    update_board_detail,
+                    scale_trail_gizmos,
+                    sync_chart_panel,
                 )
                     .chain(),
             )
@@ -317,13 +364,40 @@ struct Hovered(Option<(usize, usize)>);
 /// and the `F` key both write this, and the checkbox is synced from it, so the
 /// two can never disagree.
 #[derive(Resource, Default)]
-struct FoodOverlay(bool);
+struct FoodOverlay {
+    on: bool,
+    /// Whether switching the details on is what selected the food view, so
+    /// that switching them off can hand the view back.
+    selected_view: bool,
+}
+
+#[derive(Resource, Default, Clone, Copy, PartialEq, Eq, Debug)]
+enum BoardView {
+    #[default]
+    Population,
+    Food,
+}
+
+#[derive(Resource, Default)]
+struct BoardDetail {
+    simplified: bool,
+}
+
+#[derive(Component, Clone, Default, FromTemplate)]
+struct ViewButton(BoardView);
+
+#[derive(Component, Clone, Default, FromTemplate)]
+struct FoodControls;
+
+#[derive(Component)]
+struct PopulationLayer;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum EditTool {
     #[default]
     Aphid,
     Ladybug,
+    Erase,
 }
 
 /// Board editing state, as `editing_enabled` / `edit_tool` in the previous macroquad GUI.
@@ -377,11 +451,69 @@ impl BoardPointer {
 #[derive(Default, Reflect, GizmoConfigGroup)]
 struct BoardEditGizmos;
 
+// The movement streak is drawn twice, as a core over a glow, and gizmo line
+// width is set per group, so each half needs its own group.
+#[derive(Default, Reflect, GizmoConfigGroup)]
+struct TrailGizmos;
+
+#[derive(Default, Reflect, GizmoConfigGroup)]
+struct TrailGlowGizmos;
+
 #[derive(Component, Clone, Default, FromTemplate)]
-struct EditToggle;
+struct EditStatus;
 
 #[derive(Component, Clone, Copy, Default, FromTemplate)]
-struct EditToolRadio(EditTool);
+struct EditToolButton(EditTool);
+
+#[derive(Component, Clone, Default, FromTemplate)]
+struct UndoButton;
+
+#[derive(Component)]
+struct EditPreview;
+
+/// Exact snapshots keep undo faithful to life, food, creature IDs and RNG state.
+struct EditSnapshot {
+    board: Board,
+    random: Random,
+    stats: Stats,
+    history: History,
+}
+
+#[derive(Resource, Default)]
+struct EditHistory(VecDeque<EditSnapshot>);
+
+const EDIT_UNDO_LIMIT: usize = 20;
+
+#[derive(Clone, Copy, Default)]
+enum PanelSection {
+    #[default]
+    Setup,
+    Help,
+}
+
+#[derive(Resource, Default)]
+struct PanelSections {
+    setup: bool,
+    help: bool,
+}
+
+impl PanelSections {
+    fn is_open(&self, section: PanelSection) -> bool {
+        match section {
+            PanelSection::Setup => self.setup,
+            PanelSection::Help => self.help,
+        }
+    }
+}
+
+#[derive(Component, Clone, Default, FromTemplate)]
+struct SectionBody(PanelSection);
+
+#[derive(Component, Clone, Default, FromTemplate)]
+struct SectionLabel(PanelSection);
+
+#[derive(Component, Clone, Default, FromTemplate)]
+struct SectionToggle(PanelSection);
 
 /// The panel's scrolling root.
 #[derive(Component, Clone, Default, FromTemplate)]
@@ -439,23 +571,47 @@ struct Revision(u64);
 /// The nine tunable probabilities, owned by the panel and pushed into the board
 /// when they change. Indices match `probability`/`set_probability` in
 /// the previous macroquad GUI's parameter panel, so saved configs line up.
-#[derive(Resource, Clone, Copy)]
+#[derive(Resource, Clone, Copy, Default)]
 struct Params {
     aphid: AphidParams,
     ladybug: LadybugParams,
     food: FoodParams,
 }
 
+#[derive(Resource)]
+struct SavedParams(Params);
+
+#[derive(Component, Clone, Default, FromTemplate)]
+struct ProbField(usize);
+
+#[derive(Component, Clone, Default, FromTemplate)]
+struct ParamCaption(usize);
+
+#[derive(Message)]
+struct ParameterReset(usize, usize);
+
 const PARAM_LABELS: [&str; 9] = [
     "Movement",
-    "Kill probability",
+    "Kill a ladybug",
     "Accomplice bonus",
     "Reproduction",
     "Movement",
-    "Kill probability",
-    "Direction-change probability",
+    "Kill an aphid",
+    "Direction change",
     "Reproduction",
     "Food regeneration",
+];
+
+const PARAM_HELP: [&str; 9] = [
+    "Chance to move each turn.",
+    "Base chance to kill a ladybug in the same cell.",
+    "Extra kill chance per other aphid in the cell, capped at 100% total.",
+    "Chance to reproduce when another aphid shares the cell.",
+    "Chance to move each turn.",
+    "Chance to kill an aphid in the same cell.",
+    "Chance to choose new preferred directions before moving.",
+    "Chance to reproduce when another ladybug shares the cell.",
+    "Chance each cell regains one food per turn, up to 9.",
 ];
 
 impl Params {
@@ -506,8 +662,42 @@ impl HistoryPoint {
 }
 
 /// Rolling population history, capped like the previous macroquad GUI's.
-#[derive(Resource, Default)]
-struct History(VecDeque<HistoryPoint>);
+#[derive(Resource, Default, Clone)]
+struct History(VecDeque<HistoryPoint>, VecDeque<HistoryEvent>);
+
+#[derive(Clone, Default)]
+struct HistoryEvent {
+    turn: usize,
+    changes: [Option<(f64, f64)>; 9],
+    extinctions: [bool; 2],
+}
+
+impl HistoryEvent {
+    fn has_rules(&self) -> bool {
+        self.changes.iter().any(Option::is_some)
+    }
+
+    fn caption(&self) -> String {
+        let count = self
+            .changes
+            .iter()
+            .filter(|change| change.is_some())
+            .count();
+        let mut lines = Vec::new();
+        if count > 0 {
+            lines.push(format!(
+                "{count} rule{} changed after this turn",
+                if count == 1 { "" } else { "s" }
+            ));
+        }
+        for (index, extinct) in self.extinctions.iter().enumerate() {
+            if *extinct {
+                lines.push(format!("{} became extinct", CHART_SERIES_NAMES[index]));
+            }
+        }
+        lines.join("\n")
+    }
+}
 
 impl History {
     fn record(&mut self, turn: usize, aphids: usize, ladybugs: usize) {
@@ -519,12 +709,93 @@ impl History {
             aphids,
             ladybugs,
         });
+        if let Some(first) = self.0.front() {
+            self.1.retain(|event| event.turn >= first.turn);
+        }
+    }
+
+    fn event(&mut self, turn: usize) -> &mut HistoryEvent {
+        if self.1.back().is_none_or(|event| event.turn != turn) {
+            self.1.push_back(HistoryEvent { turn, ..default() });
+        }
+        self.1.back_mut().unwrap()
     }
 }
 
 /// Logical width of the chart strip, set by `layout_viewports`.
-#[derive(Resource, Default)]
-struct ChartSize(f32);
+#[derive(Resource, Default, PartialEq)]
+struct ChartSize(f32, f32);
+
+#[derive(Resource)]
+struct ChartPanel {
+    height: f32,
+    collapsed: bool,
+    dragging: bool,
+}
+
+impl Default for ChartPanel {
+    fn default() -> Self {
+        Self {
+            height: CHART_HEIGHT,
+            collapsed: false,
+            dragging: false,
+        }
+    }
+}
+
+impl ChartPanel {
+    fn apply(&mut self, action: ChartAction, window_height: f32) {
+        match action {
+            ChartAction::Toggle => {
+                self.collapsed = !self.collapsed;
+                self.dragging = false;
+            }
+            ChartAction::Smaller | ChartAction::Larger => {
+                self.collapsed = false;
+                let step = if action == ChartAction::Larger {
+                    40.0
+                } else {
+                    -40.0
+                };
+                self.height = (self.effective_height(window_height) + step).max(CHART_MIN_HEIGHT);
+            }
+        }
+    }
+
+    fn effective_height(&self, window_height: f32) -> f32 {
+        if self.collapsed {
+            CHART_COLLAPSED_HEIGHT
+        } else {
+            self.height.clamp(
+                CHART_MIN_HEIGHT,
+                (window_height - TOOLBAR_HEIGHT - 180.0).clamp(CHART_MIN_HEIGHT, 420.0),
+            )
+        }
+    }
+}
+
+#[derive(Component)]
+struct ChartRoot;
+
+#[derive(Component)]
+struct ChartExpandedOnly;
+
+#[derive(Component, Clone, Default, FromTemplate)]
+struct ChartToggleText;
+
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum ChartAction {
+    #[default]
+    Toggle,
+    Smaller,
+    Larger,
+}
+
+#[derive(Component, Clone, Default, FromTemplate)]
+struct ChartControlButton(ChartAction);
+
+#[derive(Component)]
+struct ChartEmpty;
 
 /// History index under the crosshair, if the pointer is over the plot.
 #[derive(Resource, Default, PartialEq)]
@@ -552,6 +823,7 @@ struct EndDot(usize);
 /// Every positioned piece of chart text, so one query can lay them all out.
 #[derive(Component, Clone, Copy)]
 enum ChartLabel {
+    AxisTitle,
     YTick(usize),
     XTick(usize),
     EndLabel(usize),
@@ -559,9 +831,10 @@ enum ChartLabel {
     Tooltip,
     TooltipTurn,
     TooltipValue(usize),
+    TooltipEvent,
 }
 
-#[derive(Resource, Default)]
+#[derive(Resource, Default, Clone)]
 struct Stats {
     turn: usize,
     aphids: usize,
@@ -570,6 +843,7 @@ struct Stats {
     births: usize,
     deaths: usize,
     extinct: bool,
+    deltas: [i64; 3],
 }
 
 #[derive(Component)]
@@ -653,6 +927,8 @@ enum RunAction {
     Faster,
     Fit,
     Save,
+    Undo,
+    FinishEditing,
 }
 
 /// Asks for the seed in the panel's field to be applied and the run restarted.
@@ -727,9 +1003,10 @@ const PROBE_CELL: (usize, usize) = (2, 3);
 type ProbeWidgets<'w, 's> = (
     Query<'w, 's, (Entity, &'static ProbSlider)>,
     Query<'w, 's, (Entity, Has<Checked>), With<FoodOverlayToggle>>,
-    Query<'w, 's, (Entity, Has<Checked>), With<EditToggle>>,
-    Query<'w, 's, Entity, With<RadioGroup>>,
-    Query<'w, 's, (Entity, &'static EditToolRadio, Has<Checked>)>,
+    Query<'w, 's, (Entity, &'static EditToolButton, &'static ButtonVariant)>,
+    Query<'w, 's, (Entity, &'static SectionToggle)>,
+    Query<'w, 's, (Entity, &'static ViewButton)>,
+    Query<'w, 's, (Entity, &'static ChartControlButton)>,
 );
 
 type ProbeState<'w> = (
@@ -751,12 +1028,14 @@ fn screenshot_probe(
     time: Res<Time>,
     probe: Option<ResMut<ScreenshotProbe>>,
     mut board_cameras: Query<(&Camera, &GlobalTransform, &mut Projection), With<BoardCamera>>,
-    (sliders, food_toggles, edit_toggles, radio_groups, radios): ProbeWidgets,
+    (sliders, food_toggles, tool_buttons, sections, views, chart_controls): ProbeWidgets,
     (params, board, history, overlay, edit, stats, playing): ProbeState,
     mut panel: Query<(&mut ScrollPosition, &ComputedNode), With<PanelRoot>>,
     tabs: Query<(Entity, &TabButton)>,
     mut edits: MessageWriter<CellEdit>,
     mut exit: MessageWriter<AppExit>,
+    mut windows: Query<&mut Window>,
+    mut actions: MessageWriter<RunAction>,
 ) {
     let Some(mut probe) = probe else {
         return;
@@ -773,9 +1052,9 @@ fn screenshot_probe(
             .map(|cell| (cell.aphids, cell.ladybugs))
     };
     let tools = || {
-        radios
+        tool_buttons
             .iter()
-            .map(|(_, radio, checked)| format!("{:?}={checked}", radio.0))
+            .map(|(_, tool, variant)| format!("{:?}={variant:?}", tool.0))
             .collect::<Vec<_>>()
             .join(" ")
     };
@@ -785,6 +1064,10 @@ fn screenshot_probe(
         // events into their observers, and `CellEdit` messages into
         // `apply_cell_edits`. Nothing is written into resources directly.
         0 => {
+            if let Ok(mut window) = windows.single_mut() {
+                let (width, height) = review_window_size();
+                window.resolution.set(width as f32, height as f32);
+            }
             if let Some((entity, _)) = sliders.iter().find(|(_, slider)| slider.0 == 0) {
                 info!(
                     "before ValueChange: params[0]={:.3} board aphid prob_move={:.3}",
@@ -800,7 +1083,7 @@ fn screenshot_probe(
             if let Ok((toggle, checked)) = food_toggles.single() {
                 info!(
                     "before toggle: overlay={} checkbox checked={checked}",
-                    overlay.0
+                    overlay.on
                 );
                 commands.trigger(ValueChange {
                     source: toggle,
@@ -822,24 +1105,11 @@ fn screenshot_probe(
                 edit.tool,
                 tools(),
             );
-            if let Ok((toggle, _)) = edit_toggles.single() {
-                commands.trigger(ValueChange {
-                    source: toggle,
-                    value: true,
-                    is_final: true,
-                });
-            }
-            if let (Ok(group), Some((ladybug, _, _))) = (
-                radio_groups.single(),
-                radios
-                    .iter()
-                    .find(|(_, radio, _)| radio.0 == EditTool::Ladybug),
-            ) {
-                commands.trigger(ValueChange {
-                    source: group,
-                    value: ladybug,
-                    is_final: true,
-                });
+            if let Some((entity, _, _)) = tool_buttons
+                .iter()
+                .find(|(_, tool, _)| tool.0 == EditTool::Ladybug)
+            {
+                commands.trigger(Activate { entity });
             }
             // Net effect on the cell: three aphids and two ladybugs, so both
             // kinds end up crowded enough to earn a count badge.
@@ -876,12 +1146,11 @@ fn screenshot_probe(
             if let Ok((_, checked)) = food_toggles.single() {
                 info!(
                     "after toggle: overlay={} checkbox checked={checked}",
-                    overlay.0
+                    overlay.on
                 );
             }
-            let edit_checked = edit_toggles.single().map(|(_, checked)| checked).ok();
             info!(
-                "after edit: cell {:?}={:?} turn={} aphids={} ladybugs={} history={} playing={} editing={} checkbox={:?} tool={:?} [{}]",
+                "after edit: cell {:?}={:?} turn={} aphids={} ladybugs={} history={} playing={} editing={} tool={:?} [{}]",
                 PROBE_CELL,
                 cell(&board),
                 stats.turn,
@@ -890,7 +1159,6 @@ fn screenshot_probe(
                 history.0.len(),
                 playing.0,
                 edit.enabled,
-                edit_checked,
                 edit.tool,
                 tools(),
             );
@@ -987,6 +1255,132 @@ fn screenshot_probe(
             commands
                 .spawn(Screenshot::primary_window())
                 .observe(save_to_disk(probe.path.replace(".png", suffix)));
+            probe.timer = Timer::from_seconds(1.0, TimerMode::Once);
+        }
+        12 => {
+            if let Some((entity, _)) = tabs.iter().find(|(_, tab)| tab.0 == PanelTab::Overview) {
+                commands.trigger(Activate { entity });
+            }
+            for (entity, section) in &sections {
+                if matches!(section.0, PanelSection::Setup) {
+                    commands.trigger(Activate { entity });
+                }
+            }
+            if let Ok((_, _, mut projection)) = board_cameras.single_mut()
+                && let Projection::Orthographic(ortho) = &mut *projection
+            {
+                ortho.scale = 1.0;
+            }
+            probe.timer = Timer::from_seconds(0.5, TimerMode::Once);
+        }
+        13 => {
+            commands
+                .spawn(Screenshot::primary_window())
+                .observe(save_to_disk(probe.path.replace(".png", "-setup.png")));
+            probe.timer = Timer::from_seconds(1.0, TimerMode::Once);
+        }
+        14 => {
+            if let Ok((mut position, computed)) = panel.single_mut() {
+                position.y = ((computed.content_size().y - computed.size().y)
+                    * computed.inverse_scale_factor())
+                .max(0.0);
+            }
+            probe.timer = Timer::from_seconds(0.5, TimerMode::Once);
+        }
+        15 => {
+            commands
+                .spawn(Screenshot::primary_window())
+                .observe(save_to_disk(
+                    probe.path.replace(".png", "-setup-scrolled.png"),
+                ));
+            probe.timer = Timer::from_seconds(1.0, TimerMode::Once);
+        }
+        16 => {
+            for (entity, view) in &views {
+                if view.0 == BoardView::Population {
+                    commands.trigger(Activate { entity });
+                }
+            }
+            for (entity, section) in &sections {
+                if matches!(section.0, PanelSection::Setup) {
+                    commands.trigger(Activate { entity });
+                }
+            }
+            if let Ok((mut position, _)) = panel.single_mut() {
+                position.y = 0.0;
+            }
+            if let Ok((_, _, mut projection)) = board_cameras.single_mut()
+                && let Projection::Orthographic(ortho) = &mut *projection
+            {
+                ortho.scale = 2.0;
+            }
+            actions.write(RunAction::FinishEditing);
+            commands.remove_resource::<ProbeCell>();
+            probe.timer = Timer::from_seconds(0.5, TimerMode::Once);
+        }
+        17 => {
+            commands
+                .spawn(Screenshot::primary_window())
+                .observe(save_to_disk(
+                    probe.path.replace(".png", "-population-distant.png"),
+                ));
+            probe.timer = Timer::from_seconds(1.0, TimerMode::Once);
+        }
+        18 | 20 => {
+            for (entity, control) in &chart_controls {
+                if control.0 == ChartAction::Toggle {
+                    commands.trigger(Activate { entity });
+                }
+            }
+            if probe.stage == 20 {
+                for (entity, control) in &chart_controls {
+                    if control.0 == ChartAction::Larger {
+                        commands.trigger(Activate { entity });
+                    }
+                }
+                actions.write(RunAction::Fit);
+                for _ in 0..12 {
+                    actions.write(RunAction::Step);
+                }
+            }
+            probe.timer = Timer::from_seconds(0.5, TimerMode::Once);
+        }
+        19 => {
+            commands
+                .spawn(Screenshot::primary_window())
+                .observe(save_to_disk(probe.path.replace(".png", "-collapsed.png")));
+            probe.timer = Timer::from_seconds(1.0, TimerMode::Once);
+        }
+        21 => {
+            if let Some((entity, _)) = sliders.iter().find(|(_, slider)| slider.0 == 0) {
+                commands.trigger(ValueChange {
+                    source: entity,
+                    value: 25.0f32,
+                    is_final: true,
+                });
+            }
+            commands.insert_resource(ProbeHover(stats.turn));
+            probe.timer = Timer::from_seconds(0.5, TimerMode::Once);
+        }
+        22 => {
+            for _ in 0..45 {
+                actions.write(RunAction::Step);
+            }
+            probe.timer = Timer::from_seconds(0.5, TimerMode::Once);
+        }
+        23 => {
+            info!(
+                "chart events: {}",
+                history
+                    .1
+                    .iter()
+                    .map(|event| format!("turn {}: {}", event.turn, event.caption()))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            );
+            commands
+                .spawn(Screenshot::primary_window())
+                .observe(save_to_disk(probe.path.replace(".png", "-events.png")));
             probe.timer = Timer::from_seconds(1.0, TimerMode::Once);
         }
         _ => {
@@ -1176,9 +1570,11 @@ fn setup(
     // Each species shares one transparent texture. Badges remain mesh discs.
     let inner = CELL - GAP;
     let font: Handle<Font> = asset_server.load(fonts::REGULAR);
-    commands.insert_resource(CreatureAssets {
+    let creature_assets = CreatureAssets {
         aphid: load_embedded_asset!(&*asset_server, "../../assets/sprites/aphid.png"),
         ladybug: load_embedded_asset!(&*asset_server, "../../assets/sprites/ladybug.png"),
+        halo_mesh: meshes.add(Circle::new(CREATURE_SPRITE_SIZE * 0.56)),
+        halo_material: materials.add(ColorMaterial::from_color(Color::srgba_u8(10, 16, 17, 220))),
         badge: meshes.add(Circle::new(inner * BADGE_RADIUS)),
         badge_shadow_mesh: meshes.add(Circle::new(inner * (BADGE_RADIUS + BADGE_SHADOW_OFFSET))),
         badge_colours: [
@@ -1187,7 +1583,18 @@ fn setup(
         ],
         badge_shadow: materials.add(ColorMaterial::from_color(BADGE_SHADOW)),
         font: font.clone(),
-    });
+    };
+    commands.spawn((
+        EditPreview,
+        Sprite {
+            image: creature_assets.aphid.clone(),
+            custom_size: Some(Vec2::splat(CREATURE_SPRITE_SIZE * 1.6)),
+            color: Color::srgba(1.0, 1.0, 1.0, 0.65),
+            ..default()
+        },
+        Transform::from_xyz(0.0, 0.0, 5.0),
+        Visibility::Hidden,
+    ));
 
     commands.insert_resource(Stats {
         turn: 0,
@@ -1197,14 +1604,17 @@ fn setup(
         births: 0,
         deaths: 0,
         extinct: summary.is_extinct(),
+        deltas: [0; 3],
     });
     let params = Params {
         aphid: board.aphid_params(),
         ladybug: board.ladybug_params(),
         food: board.food_params(),
     };
-    spawn_panel(&mut commands, &params, ui_camera);
-    spawn_toolbar(&mut commands, ui_camera);
+    spawn_panel(&mut commands, &params, ui_camera, &creature_assets);
+    spawn_toolbar(&mut commands, ui_camera, &creature_assets);
+    commands.insert_resource(creature_assets);
+    commands.insert_resource(SavedParams(params));
     commands.insert_resource(params);
 
     let mut history = History::default();
@@ -1243,6 +1653,13 @@ fn setup(
         Mesh2d(meshes.add(food_overlay_mesh(&board))),
         MeshMaterial2d(materials.add(ColorMaterial::default())),
         Transform::from_xyz(0.0, 0.0, 0.5),
+        Visibility::Hidden,
+    ));
+    commands.spawn((
+        PopulationLayer,
+        Mesh2d(meshes.add(population_mesh(&board))),
+        MeshMaterial2d(materials.add(ColorMaterial::default())),
+        Transform::from_xyz(0.0, 0.0, 2.0),
         Visibility::Hidden,
     ));
     commands.insert_resource(BoardRes(board));
@@ -1297,6 +1714,8 @@ struct CellPalette([Handle<CellMaterial>; MAX_FOOD as usize + 1]);
 struct CreatureAssets {
     aphid: Handle<Image>,
     ladybug: Handle<Image>,
+    halo_mesh: Handle<Mesh>,
+    halo_material: Handle<ColorMaterial>,
     badge: Handle<Mesh>,
     badge_shadow_mesh: Handle<Mesh>,
     badge_colours: [Handle<ColorMaterial>; 2],
@@ -1308,28 +1727,169 @@ struct CreatureAssets {
 // Parameters panel (bevy_feathers)
 // ---------------------------------------------------------------------------
 
-/// A quiet caption and a slider with one percentage readout.
+/// A slider for exploration and an exact percentage field for deliberate changes.
 fn param_row(index: usize, value: f64) -> impl Scene {
     bsn! {
         Node {
-            flex_direction: FlexDirection::Column,
-            row_gap: px(6),
-            margin: UiRect::bottom(px(12)),
-            flex_shrink: 0.0,
+            flex_direction: FlexDirection::Column, row_gap: px(6),
+            margin: UiRect::bottom(px(18)), flex_shrink: 0.0,
         }
         Children [
-            label(PARAM_LABELS[index]),
+            ({ui_text(PARAM_LABELS[index], 14.0)} ParamCaption({index})),
             (
-                @FeathersSlider {
-                    @min: 0.0,
-                    @max: 100.0,
-                    @value: {(value * 100.0) as f32},
-                }
-                SliderPrecision(1)
-                ProbSlider({index})
-                on(on_prob_changed)
+                Node { column_gap: px(8), align_items: AlignItems::Center }
+                Children [
+                    (
+                        @FeathersSlider { @min: 0.0, @max: 100.0, @value: {(value * 100.0) as f32} }
+                        Node { flex_grow: 1.0, flex_basis: px(0), min_width: px(0) }
+                        SliderPrecision(1) ProbSlider({index}) on(on_prob_changed)
+                    ),
+                    (
+                        @FeathersTextInputContainer
+                        // Feathers pads only the right edge and reserves a left
+                        // border for the number input's coloured sigil. Nothing
+                        // paints that border here, and the background is drawn
+                        // inside it with the corner radii shrunk by its width,
+                        // so the digits sat on the edge and the left corners
+                        // came out square. Drop it and pad both sides evenly.
+                        Node {
+                            width: px(68), min_width: px(68), max_width: px(68),
+                            flex_grow: 0.0, flex_shrink: 0.0,
+                            border: UiRect::ZERO, padding: UiRect::horizontal(px(8)),
+                        }
+                        Children [(
+                            @FeathersTextInput { @max_characters: {Some(12)} }
+                            ProbField({index})
+                            EditableTextFilter::new(|c| c.is_ascii_digit() || c == '.')
+                        )]
+                    ),
+                    label_small("%"),
+                ]
+            ),
+            label_small(PARAM_HELP[index]),
+        ]
+    }
+}
+
+fn param_group(title: &'static str, start: usize, end: usize) -> impl Scene {
+    bsn! {
+        Node { margin: UiRect::vertical(px(10)), align_items: AlignItems::Center, justify_content: JustifyContent::SpaceBetween }
+        Children [
+            ui_text(title, 16.0),
+            (
+                @FeathersButton { @variant: ButtonVariant::Plain }
+                on(move |_: On<Activate>, mut resets: MessageWriter<ParameterReset>| {
+                    resets.write(ParameterReset(start, end));
+                })
+                Children [(Text("Restore defaults") ThemedText)]
             ),
         ]
+    }
+}
+
+fn parse_percentage(text: &str) -> Option<f64> {
+    let value = text.trim().parse::<f64>().ok()?;
+    (value.is_finite() && (0.0..=100.0).contains(&value)).then_some(value / 100.0)
+}
+
+fn percentage_text(value: f64) -> String {
+    // Stable decimal percentages; merely focusing a field must not round saved settings.
+    format!("{:.6}", value * 100.0)
+        .trim_end_matches('0')
+        .trim_end_matches('.')
+        .to_string()
+}
+
+fn commit_parameter_fields(
+    keys: Res<ButtonInput<KeyCode>>,
+    focus: Res<InputFocus>,
+    mut previous: Local<Option<Entity>>,
+    mut fields: Query<(&ProbField, &mut EditableText)>,
+    mut params: ResMut<Params>,
+    mut status: ResMut<StatusLine>,
+    mut resets: MessageReader<ParameterReset>,
+) {
+    let focused = focus.get();
+    let commit = if *previous != focused {
+        *previous
+    } else if keys.just_pressed(KeyCode::Enter) {
+        focused
+    } else {
+        None
+    };
+    if let Some(entity) = commit
+        && let Ok((field, mut text)) = fields.get_mut(entity)
+    {
+        let typed = text.value().to_string();
+        if let Some(value) = parse_percentage(&typed) {
+            if typed.trim() != percentage_text(params.get(field.0)) {
+                params.set(field.0, value);
+                status.set(
+                    format!(
+                        "{} set to {}%.",
+                        PARAM_LABELS[field.0],
+                        percentage_text(value)
+                    ),
+                    true,
+                );
+            }
+        } else {
+            status.set("Enter a percentage from 0 to 100. Value unchanged.", false);
+        }
+        text.editor.set_text(&percentage_text(params.get(field.0)));
+    }
+    *previous = focused;
+    for reset in resets.read() {
+        let defaults = Params::default();
+        for index in reset.0..reset.1 {
+            params.set(index, defaults.get(index));
+        }
+    }
+}
+
+fn sync_parameter_widgets(
+    mut commands: Commands,
+    (params, saved): (Res<Params>, Res<SavedParams>),
+    focus: Res<InputFocus>,
+    mut fields: Query<(Entity, &ProbField, &mut EditableText)>,
+    sliders: Query<(Entity, &ProbSlider, &SliderValue)>,
+    added_sliders: Query<&Children, Added<ProbSlider>>,
+    mut captions: Query<(&ParamCaption, &mut Text)>,
+) {
+    // The editable field is the single numeric readout; retain Feathers' slider interaction.
+    for children in &added_sliders {
+        for child in children.iter() {
+            commands.entity(child).insert(Visibility::Hidden);
+        }
+    }
+    if params.is_changed() || focus.is_changed() {
+        for (entity, field, mut text) in &mut fields {
+            if focus.get() != Some(entity) {
+                let digits = percentage_text(params.get(field.0));
+                if text.value().to_string() != digits {
+                    text.editor.set_text(&digits);
+                }
+            }
+        }
+        for (entity, slider, value) in &sliders {
+            let next = (params.get(slider.0) * 100.0) as f32;
+            if value.0 != next {
+                commands.entity(entity).insert(SliderValue(next));
+            }
+        }
+    }
+    if params.is_changed() || saved.is_changed() {
+        for (caption, mut text) in &mut captions {
+            text.0 = format!(
+                "{}{}",
+                PARAM_LABELS[caption.0],
+                if (params.get(caption.0) - saved.0.get(caption.0)).abs() > 1e-9 {
+                    " •"
+                } else {
+                    ""
+                }
+            );
+        }
     }
 }
 
@@ -1400,14 +1960,121 @@ fn run_button(caption: &'static str, action: RunAction) -> impl Scene {
     }
 }
 
-fn spawn_toolbar(commands: &mut Commands, camera: Entity) {
+fn section_toggle(section: PanelSection) -> impl Scene {
+    bsn! {
+        @FeathersButton { @variant: ButtonVariant::Plain }
+        SectionToggle({section})
+        Node { margin: UiRect::top(px(16)), justify_content: JustifyContent::SpaceBetween }
+        on(move |_: On<Activate>, mut sections: ResMut<PanelSections>| {
+            match section {
+                PanelSection::Setup => sections.setup = !sections.setup,
+                PanelSection::Help => sections.help = !sections.help,
+            }
+        })
+        Children [({ui_text("", 16.0)} SectionLabel({section}))]
+    }
+}
+
+fn sync_panel_sections(
+    sections: Res<PanelSections>,
+    mut bodies: Query<(&SectionBody, &mut Node)>,
+    mut labels: Query<(&SectionLabel, &mut Text)>,
+) {
+    if !sections.is_changed() {
+        return;
+    }
+    for (body, mut node) in &mut bodies {
+        node.display = if sections.is_open(body.0) {
+            Display::Flex
+        } else {
+            Display::None
+        };
+    }
+    for (label, mut text) in &mut labels {
+        let caption = match label.0 {
+            PanelSection::Setup => "Run setup",
+            PanelSection::Help => "Controls & shortcuts",
+        };
+        text.0 = format!(
+            "{}  {caption}",
+            if sections.is_open(label.0) {
+                "−"
+            } else {
+                "+"
+            }
+        );
+    }
+}
+
+fn edit_tool_button(
+    caption: &'static str,
+    shortcut: &'static str,
+    tool: EditTool,
+    artwork: Option<Handle<Image>>,
+) -> impl Scene {
+    let eraser = artwork.is_none();
+    bsn! {
+        @FeathersButton
+        Node {
+            flex_grow: 1.0, flex_basis: px(0), min_width: px(0), height: px(98),
+            padding: UiRect::all(px(6)), flex_direction: FlexDirection::Column, row_gap: px(4),
+        }
+        EditToolButton({tool})
+        on(move |_: On<Activate>, mut edit: ResMut<EditMode>| { edit.select(tool); })
+        Children [
+            {artwork.map(|image| bsn! {
+                Node { width: px(36), height: px(36), flex_shrink: 0.0 }
+                ImageNode { image: {image} }
+            })},
+            {eraser.then(|| bsn! {
+                Node { height: px(36), align_items: AlignItems::Center }
+                Children [ui_text("×", 30.0)]
+            })},
+            (Text(caption) ThemedText),
+            label_small(shortcut),
+        ]
+    }
+}
+
+fn population_card(
+    caption: &'static str,
+    index: usize,
+    artwork: Option<Handle<Image>>,
+) -> impl Scene {
+    bsn! {
+        Node {
+            flex_grow: 1.0, flex_basis: px(0), min_width: px(0),
+            height: px(68), padding: UiRect::axes(px(12), px(8)),
+            column_gap: px(10), align_items: AlignItems::Center,
+            border_radius: BorderRadius::all(px(8)),
+        }
+        BackgroundColor(TOOLTIP_BG)
+        Children [
+            {artwork.map(|image| bsn! {
+                Node { width: px(32), height: px(32), flex_shrink: 0.0 }
+                ImageNode { image: {image} }
+            })},
+            (
+                Node { flex_direction: FlexDirection::Column, row_gap: px(2), min_width: px(0) }
+                Children [
+                    label_small(caption),
+                    ({ui_text("0", 24.0)} HudText({index})),
+                ]
+            ),
+            (Node { flex_grow: 1.0 }),
+            ({ui_text("0", 12.0)} HudText({index + 6}) TextColor(INK_SECONDARY)),
+        ]
+    }
+}
+
+fn spawn_toolbar(commands: &mut Commands, camera: Entity, assets: &CreatureAssets) {
     commands.spawn_scene(bsn! {
         Node {
             position_type: PositionType::Absolute,
             left: px(PANEL_WIDTH), right: px(0), top: px(0),
             height: px(TOOLBAR_HEIGHT),
             padding: UiRect::axes(px(18), px(12)),
-            flex_direction: FlexDirection::Column, row_gap: px(10),
+            flex_direction: FlexDirection::Column, row_gap: px(8),
         }
         ThemeBackgroundColor(tokens::WINDOW_BG)
         Children [
@@ -1429,6 +2096,14 @@ fn spawn_toolbar(commands: &mut Commands, camera: Entity) {
                     run_button("+", RunAction::Faster),
                     (Node { flex_grow: 1.0 }),
                     run_button("Fit board", RunAction::Fit),
+                ]
+            ),
+            (
+                Node { column_gap: px(8) }
+                Children [
+                    population_card("Aphids", 0, Some(assets.aphid.clone())),
+                    population_card("Ladybugs", 1, Some(assets.ladybug.clone())),
+                    population_card("Food available", 2, None),
                 ]
             ),
             (
@@ -1479,7 +2154,140 @@ fn food_scale() -> impl Scene {
     }
 }
 
-fn spawn_panel(commands: &mut Commands, params: &Params, ui_camera: Entity) {
+/// The food details only say anything over the food view's shading, so
+/// switching them on selects that view. Switching them off then hands the view
+/// back, rather than leaving the board tinted with no details on it. A view
+/// picked from the buttons owns itself: the details come and go under it.
+fn set_food_details(on: bool, overlay: &mut FoodOverlay, view: &mut BoardView) {
+    overlay.on = on;
+    if on {
+        overlay.selected_view = *view != BoardView::Food;
+        if *view != BoardView::Food {
+            *view = BoardView::Food;
+        }
+    } else if std::mem::take(&mut overlay.selected_view) {
+        *view = BoardView::Population;
+    }
+}
+
+fn board_view_button(caption: &'static str, view: BoardView) -> impl Scene {
+    bsn! {
+        @FeathersButton
+        Node { flex_grow: 1.0 }
+        ViewButton({view})
+        on(move |_: On<Activate>, mut current: ResMut<BoardView>, mut overlay: ResMut<FoodOverlay>| {
+            *current = view;
+            overlay.bypass_change_detection().selected_view = false;
+        })
+        Children [(Text(caption) ThemedText)]
+    }
+}
+
+fn sync_board_view(
+    view: Res<BoardView>,
+    mut buttons: Query<(&ViewButton, &mut ButtonVariant)>,
+    mut controls: Query<&mut Node, With<FoodControls>>,
+) {
+    if !view.is_changed() {
+        return;
+    }
+    for (button, mut variant) in &mut buttons {
+        *variant = if button.0 == *view {
+            ButtonVariant::Primary
+        } else {
+            ButtonVariant::Normal
+        };
+    }
+    for mut node in &mut controls {
+        node.display = if *view == BoardView::Food {
+            Display::Flex
+        } else {
+            Display::None
+        };
+    }
+}
+
+/// One marker per occupied cell and species replaces illegible distant sprites.
+fn population_mesh(board: &Board) -> Mesh {
+    let mut mesh = OverlayMesh::default();
+    for row in 0..board.rows() {
+        for col in 0..board.cols() {
+            let Some(cell) = board.cell_snapshot(row, col) else {
+                continue;
+            };
+            let mixed = cell.aphids > 0 && cell.ladybugs > 0;
+            let centre = cell_to_world(row, col);
+            for (index, count) in [cell.aphids, cell.ladybugs].into_iter().enumerate() {
+                if count == 0 {
+                    continue;
+                }
+                let offset = if mixed {
+                    Vec2::new(-1.0, 1.0) * CELL * 0.2 * if index == 0 { 1.0 } else { -1.0 }
+                } else {
+                    Vec2::ZERO
+                };
+                let radius = CELL * if mixed { 0.18 } else { 0.27 };
+                let at = centre + offset;
+                mesh.disc(at, radius + 1.4, Color::srgb_u8(10, 16, 17));
+                if index == 0 {
+                    mesh.disc(at, radius, BADGE_APHID);
+                } else {
+                    mesh.diamond(at, radius, BADGE_LADYBUG);
+                }
+            }
+        }
+    }
+    mesh.into_mesh()
+}
+
+fn update_board_detail(
+    cameras: Query<(&Camera, &Projection), With<BoardCamera>>,
+    board: Res<BoardRes>,
+    revision: Res<Revision>,
+    mut detail: ResMut<BoardDetail>,
+    mut creatures: Query<&mut Visibility, (With<Creature>, Without<PopulationLayer>)>,
+    mut layer: Query<(&Mesh2d, &mut Visibility), With<PopulationLayer>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+) {
+    let Ok((camera, Projection::Orthographic(ortho))) = cameras.single() else {
+        return;
+    };
+    let Some(viewport) = camera.logical_viewport_size() else {
+        return;
+    };
+    let simplified = (CELL - GAP) * viewport.y / ortho.area.height() < DETAIL_MIN_CELL_PIXELS;
+    let changed = simplified != detail.simplified;
+    if changed {
+        detail.simplified = simplified;
+    }
+    if !(changed || revision.is_changed()) {
+        return;
+    }
+    for mut visibility in &mut creatures {
+        *visibility = if simplified {
+            Visibility::Hidden
+        } else {
+            Visibility::Inherited
+        };
+    }
+    if let Ok((handle, mut visibility)) = layer.single_mut() {
+        *visibility = if simplified {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
+        if simplified && let Some(mut mesh) = meshes.get_mut(&handle.0) {
+            *mesh = population_mesh(&board.0);
+        }
+    }
+}
+
+fn spawn_panel(
+    commands: &mut Commands,
+    params: &Params,
+    ui_camera: Entity,
+    assets: &CreatureAssets,
+) {
     let root = commands
         .spawn_scene(bsn! {
             Node { width: px(PANEL_WIDTH), height: percent(100) }
@@ -1521,58 +2329,82 @@ fn spawn_panel(commands: &mut Commands, params: &Params, ui_camera: Entity) {
                 Node { flex_direction: FlexDirection::Column, row_gap: px(8), flex_shrink: 0.0 }
                 TabPage({PanelTab::Overview})
                 Children [
-                    section_title("Population"),
-                    stat_row("Aphids", 0),
-                    stat_row("Ladybugs", 1),
-                    stat_row("Food available", 2),
-                    section_title("Last turn"),
+                    section_title("Latest activity"),
                     stat_row("Births", 3),
                     stat_row("Deaths", 4),
-                    section_title("Board layers"),
+                    section_title("Board view"),
+                    (
+                        Node { column_gap: px(6) }
+                        Children [board_view_button("Population", BoardView::Population), board_view_button("Food", BoardView::Food)]
+                    ),
+                    label_small("Aphids: green circles · Ladybugs: red diamonds at distant zoom."),
+                    (
+                        Node { flex_direction: FlexDirection::Column, row_gap: px(6) }
+                        FoodControls
+                        Children [
                     (
                         @FeathersCheckbox { @caption: bsn! { Text("Show food details (F)") ThemedText } }
                         FoodOverlayToggle
-                        on(|change: On<ValueChange<bool>>, mut overlay: ResMut<FoodOverlay>| { overlay.0 = change.value; })
+                        on(|change: On<ValueChange<bool>>, mut overlay: ResMut<FoodOverlay>, mut view: ResMut<BoardView>| { set_food_details(change.value, &mut overlay, &mut view); })
                     ),
                     food_scale(),
-                    section_title("Navigate"),
-                    label("Drag to pan · Scroll to zoom"),
-                    label("Fit board restores the full view."),
-                    section_title("Run setup"),
-                    stat_row("Run seed", 5),
-                    (
-                        Node { margin: UiRect::vertical(px(4)) }
-                        Children [
-                            (
-                                @FeathersTextInputContainer
-                                Children [(@FeathersTextInput { @max_characters: {Some(SEED_DIGITS)} } SeedField)]
-                            ),
                         ]
                     ),
+                    section_toggle(PanelSection::Setup),
                     (
-                        @FeathersButton
-                        on(|_: On<Activate>, mut requests: MessageWriter<Reseed>| { requests.write(Reseed); })
-                        Children [(Text("Restart with this seed") ThemedText)]
+                        Node { display: Display::None, flex_direction: FlexDirection::Column, row_gap: px(8), flex_shrink: 0.0 }
+                        SectionBody({PanelSection::Setup})
+                        Children [
+                            stat_row("Run seed", 5),
+                            (
+                                Node { margin: UiRect::vertical(px(4)) }
+                                Children [
+                                    (
+                                        @FeathersTextInputContainer
+                                        Node { border: UiRect::ZERO, padding: UiRect::horizontal(px(8)) }
+                                        Children [(@FeathersTextInput { @max_characters: {Some(SEED_DIGITS)} } SeedField)]
+                                    ),
+                                ]
+                            ),
+                            (
+                                @FeathersButton
+                                on(|_: On<Activate>, mut requests: MessageWriter<Reseed>| { requests.write(Reseed); })
+                                Children [(Text("Restart with this seed") ThemedText)]
+                            ),
+                            label_small("Digits only. Enter, or the button, restarts the run from this seed."),
+                            label("Reset restores the last saved setup, or the board loaded at launch, using the current parameters and seed."),
+                            run_button("Save setup (S)", RunAction::Save),
+                            label_small(save_destination()),
+                            label_small("Food and creature life values are not saved; they are regenerated on load."),
+                        ]
                     ),
-                    label_small("Digits only. Enter, or the button, restarts the run from this seed."),
-                    label("Reset restores the last saved setup, or the board loaded at launch, using the current parameters and seed."),
-                    run_button("Save setup (S)", RunAction::Save),
-                    label_small(save_destination()),
-                    label_small("Food and creature life values are not saved; they are regenerated on load."),
+                    section_toggle(PanelSection::Help),
+                    (
+                        Node { display: Display::None, flex_direction: FlexDirection::Column, row_gap: px(10), flex_shrink: 0.0 }
+                        SectionBody({PanelSection::Help})
+                        Children [
+                            label("Drag to pan · Scroll to zoom"),
+                            label("Home · Fit the whole board"),
+                            label("Space · Play / pause\nN · Advance one turn\n[ / ] · Change speed\nR · Reset to saved setup"),
+                            label("A / L · Place a creature\nX · Erase a cell\nE · Toggle editing\nZ · Undo an edit\nS · Save setup"),
+                            label_small("When a control has focus, Space activates it. Escape returns to playback shortcuts."),
+                        ]
+                    ),
                 ]
             ),
             (
                 Node { display: Display::None, flex_direction: FlexDirection::Column, flex_shrink: 0.0 }
                 TabPage({PanelTab::Parameters})
                 Children [
-                    label("Probabilities (%) · apply to future turns"),
-                    section_title("Aphids"),
+                    label("Probabilities · apply to future turns"),
+                    label_small("Type a percentage, then Enter or leave the field. • marks a change from the saved setup."),
+                    param_group("Aphids", 0, 4),
                     param_row(0, params.get(0)), param_row(1, params.get(1)),
                     param_row(2, params.get(2)), param_row(3, params.get(3)),
-                    section_title("Ladybugs"),
+                    param_group("Ladybugs", 4, 8),
                     param_row(4, params.get(4)), param_row(5, params.get(5)),
                     param_row(6, params.get(6)), param_row(7, params.get(7)),
-                    section_title("Environment"),
+                    param_group("Environment", 8, 9),
                     param_row(8, params.get(8)),
                     label_small("Focus a slider and use arrow keys for precise changes."),
                 ]
@@ -1581,24 +2413,27 @@ fn spawn_panel(commands: &mut Commands, params: &Params, ui_camera: Entity) {
                 Node { display: Display::None, flex_direction: FlexDirection::Column, row_gap: px(12), flex_shrink: 0.0 }
                 TabPage({PanelTab::Edit})
                 Children [
-                    section_title("Edit cells"),
+                    section_title("Shape the ecosystem"),
+                    ({ui_text("Choose a tool to start editing", 14.0)} EditStatus),
                     (
-                        @FeathersCheckbox { @caption: bsn! { Text("Enable editing (E)") ThemedText } }
-                        EditToggle
-                        on(|change: On<ValueChange<bool>>, mut edit: ResMut<EditMode>| { edit.enabled = change.value; })
-                    ),
-                    label("Creature to place"),
-                    (
-                        Node { column_gap: px(16) }
-                        RadioGroup on(on_edit_tool_changed)
+                        Node { column_gap: px(6) }
                         Children [
-                            (@FeathersRadio { @caption: bsn! { Text("Aphid (A)") ThemedText } } EditToolRadio({EditTool::Aphid})),
-                            (@FeathersRadio { @caption: bsn! { Text("Ladybug (L)") ThemedText } } EditToolRadio({EditTool::Ladybug})),
+                            edit_tool_button("Aphid", "A", EditTool::Aphid, Some(assets.aphid.clone())),
+                            edit_tool_button("Ladybug", "L", EditTool::Ladybug, Some(assets.ladybug.clone())),
+                            edit_tool_button("Erase", "X", EditTool::Erase, None),
                         ]
                     ),
-                    label("Left click to add a creature.\nRight click to remove one."),
-                    label("Editing pauses the run. Each change restarts the turn count and history."),
-                    label("Press Play to leave editing and run the simulation."),
+                    label("Click to place. Right click removes one of the selected species."),
+                    label("Erase clears all creatures in a cell; food stays in place."),
+                    (
+                        @FeathersButton
+                        UndoButton
+                        on(|_: On<Activate>, mut actions: MessageWriter<RunAction>| { actions.write(RunAction::Undo); })
+                        Children [(Text("Undo edit (Z)") ThemedText)]
+                    ),
+                    label_small("Edits restart the turn count and chart. Undo restores the previous board and history, up to 20 edits."),
+                    run_button("Done · return to paused view", RunAction::FinishEditing),
+                    label_small("Play resumes the simulation. Advancing a turn clears edit undo."),
                 ]
             ),
         ]
@@ -1716,21 +2551,54 @@ fn on_prob_changed(
         .entity(change.source)
         .insert(SliderValue(change.value));
 
-    if let Ok(slider) = sliders.get(change.source) {
-        params.set(slider.0, (change.value / 100.0).clamp(0.0, 1.0) as f64);
+    if let Ok(slider) = sliders.get(change.source)
+        && change.value.is_finite()
+    {
+        params.set(
+            slider.0,
+            (f64::from(change.value) * 10.0).round().clamp(0.0, 1000.0) / 1000.0,
+        );
     }
 }
 
 /// Pushes edited parameters into the board. Deliberately does not bump
 /// `Revision`, so tweaking a slider never triggers a full board repaint.
-fn apply_params(params: Res<Params>, mut board: ResMut<BoardRes>) {
+fn apply_params(
+    params: Res<Params>,
+    mut board: ResMut<BoardRes>,
+    mut history: ResMut<History>,
+    stats: Res<Stats>,
+) {
     if !params.is_changed() {
         return;
     }
 
-    board.0.set_aphid_params(params.aphid);
-    board.0.set_ladybug_params(params.ladybug);
-    board.0.set_food_params(params.food);
+    apply_parameter_values(&params, &mut board.0, &mut history, stats.turn);
+}
+
+fn apply_parameter_values(params: &Params, board: &mut Board, history: &mut History, turn: usize) {
+    let previous = Params {
+        aphid: board.aphid_params(),
+        ladybug: board.ladybug_params(),
+        food: board.food_params(),
+    };
+    for index in 0..9 {
+        if (previous.get(index) - params.get(index)).abs() > 1e-9 {
+            let event = history.event(turn);
+            let from = event.changes[index].map_or(previous.get(index), |(from, _)| from);
+            event.changes[index] = if (from - params.get(index)).abs() > 1e-9 {
+                Some((from, params.get(index)))
+            } else {
+                None
+            };
+        }
+    }
+    history
+        .1
+        .retain(|event| event.has_rules() || event.extinctions.iter().any(|extinct| *extinct));
+    board.set_aphid_params(params.aphid);
+    board.set_ladybug_params(params.ladybug);
+    board.set_food_params(params.food);
 }
 
 /// Splits the window: panel on the left, board top-right, chart bottom-right.
@@ -1738,7 +2606,8 @@ fn apply_params(params: Res<Params>, mut board: ResMut<BoardRes>) {
 /// hover picking right for free, since `viewport_to_world_2d` is
 /// viewport-aware.
 fn layout_viewports(
-    windows: Query<&Window, Changed<Window>>,
+    windows: Query<Ref<Window>>,
+    panel_state: Res<ChartPanel>,
     mut board_camera: Query<&mut Camera, (With<BoardCamera>, Without<ChartCamera>)>,
     mut chart_camera: Query<(&mut Camera, &mut Projection), With<ChartCamera>>,
     mut gizmo_config: ResMut<GizmoConfigStore>,
@@ -1752,10 +2621,15 @@ fn layout_viewports(
         return;
     };
 
+    if !(window.is_changed() || panel_state.is_changed()) {
+        return;
+    }
+    let height = panel_state.effective_height(window.height());
+    chart.is_active = !panel_state.collapsed;
     let scale = window.resolution.scale_factor();
     let physical = window.resolution.physical_size();
     let panel = (PANEL_WIDTH * scale).round() as u32;
-    let strip = (CHART_HEIGHT * scale).round() as u32;
+    let strip = (height * scale).round() as u32;
     let toolbar = (TOOLBAR_HEIGHT * scale).round() as u32;
     if physical.x <= panel || physical.y <= strip + toolbar {
         return;
@@ -1779,10 +2653,10 @@ fn layout_viewports(
     if let Projection::Orthographic(ref mut ortho) = *projection {
         ortho.scaling_mode = ScalingMode::Fixed {
             width: logical_width,
-            height: CHART_HEIGHT,
+            height,
         };
     }
-    chart_size.0 = logical_width;
+    chart_size.set_if_neq(ChartSize(logical_width, height));
 
     // Gizmo line width is in physical pixels (the line shader measures against
     // `view.viewport`), so a 1px hairline and a 2px series line have to be
@@ -1792,18 +2666,108 @@ fn layout_viewports(
     gizmo_config.config_mut::<BoardEditGizmos>().0.line.width = 2.0 * scale;
 }
 
+fn chart_resize_input(
+    windows: Query<&Window>,
+    mouse: Res<ButtonInput<MouseButton>>,
+    mut panel: ResMut<ChartPanel>,
+) {
+    let Ok(window) = windows.single() else {
+        return;
+    };
+    if mouse.just_released(MouseButton::Left) && panel.dragging {
+        panel.dragging = false;
+    }
+    let Some(cursor) = window.cursor_position() else {
+        return;
+    };
+    let edge = window.height() - panel.effective_height(window.height());
+    if !panel.collapsed
+        && mouse.just_pressed(MouseButton::Left)
+        && cursor.x >= PANEL_WIDTH
+        && (cursor.y - edge).abs() <= 5.0
+    {
+        panel.dragging = true;
+    }
+    if panel.dragging {
+        panel.height = (window.height() - cursor.y).clamp(
+            CHART_MIN_HEIGHT,
+            (window.height() - TOOLBAR_HEIGHT - 180.0).clamp(CHART_MIN_HEIGHT, 420.0),
+        );
+    }
+}
+
+type ChartNodes<'w, 's> = Query<
+    'w,
+    's,
+    (
+        Has<ChartRoot>,
+        Has<ChartExpandedOnly>,
+        Has<ChartEmpty>,
+        &'static mut Node,
+    ),
+    Or<(With<ChartRoot>, With<ChartExpandedOnly>, With<ChartEmpty>)>,
+>;
+
+fn sync_chart_panel(
+    size: Res<ChartSize>,
+    panel: Res<ChartPanel>,
+    history: Res<History>,
+    mut nodes: ChartNodes,
+    mut labels: Query<&mut Text, With<ChartToggleText>>,
+    mut backgrounds: Query<&mut BackgroundColor, With<ChartRoot>>,
+) {
+    if !(size.is_changed() || panel.is_changed() || history.is_changed()) {
+        return;
+    }
+    for (root, expanded, empty, mut node) in &mut nodes {
+        if root {
+            node.height = px(size.1);
+        }
+        if expanded {
+            node.display = if panel.collapsed {
+                Display::None
+            } else {
+                Display::Flex
+            };
+        }
+        if empty {
+            node.display = if !panel.collapsed && history.0.len() < 2 {
+                Display::Flex
+            } else {
+                Display::None
+            };
+            node.top = px(PLOT_TOP + (size.1 - PLOT_TOP - PLOT_BOTTOM) * 0.4);
+        }
+    }
+    for mut label in &mut labels {
+        label.0 = if panel.collapsed {
+            "Show chart"
+        } else {
+            "Hide chart"
+        }
+        .into();
+    }
+    for mut background in &mut backgrounds {
+        background.0 = if panel.collapsed {
+            CHART_SURFACE
+        } else {
+            Color::NONE
+        };
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Population history chart
 // ---------------------------------------------------------------------------
 
 /// Plot area inside the strip, in strip-local logical pixels (origin top-left,
 /// y down), shared by the marks and the text overlay so they cannot disagree.
-fn plot_rect(width: f32) -> Rect {
+fn plot_rect(width: f32, height: f32) -> Rect {
     Rect::new(
         PLOT_LEFT,
         PLOT_TOP,
         (width - PLOT_RIGHT).max(PLOT_LEFT + 1.0),
-        CHART_HEIGHT - PLOT_BOTTOM,
+        height - PLOT_BOTTOM,
     )
 }
 
@@ -1830,8 +2794,8 @@ fn value_y(value: usize, top: usize, plot: Rect) -> f32 {
 }
 
 /// Strip-local point to chart-camera world space (origin centre, y up).
-fn chart_world(point: Vec2, width: f32) -> Vec2 {
-    Vec2::new(point.x - width * 0.5, CHART_HEIGHT * 0.5 - point.y)
+fn chart_world(point: Vec2, width: f32, height: f32) -> Vec2 {
+    Vec2::new(point.x - width * 0.5, height * 0.5 - point.y)
 }
 
 /// A clean y-axis for populations up to `max`: returns `(top, step)` with a
@@ -1877,8 +2841,10 @@ fn spawn_chart_overlay(commands: &mut Commands, ui_camera: Entity, font: Handle<
         ..default()
     };
 
-    commands
+    let root = commands
         .spawn((
+            ChartRoot,
+            BackgroundColor(Color::NONE),
             UiTargetCamera(ui_camera),
             Node {
                 position_type: PositionType::Absolute,
@@ -1902,13 +2868,16 @@ fn spawn_chart_overlay(commands: &mut Commands, ui_camera: Entity, font: Handle<
             // Legend, always present for two series. Direct end labels only
             // supplement it.
             strip
-                .spawn(Node {
-                    right: px(16),
-                    top: px(15),
-                    align_items: AlignItems::Center,
-                    column_gap: px(6),
-                    ..absolute()
-                })
+                .spawn((
+                    ChartExpandedOnly,
+                    Node {
+                        left: px(16),
+                        top: px(42),
+                        align_items: AlignItems::Center,
+                        column_gap: px(6),
+                        ..absolute()
+                    },
+                ))
                 .with_children(|legend| {
                     for (index, name) in CHART_SERIES_NAMES.into_iter().enumerate() {
                         let margin = if index > 0 {
@@ -1921,6 +2890,58 @@ fn spawn_chart_overlay(commands: &mut Commands, ui_camera: Entity, font: Handle<
                     }
                 });
 
+            strip
+                .spawn((
+                    ChartExpandedOnly,
+                    Node {
+                        right: px(16),
+                        top: px(42),
+                        align_items: AlignItems::Center,
+                        column_gap: px(6),
+                        ..absolute()
+                    },
+                ))
+                .with_children(|legend| {
+                    legend.spawn((
+                        Node {
+                            width: px(6),
+                            height: px(6),
+                            border: UiRect::all(px(1)),
+                            margin: UiRect::right(px(3)),
+                            ..default()
+                        },
+                        BorderColor::all(EVENT_RULES),
+                        UiTransform::from_rotation(Rot2::radians(std::f32::consts::FRAC_PI_4)),
+                    ));
+                    legend.spawn(text("rules changed   × extinction", 12.0, INK_SECONDARY));
+                });
+            strip.spawn((
+                ChartEmpty,
+                Node {
+                    left: px(16),
+                    right: px(16),
+                    top: px(100),
+                    justify_content: JustifyContent::Center,
+                    ..absolute()
+                },
+                text(
+                    "Run the simulation to build population history.",
+                    14.0,
+                    INK_SECONDARY,
+                ),
+            ));
+            strip.spawn((
+                ChartExpandedOnly,
+                Node {
+                    left: percent(43),
+                    right: percent(43),
+                    top: px(0),
+                    height: px(3),
+                    border_radius: BorderRadius::all(px(2)),
+                    ..absolute()
+                },
+                BackgroundColor(BASELINE),
+            ));
             for index in 0..6 {
                 strip.spawn((
                     ChartLabel::YTick(index),
@@ -1938,6 +2959,7 @@ fn spawn_chart_overlay(commands: &mut Commands, ui_camera: Entity, font: Handle<
             // Axis title, right-aligned in the tick gutter on the x-tick row, so
             // the row reads "turn  0 ... 45 ... 90".
             strip.spawn((
+                ChartLabel::AxisTitle,
                 Node {
                     left: px(0),
                     top: px(CHART_HEIGHT - PLOT_BOTTOM + 8.0),
@@ -2010,8 +3032,39 @@ fn spawn_chart_overlay(commands: &mut Commands, ui_camera: Entity, font: Handle<
                                 row.spawn(text(name, 12.0, INK_SECONDARY));
                             });
                     }
+                    tooltip.spawn((ChartLabel::TooltipEvent, text("", 12.0, INK_SECONDARY)));
                 });
-        });
+        })
+        .id();
+    let controls = commands.spawn_scene(bsn! {
+        Node { position_type: PositionType::Absolute, right: px(16), top: px(8), column_gap: px(6), align_items: AlignItems::Center }
+        Children [
+            label_small("Height"),
+            (
+                @FeathersButton
+                ChartControlButton({ChartAction::Smaller})
+                on(|_: On<Activate>, mut panel: ResMut<ChartPanel>, windows: Query<&Window>| {
+                    if let Ok(window) = windows.single() { panel.apply(ChartAction::Smaller, window.height()); }
+                })
+                Children [(Text("−") ThemedText)]
+            ),
+            (
+                @FeathersButton
+                ChartControlButton({ChartAction::Larger})
+                on(|_: On<Activate>, mut panel: ResMut<ChartPanel>, windows: Query<&Window>| {
+                    if let Ok(window) = windows.single() { panel.apply(ChartAction::Larger, window.height()); }
+                })
+                Children [(Text("+") ThemedText)]
+            ),
+            (
+                @FeathersButton
+                ChartControlButton({ChartAction::Toggle})
+                on(|_: On<Activate>, mut panel: ResMut<ChartPanel>| { panel.apply(ChartAction::Toggle, 0.0); })
+                Children [(Text("Hide chart") ThemedText ChartToggleText)]
+            ),
+        ]
+    }).id();
+    commands.entity(root).add_child(controls);
 }
 
 /// Legends and tooltips key a line series with a short stroke rather than a
@@ -2100,32 +3153,73 @@ fn set_checked(commands: &mut Commands, entity: Entity, checked: bool) {
     }
 }
 
-/// Mirrors `EditMode` onto the panel's checkbox and radios, so keys and the
-/// play button update them too.
+/// Tool selection is shared by pointer controls, shortcuts and playback.
 fn sync_edit_controls(
-    mut commands: Commands,
     edit: Res<EditMode>,
-    toggles: Query<Entity, With<EditToggle>>,
-    radios: Query<(Entity, &EditToolRadio)>,
+    mut buttons: Query<(&EditToolButton, &mut ButtonVariant)>,
 ) {
     if !edit.is_changed() {
         return;
     }
-    for toggle in &toggles {
-        set_checked(&mut commands, toggle, edit.enabled);
-    }
-    for (radio, tool) in &radios {
-        set_checked(&mut commands, radio, tool.0 == edit.tool);
+    for (tool, mut variant) in &mut buttons {
+        *variant = if edit.enabled && tool.0 == edit.tool {
+            ButtonVariant::Primary
+        } else {
+            ButtonVariant::Normal
+        };
     }
 }
 
-fn on_edit_tool_changed(
-    change: On<ValueChange<Entity>>,
-    radios: Query<&EditToolRadio>,
-    mut edit: ResMut<EditMode>,
+fn update_edit_palette(
+    mut commands: Commands,
+    edit: Res<EditMode>,
+    history: Res<EditHistory>,
+    mut status: Query<&mut Text, With<EditStatus>>,
+    undo: Query<(Entity, Has<InteractionDisabled>), With<UndoButton>>,
 ) {
-    if let Ok(radio) = radios.get(change.value) {
-        edit.select(radio.0);
+    if edit.is_changed() {
+        for mut text in &mut status {
+            text.0 = if edit.enabled {
+                "Editing · simulation paused"
+            } else {
+                "Choose a tool to start editing"
+            }
+            .into();
+        }
+    }
+    if history.is_changed() {
+        for (entity, disabled) in &undo {
+            if history.0.is_empty() && !disabled {
+                commands.entity(entity).insert(InteractionDisabled);
+            } else if !history.0.is_empty() && disabled {
+                commands.entity(entity).remove::<InteractionDisabled>();
+            }
+        }
+    }
+}
+
+fn update_edit_preview(
+    hovered: Res<Hovered>,
+    edit: Res<EditMode>,
+    assets: Res<CreatureAssets>,
+    mut preview: Query<(&mut Sprite, &mut Transform, &mut Visibility), With<EditPreview>>,
+) {
+    let Ok((mut sprite, mut transform, mut visibility)) = preview.single_mut() else {
+        return;
+    };
+    if let Some((row, col)) = hovered.0
+        && edit.enabled
+        && edit.tool != EditTool::Erase
+    {
+        sprite.image = if edit.tool == EditTool::Aphid {
+            assets.aphid.clone()
+        } else {
+            assets.ladybug.clone()
+        };
+        transform.translation = cell_to_world(row, col).extend(5.0);
+        *visibility = Visibility::Inherited;
+    } else {
+        *visibility = Visibility::Hidden;
     }
 }
 
@@ -2179,24 +3273,28 @@ fn chart_hover(
         return;
     };
     let len = history.0.len();
-    let plot = plot_rect(size.0);
+    let plot = plot_rect(size.0, size.1);
 
-    let next = match probe {
-        Some(probe) => (len > 0).then(|| probe.0.min(len - 1)),
-        None => window.cursor_position().and_then(|cursor| {
-            let local = Vec2::new(
-                cursor.x - PANEL_WIDTH,
-                cursor.y - (window.height() - CHART_HEIGHT),
-            );
-            // A little wider than the plot, so the first and last turns are as
-            // easy to reach as the ones in the middle.
-            let target = Rect::from_corners(
-                plot.min - Vec2::new(12.0, 0.0),
-                plot.max + Vec2::new(12.0, 0.0),
-            );
-            (len > 0 && size.0 > 0.0 && target.contains(local))
-                .then(|| nearest_index(local.x, len, plot))
-        }),
+    let next = if size.1 <= CHART_COLLAPSED_HEIGHT || len < 2 {
+        None
+    } else {
+        match probe {
+            Some(probe) => (len > 0).then(|| probe.0.min(len - 1)),
+            None => window.cursor_position().and_then(|cursor| {
+                let local = Vec2::new(
+                    cursor.x - PANEL_WIDTH,
+                    cursor.y - (window.height() - size.1),
+                );
+                // A little wider than the plot, so the first and last turns are as
+                // easy to reach as the ones in the middle.
+                let target = Rect::from_corners(
+                    plot.min - Vec2::new(12.0, 0.0),
+                    plot.max + Vec2::new(12.0, 0.0),
+                );
+                (len > 0 && size.0 > 0.0 && target.contains(local))
+                    .then(|| nearest_index(local.x, len, plot))
+            }),
+        }
     };
 
     // Only write on change, so the label layout below does not rerun every frame.
@@ -2214,16 +3312,22 @@ fn draw_chart_marks(
     mut dots: Query<(&EndDot, &mut Transform, &mut Visibility)>,
 ) {
     let width = size.0;
+    if size.1 <= CHART_COLLAPSED_HEIGHT || history.0.len() < 2 {
+        for (_, _, mut visibility) in &mut dots {
+            *visibility = Visibility::Hidden;
+        }
+        return;
+    }
     let Some(last) = history.0.back() else {
         return;
     };
     if width <= PLOT_LEFT + PLOT_RIGHT {
         return;
     }
-    let plot = plot_rect(width);
+    let plot = plot_rect(width, size.1);
     let len = history.0.len();
     let (top, step) = nice_axis(history_peak(&history));
-    let world = |x: f32, y: f32| chart_world(Vec2::new(x, y), width);
+    let world = |x: f32, y: f32| chart_world(Vec2::new(x, y), width, size.1);
 
     // Recessive solid hairlines; the zero line is the baseline, a step brighter.
     for value in (0..=top).step_by(step) {
@@ -2259,6 +3363,51 @@ fn draw_chart_marks(
             for (start, end) in dash_segments(&points) {
                 series.linestrip_2d([start, end], colour);
             }
+        }
+    }
+
+    for event in &history.1 {
+        let Some(index) = history.0.iter().position(|point| point.turn == event.turn) else {
+            continue;
+        };
+        let x = history_x(index, len, plot);
+        let colour = if event.has_rules() {
+            EVENT_RULES
+        } else {
+            INK_SECONDARY
+        };
+        for y in (plot.min.y as i32..plot.max.y as i32).step_by(6) {
+            grid.line_2d(
+                world(x, y as f32),
+                world(x, (y as f32 + 2.0).min(plot.max.y)),
+                GRIDLINE,
+            );
+        }
+        let y = plot.min.y + 5.0;
+        if event.has_rules() {
+            series.linestrip_2d(
+                [
+                    world(x, y - 4.0),
+                    world(x + 4.0, y),
+                    world(x, y + 4.0),
+                    world(x - 4.0, y),
+                    world(x, y - 4.0),
+                ],
+                colour,
+            );
+        }
+        if event.extinctions.iter().any(|extinct| *extinct) {
+            let y = if event.has_rules() { y + 12.0 } else { y };
+            series.line_2d(
+                world(x - 3.0, y - 3.0),
+                world(x + 3.0, y + 3.0),
+                INK_PRIMARY,
+            );
+            series.line_2d(
+                world(x - 3.0, y + 3.0),
+                world(x + 3.0, y - 3.0),
+                INK_PRIMARY,
+            );
         }
     }
 
@@ -2332,7 +3481,7 @@ fn update_chart_labels(
     if width <= PLOT_LEFT + PLOT_RIGHT {
         return;
     }
-    let plot = plot_rect(width);
+    let plot = plot_rect(width, size.1);
     let len = history.0.len();
     let (top, step) = nice_axis(history_peak(&history));
     let y_ticks: Vec<usize> = (0..=top).step_by(step).collect();
@@ -2351,6 +3500,9 @@ fn update_chart_labels(
     for (label, mut node, text) in &mut labels {
         let mut show = true;
         match *label {
+            ChartLabel::AxisTitle => {
+                node.top = px(plot.max.y + 8.0);
+            }
             ChartLabel::YTick(index) => match y_ticks.get(index) {
                 Some(&value) => {
                     node.top = px(value_y(value, top, plot) - 8.0);
@@ -2386,6 +3538,12 @@ fn update_chart_labels(
                 }
                 None => show = false,
             },
+            ChartLabel::TooltipEvent => {
+                let event = hovered
+                    .and_then(|(_, point)| history.1.iter().find(|event| event.turn == point.turn));
+                show = event.is_some();
+                set_text(text, event.map_or_else(String::new, HistoryEvent::caption));
+            }
             ChartLabel::TooltipTurn => {
                 if let Some((_, point)) = hovered {
                     set_text(text, format!("turn {}", point.turn));
@@ -2398,6 +3556,7 @@ fn update_chart_labels(
             }
         }
 
+        show &= size.1 > CHART_COLLAPSED_HEIGHT && history.0.len() > 1;
         let display = if show { Display::Flex } else { Display::None };
         if node.display != display {
             node.display = display;
@@ -2421,7 +3580,7 @@ fn keyboard_controls(
     keys: Res<ButtonInput<KeyCode>>,
     mut focus: ResMut<InputFocus>,
     mut actions: MessageWriter<RunAction>,
-    mut overlay: ResMut<FoodOverlay>,
+    (mut overlay, mut view): (ResMut<FoodOverlay>, ResMut<BoardView>),
     mut edit: ResMut<EditMode>,
     mut active: ResMut<ActiveTab>,
     text_fields: Query<(), With<EditableText>>,
@@ -2448,6 +3607,7 @@ fn keyboard_controls(
         (KeyCode::BracketLeft, RunAction::Slower),
         (KeyCode::Home, RunAction::Fit),
         (KeyCode::KeyS, RunAction::Save),
+        (KeyCode::KeyZ, RunAction::Undo),
     ] {
         if keys.just_pressed(key) && !(key == KeyCode::Space && focus.get().is_some()) {
             actions.write(action);
@@ -2468,8 +3628,13 @@ fn keyboard_controls(
         active.0 = PanelTab::Edit;
         focus.clear();
     }
+    if keys.just_pressed(KeyCode::KeyX) {
+        edit.select(EditTool::Erase);
+        active.0 = PanelTab::Edit;
+        focus.clear();
+    }
     if keys.just_pressed(KeyCode::KeyF) {
-        overlay.0 = !overlay.0;
+        set_food_details(!overlay.on, &mut overlay, &mut view);
     }
 }
 
@@ -2504,7 +3669,21 @@ fn apply_run_actions(
                     sim.step();
                 }
             }
+            RunAction::FinishEditing => {
+                edit.enabled = false;
+                sim.playing.0 = false;
+            }
+            RunAction::Undo => {
+                if sim.undo() {
+                    // Parameter controls keep their current values after undo.
+                    let turn = sim.stats.turn;
+                    apply_parameter_values(&setup.params, &mut sim.board.0, &mut sim.history, turn);
+                    timer.0.reset();
+                    edit.enabled = true;
+                }
+            }
             RunAction::Reset => {
+                sim.edits.0.clear();
                 let mut random = Random::with_seed(setup.seed.0);
                 let mut board = Board::new();
                 creature_life_cycle::parse_simulation_config(
@@ -2622,6 +3801,7 @@ fn save_setup(
     mut start: ResMut<StartingSetup>,
     mut status: ResMut<StatusLine>,
     params: Res<Params>,
+    mut saved: ResMut<SavedParams>,
 ) {
     if !actions
         .read()
@@ -2642,6 +3822,7 @@ fn save_setup(
             // What was saved is the starting setup from now on, so Reset returns
             // to it instead of to the board loaded at launch.
             start.0 = creature_life_cycle::format_simulation_config(&board.0);
+            saved.0 = *params;
             status.set("Starting setup saved.", true);
         }
         Err(error) => status.set(format!("Save failed: {error}"), false),
@@ -2666,12 +3847,17 @@ fn expire_status(time: Res<Time>, mut status: ResMut<StatusLine>) {
 fn camera_controls(
     windows: Query<&Window>,
     mut camera: Query<(&mut Transform, &mut Projection), With<BoardCamera>>,
-    scroll: Res<AccumulatedMouseScroll>,
-    motion: Res<AccumulatedMouseMotion>,
-    mouse: Res<ButtonInput<MouseButton>>,
+    (scroll, motion, mouse): (
+        Res<AccumulatedMouseScroll>,
+        Res<AccumulatedMouseMotion>,
+        Res<ButtonInput<MouseButton>>,
+    ),
     mut pointer: ResMut<BoardPointer>,
     mut focus: ResMut<InputFocus>,
+    chart_size: Res<ChartSize>,
+    chart_panel: Res<ChartPanel>,
 ) {
+    let chart_height = chart_size.1;
     let (Ok(window), Ok((mut transform, mut projection))) = (windows.single(), camera.single_mut())
     else {
         return;
@@ -2680,7 +3866,11 @@ fn camera_controls(
     // Scrolling the panel or the chart must not zoom the board, and dragging a
     // slider must not pan it, so both only act when they start over the board.
     let cursor = window.cursor_position();
-    let over_board = cursor.is_some_and(|cursor| board_rect(window).contains(cursor));
+    let over_board = !chart_panel.dragging
+        && cursor.is_some_and(|cursor| {
+            board_rect(window, chart_height).contains(cursor)
+                && cursor.y < window.height() - chart_height - 5.0
+        });
     let buttons = [MouseButton::Left, MouseButton::Middle];
     if mouse.any_just_pressed(buttons) {
         if over_board {
@@ -2712,12 +3902,12 @@ fn camera_controls(
 
 /// The board's area in logical window coordinates: right of the panel, above
 /// the chart strip.
-fn board_rect(window: &Window) -> Rect {
+fn board_rect(window: &Window, chart_height: f32) -> Rect {
     Rect::new(
         PANEL_WIDTH,
         TOOLBAR_HEIGHT,
         window.width(),
-        (window.height() - CHART_HEIGHT).max(0.0),
+        (window.height() - chart_height).max(0.0),
     )
 }
 
@@ -2729,7 +3919,9 @@ fn hovered_cell(
     board: Res<BoardRes>,
     probe: Option<Res<ProbeCell>>,
     mut hovered: ResMut<Hovered>,
+    chart_size: Res<ChartSize>,
 ) {
+    let chart_height = chart_size.1;
     if let Some(probe) = probe {
         hovered.0 = Some(probe.0);
         return;
@@ -2740,7 +3932,7 @@ fn hovered_cell(
 
     hovered.0 = window
         .cursor_position()
-        .filter(|&cursor| board_rect(window).contains(cursor))
+        .filter(|&cursor| board_rect(window, chart_height).contains(cursor))
         .and_then(|cursor| camera.viewport_to_world_2d(camera_transform, cursor).ok())
         .and_then(|world| {
             let col = (world.x / CELL + 0.5).floor();
@@ -2772,6 +3964,7 @@ struct Simulation<'w> {
     revision: ResMut<'w, Revision>,
     history: ResMut<'w, History>,
     playing: ResMut<'w, Playing>,
+    edits: ResMut<'w, EditHistory>,
 }
 
 impl Simulation<'_> {
@@ -2779,6 +3972,24 @@ impl Simulation<'_> {
     /// always succeeds in bounds; removing does nothing on a cell without that
     /// kind of creature, and then the run carries on untouched.
     fn edit(&mut self, edit: CellEdit) -> bool {
+        let Some(cell) = self.board.0.cell_snapshot(edit.row, edit.col) else {
+            return false;
+        };
+        let can_change = match (edit.tool, edit.action) {
+            (EditTool::Erase, _) => cell.aphids + cell.ladybugs > 0,
+            (EditTool::Aphid, EditAction::Remove) => cell.aphids > 0,
+            (EditTool::Ladybug, EditAction::Remove) => cell.ladybugs > 0,
+            (_, EditAction::Add) => true,
+        };
+        if !can_change {
+            return false;
+        }
+        let snapshot = EditSnapshot {
+            board: self.board.0.clone(),
+            random: self.rng.0.clone(),
+            stats: self.stats.clone(),
+            history: self.history.clone(),
+        };
         let board = &mut self.board.0;
         let changed = match (edit.tool, edit.action) {
             (EditTool::Aphid, EditAction::Add) => board
@@ -2789,11 +4000,33 @@ impl Simulation<'_> {
                 .is_some(),
             (EditTool::Aphid, EditAction::Remove) => board.remove_aphid_at(edit.row, edit.col),
             (EditTool::Ladybug, EditAction::Remove) => board.remove_ladybug_at(edit.row, edit.col),
+            (EditTool::Erase, _) => {
+                while board.remove_aphid_at(edit.row, edit.col) {}
+                while board.remove_ladybug_at(edit.row, edit.col) {}
+                true
+            }
         };
         if changed {
+            if self.edits.0.len() == EDIT_UNDO_LIMIT {
+                self.edits.0.pop_front();
+            }
+            self.edits.0.push_back(snapshot);
             self.restart_from_edit();
         }
         changed
+    }
+
+    fn undo(&mut self) -> bool {
+        let Some(snapshot) = self.edits.0.pop_back() else {
+            return false;
+        };
+        self.board.0 = snapshot.board;
+        self.rng.0 = snapshot.random;
+        *self.stats = snapshot.stats;
+        *self.history = snapshot.history;
+        self.playing.0 = false;
+        self.revision.0 += 1;
+        true
     }
 
     /// An edited board is a new starting setup, as `after_board_edit` treats it
@@ -2809,9 +4042,11 @@ impl Simulation<'_> {
             births: 0,
             deaths: 0,
             extinct: summary.is_extinct(),
+            deltas: [0; 3],
         };
         self.playing.0 = false;
         self.history.0.clear();
+        self.history.1.clear();
         self.history.record(0, summary.aphids, summary.ladybugs);
         self.revision.0 += 1;
     }
@@ -2819,13 +4054,23 @@ impl Simulation<'_> {
     /// Advances one turn, records it, and marks the board dirty for the
     /// renderers.
     fn step(&mut self) {
+        self.edits.0.clear();
         let TurnStats {
             births,
             deaths,
             summary,
         } = self.board.0.refresh(&mut self.rng.0);
 
+        let extinctions = [
+            self.stats.aphids > 0 && summary.aphids == 0,
+            self.stats.ladybugs > 0 && summary.ladybugs == 0,
+        ];
         let stats = &mut self.stats;
+        stats.deltas = [
+            summary.aphids as i64 - stats.aphids as i64,
+            summary.ladybugs as i64 - stats.ladybugs as i64,
+            i64::from(summary.food) - i64::from(stats.food),
+        ];
         stats.turn += 1;
         stats.births = births;
         stats.deaths = deaths;
@@ -2835,6 +4080,9 @@ impl Simulation<'_> {
         stats.extinct = summary.is_extinct();
         self.history
             .record(stats.turn, summary.aphids, summary.ladybugs);
+        if extinctions.iter().any(|extinct| *extinct) {
+            self.history.event(stats.turn).extinctions = extinctions;
+        }
         self.revision.0 += 1;
     }
 }
@@ -2847,9 +4095,10 @@ fn recolor_cells(
     board: Res<BoardRes>,
     revision: Res<Revision>,
     palette: Res<CellPalette>,
+    view: Res<BoardView>,
     mut cells: Query<(&Cell, &mut MeshMaterial2d<CellMaterial>)>,
 ) {
-    if !revision.is_changed() {
+    if !(revision.is_changed() || view.is_changed()) {
         return;
     }
 
@@ -2857,7 +4106,12 @@ fn recolor_cells(
         let Some(snapshot) = board.0.cell_snapshot(cell.row, cell.col) else {
             continue;
         };
-        let next = &palette.0[snapshot.food.clamp(0, MAX_FOOD) as usize];
+        let level = if *view == BoardView::Food {
+            snapshot.food.clamp(0, MAX_FOOD) as usize
+        } else {
+            0
+        };
+        let next = &palette.0[level];
         if material.0 != *next {
             material.0 = next.clone();
         }
@@ -2881,6 +4135,17 @@ struct OverlayMesh {
 }
 
 impl OverlayMesh {
+    fn diamond(&mut self, centre: Vec2, radius: f32, colour: Color) {
+        let base = self.positions.len() as u32;
+        for offset in [Vec2::Y, Vec2::X, Vec2::NEG_Y, Vec2::NEG_X] {
+            let point = centre + offset * radius;
+            self.positions.push([point.x, point.y, 0.0]);
+            self.colours.push(colour.to_linear().to_f32_array());
+        }
+        self.indices
+            .extend([base, base + 1, base + 2, base, base + 2, base + 3]);
+    }
+
     /// A single triangle fan avoids dark seams from overlapping translucent
     /// rectangles and end caps. The radius is clamped for very short bars.
     fn rounded_rect(&mut self, min: Vec2, max: Vec2, radius: f32, colour: Color) {
@@ -3014,17 +4279,18 @@ fn rebuild_food_overlay(
     board: Res<BoardRes>,
     revision: Res<Revision>,
     overlay: Res<FoodOverlay>,
+    view: Res<BoardView>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut layer: Query<(&Mesh2d, &mut Visibility), With<FoodLayer>>,
 ) {
-    if !(revision.is_changed() || overlay.is_changed()) {
+    if !(revision.is_changed() || overlay.is_changed() || view.is_changed()) {
         return;
     }
     let Ok((handle, mut visibility)) = layer.single_mut() else {
         return;
     };
 
-    if !overlay.0 {
+    if !overlay.on || *view != BoardView::Food {
         visibility.set_if_neq(Visibility::Hidden);
         return;
     }
@@ -3044,7 +4310,7 @@ fn sync_food_checkbox(
         return;
     }
     for toggle in &toggles {
-        set_checked(&mut commands, toggle, overlay.0);
+        set_checked(&mut commands, toggle, overlay.on);
     }
 }
 
@@ -3057,7 +4323,7 @@ fn sync_creatures(
     revision: Res<Revision>,
     assets: Res<CreatureAssets>,
     mut index: ResMut<CreatureIndex>,
-    mut tweens: Query<(&mut MoveTween, &Transform), With<Creature>>,
+    mut tweens: Query<(&mut MoveTween, &Transform, &mut Sprite), With<Creature>>,
 ) {
     if !revision.is_changed() {
         return;
@@ -3074,10 +4340,18 @@ fn sync_creatures(
             .map_or((0, 0), |cell| (cell.aphids, cell.ladybugs));
         let (offset, scale) = creature_slot(snapshot.kind, snapshot.cell_slot, aphids, ladybugs);
         let target = creature_world(location, offset);
+        let image = match snapshot.kind {
+            CreatureSnapshotKind::Aphid => assets.aphid.clone(),
+            CreatureSnapshotKind::Ladybug => assets.ladybug.clone(),
+        };
 
         match index.0.get(&snapshot.id) {
             Some(&entity) => {
-                if let Ok((mut tween, transform)) = tweens.get_mut(entity) {
+                if let Ok((mut tween, transform, mut sprite)) = tweens.get_mut(entity) {
+                    // Undo followed by a new edit can reuse an ID for another species.
+                    if sprite.image != image {
+                        sprite.image = image;
+                    }
                     *tween = MoveTween {
                         from: transform.translation.truncate(),
                         to: target,
@@ -3089,10 +4363,6 @@ fn sync_creatures(
                 seen.insert(snapshot.id, entity);
             }
             None => {
-                let image = match snapshot.kind {
-                    CreatureSnapshotKind::Aphid => assets.aphid.clone(),
-                    CreatureSnapshotKind::Ladybug => assets.ladybug.clone(),
-                };
                 let entity = commands
                     .spawn((
                         Creature,
@@ -3109,6 +4379,13 @@ fn sync_creatures(
                             MoveTween::born(target, scale)
                         },
                     ))
+                    .with_children(|creature| {
+                        creature.spawn((
+                            Mesh2d(assets.halo_mesh.clone()),
+                            MeshMaterial2d(assets.halo_material.clone()),
+                            Transform::from_xyz(0.0, 0.0, -0.1),
+                        ));
+                    })
                     .id();
                 seen.insert(snapshot.id, entity);
             }
@@ -3296,8 +4573,10 @@ fn badges_legible(viewport_height: f32, area_height: f32) -> bool {
 /// and `smooth_progress` with one system over a component.
 fn advance_tweens(
     time: Res<Time>,
+    detail: Res<BoardDetail>,
     mut creatures: Query<(&mut Transform, &mut MoveTween)>,
-    mut gizmos: Gizmos,
+    mut trail: Gizmos<TrailGizmos>,
+    mut glow: Gizmos<TrailGlowGizmos>,
 ) {
     for (mut transform, mut tween) in &mut creatures {
         tween.timer.tick(time.delta());
@@ -3311,10 +4590,62 @@ fn advance_tweens(
         transform.scale = Vec3::splat(scale.max(0.001));
 
         // Movement trail, carried over from `draw_animated_creatures`. Gizmos
-        // is immediate-mode, so this stays a per-frame line draw.
-        if tween.from.distance_squared(tween.to) > 0.01 && t < 1.0 {
-            gizmos.line_2d(tween.from, position, TRAIL);
+        // is immediate-mode, so this stays a per-frame draw.
+        if !detail.simplified && tween.from.distance_squared(tween.to) > 0.01 {
+            let ramp = |base: Color| {
+                trail_points(tween.from, position, t)
+                    .map(move |(point, alpha)| (point, base.with_alpha(base.alpha() * alpha)))
+            };
+            glow.linestrip_gradient_2d(ramp(TRAIL_GLOW));
+            trail.linestrip_gradient_2d(ramp(TRAIL));
         }
+    }
+}
+
+/// The streak behind a creature that is `t` through its move, from the tail up
+/// to the creature itself, each point paired with the fraction of the streak's
+/// alpha it carries. The ramp is quadratic, so the streak is a faint wash that
+/// gathers into a bright head rather than a slab of even colour.
+fn trail_points(from: Vec2, head: Vec2, t: f32) -> impl Iterator<Item = (Vec2, f32)> {
+    // The tail stays put until `TRAIL_LAG` of the move has passed, then closes
+    // on the head, reaching it exactly as the move ends.
+    let lag = ((t - TRAIL_LAG) / (1.0 - TRAIL_LAG)).clamp(0.0, 1.0);
+    let tail = from.lerp(head, lag * lag * (3.0 - 2.0 * lag));
+    (0..TRAIL_POINTS).map(move |i| {
+        let along = i as f32 / (TRAIL_POINTS - 1) as f32;
+        (tail.lerp(head, along), along * along)
+    })
+}
+
+/// Keeps the streak's weight proportional to the creatures. Gizmo line width is
+/// in physical pixels and takes no notice of the camera, so both widths are
+/// recomputed from the board camera's zoom instead of being set once.
+fn scale_trail_gizmos(
+    cameras: Query<(&Camera, &Projection), With<BoardCamera>>,
+    mut gizmo_config: ResMut<GizmoConfigStore>,
+) {
+    let Ok((camera, Projection::Orthographic(ortho))) = cameras.single() else {
+        return;
+    };
+    let Some(viewport) = camera.physical_viewport_size() else {
+        return;
+    };
+    if ortho.area.height() <= 0.0 {
+        return;
+    }
+    let pixels_per_unit = viewport.y as f32 / ortho.area.height();
+    let width = |fraction: f32| {
+        let (min, max) = TRAIL_WIDTH_RANGE;
+        ((CELL - GAP) * fraction * pixels_per_unit).clamp(min, max)
+    };
+
+    // Written only on a change: `config_mut` marks the whole store dirty.
+    let (core, halo) = (width(TRAIL_WIDTH), width(TRAIL_GLOW_WIDTH));
+    if gizmo_config.config::<TrailGizmos>().0.line.width != core {
+        gizmo_config.config_mut::<TrailGizmos>().0.line.width = core;
+    }
+    if gizmo_config.config::<TrailGlowGizmos>().0.line.width != halo {
+        gizmo_config.config_mut::<TrailGlowGizmos>().0.line.width = halo;
     }
 }
 
@@ -3338,11 +4669,22 @@ fn draw_hover(
         let colour = match edit.tool {
             EditTool::Aphid => EDIT_APHID,
             EditTool::Ladybug => EDIT_LADYBUG,
+            EditTool::Erase => HOVER,
         };
         edit_gizmos
             .rounded_rect_2d(centre, Vec2::splat(CELL - GAP + 6.0), colour)
             .corner_radius((CELL - GAP) * CELL_CORNER + 3.0);
-        edit_gizmos.circle_2d(centre, (CELL - GAP) * 0.22, colour);
+        if edit.tool == EditTool::Erase {
+            let d = Vec2::splat((CELL - GAP) * 0.22);
+            edit_gizmos.line_2d(centre - d, centre + d, colour);
+            edit_gizmos.line_2d(
+                centre + Vec2::new(-d.x, d.y),
+                centre + Vec2::new(d.x, -d.y),
+                colour,
+            );
+        } else {
+            edit_gizmos.circle_2d(centre, (CELL - GAP) * 0.22, colour);
+        }
     }
 }
 
@@ -3357,7 +4699,9 @@ fn update_cell_popup(
     board: Res<BoardRes>,
     mut popup: Query<(&mut Node, &ComputedNode, &mut Visibility), With<CellPopup>>,
     mut lines: Query<(&PopupLine, &mut Text)>,
+    chart_size: Res<ChartSize>,
 ) {
+    let chart_height = chart_size.1;
     let (Ok(window), Ok((mut node, computed, mut visibility))) =
         (windows.single(), popup.single_mut())
     else {
@@ -3371,7 +4715,7 @@ fn update_cell_popup(
         visibility.set_if_neq(Visibility::Hidden);
         return;
     };
-    let Some(anchor) = popup_anchor(window, cameras.single().ok(), row, col) else {
+    let Some(anchor) = popup_anchor(window, cameras.single().ok(), row, col, chart_height) else {
         visibility.set_if_neq(Visibility::Hidden);
         return;
     };
@@ -3407,10 +4751,11 @@ fn popup_anchor(
     camera: Option<(&Camera, &GlobalTransform)>,
     row: usize,
     col: usize,
+    chart_height: f32,
 ) -> Option<Vec2> {
     window
         .cursor_position()
-        .filter(|&cursor| board_rect(window).contains(cursor))
+        .filter(|&cursor| board_rect(window, chart_height).contains(cursor))
         .or_else(|| {
             let (camera, transform) = camera?;
             camera
@@ -3455,10 +4800,10 @@ fn update_hud(
     {
         return;
     }
-    let state = if stats.extinct {
+    let state = if edit.enabled {
+        "Editing · simulation paused"
+    } else if stats.extinct {
         "Extinct"
-    } else if edit.enabled {
-        "Editing"
     } else if playing.0 {
         "Running"
     } else {
@@ -3472,7 +4817,8 @@ fn update_hud(
                 2 => stats.food.to_string(),
                 3 => format!("+{}", stats.births),
                 4 => format!("−{}", stats.deaths),
-                _ => seed.0.to_string(),
+                5 => seed.0.to_string(),
+                index => format!("{:+}\nthis turn", stats.deltas[index - 6]),
             }
         } else if play {
             if playing.0 && !stats.extinct {
@@ -3481,10 +4827,7 @@ fn update_hud(
                 "Play".into()
             }
         } else if status {
-            format!(
-                "{state}  ·  Turn {}  ·  Space: play/pause  ·  N: step",
-                stats.turn
-            )
+            format!("{state}  ·  Turn {}", stats.turn)
         } else if speed {
             format!("{:.2} turns/s", 1.0 / timer.0.duration().as_secs_f32())
         } else {
@@ -3522,6 +4865,212 @@ fn update_status_text(
 mod tests {
     use super::*;
     use bevy::ecs::system::RunSystemOnce;
+
+    #[test]
+    fn percentages_validate_bounds_and_format_readably() {
+        assert_eq!(parse_percentage("12.5"), Some(0.125));
+        assert_eq!(parse_percentage(" 100 "), Some(1.0));
+        assert_eq!(parse_percentage("0"), Some(0.0));
+        for invalid in ["", ".", "-1", "100.1", "NaN", "inf", "70%"] {
+            assert_eq!(parse_percentage(invalid), None, "{invalid}");
+        }
+        assert_eq!(percentage_text(0.7), "70");
+        assert_eq!(percentage_text(0.125), "12.5");
+        assert_eq!(percentage_text(0.0), "0");
+    }
+
+    #[test]
+    fn percentage_fields_commit_on_enter_or_blur_and_reject_invalid_drafts() {
+        let mut world = world_mid_run();
+        world.init_resource::<InputFocus>();
+        world.init_resource::<ButtonInput<KeyCode>>();
+        world.init_resource::<Messages<ParameterReset>>();
+        let field = world.spawn((ProbField(0), EditableText::default())).id();
+        let system = world.register_system(commit_parameter_fields);
+        world
+            .resource_mut::<InputFocus>()
+            .set(field, bevy::input_focus::FocusCause::Navigated);
+        world.run_system(system).unwrap();
+        world
+            .get_mut::<EditableText>(field)
+            .unwrap()
+            .editor
+            .set_text("12.5");
+        world
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::Enter);
+        world.run_system(system).unwrap();
+        assert_eq!(world.resource::<Params>().get(0), 0.125);
+        world.resource_mut::<ButtonInput<KeyCode>>().clear();
+        world
+            .get_mut::<EditableText>(field)
+            .unwrap()
+            .editor
+            .set_text("101");
+        world.resource_mut::<InputFocus>().clear();
+        world.run_system(system).unwrap();
+        assert_eq!(world.resource::<Params>().get(0), 0.125);
+        assert_eq!(
+            world
+                .get::<EditableText>(field)
+                .unwrap()
+                .value()
+                .to_string(),
+            "12.5"
+        );
+        assert!(!world.resource::<StatusLine>().success);
+
+        world
+            .resource_mut::<InputFocus>()
+            .set(field, bevy::input_focus::FocusCause::Navigated);
+        world.run_system(system).unwrap();
+        world
+            .get_mut::<EditableText>(field)
+            .unwrap()
+            .editor
+            .set_text("34");
+        world.resource_mut::<InputFocus>().clear();
+        world.run_system(system).unwrap();
+        assert_eq!(world.resource::<Params>().get(0), 0.34);
+    }
+
+    #[test]
+    fn restoring_a_parameter_group_wins_over_its_pending_draft() {
+        let mut world = world_mid_run();
+        world.init_resource::<InputFocus>();
+        world.init_resource::<ButtonInput<KeyCode>>();
+        world.init_resource::<Messages<ParameterReset>>();
+        let field = world.spawn((ProbField(0), EditableText::default())).id();
+        let system = world.register_system(commit_parameter_fields);
+        world.resource_mut::<Params>().set(4, 0.33);
+        world
+            .resource_mut::<InputFocus>()
+            .set(field, bevy::input_focus::FocusCause::Navigated);
+        world.run_system(system).unwrap();
+        world
+            .get_mut::<EditableText>(field)
+            .unwrap()
+            .editor
+            .set_text("25");
+        world.resource_mut::<InputFocus>().clear();
+        world.write_message(ParameterReset(0, 4));
+        world.run_system(system).unwrap();
+        for index in 0..4 {
+            assert_eq!(
+                world.resource::<Params>().get(index),
+                Params::default().get(index)
+            );
+        }
+        assert_eq!(world.resource::<Params>().get(4), 0.33);
+    }
+
+    #[test]
+    fn chart_events_coalesce_rule_changes_and_disappear_when_reverted() {
+        let mut world = world_mid_run();
+        let original = world.resource::<Params>().get(0);
+        world.resource_mut::<Params>().set(0, 0.25);
+        world.run_system_once(apply_params).unwrap();
+        world.resource_mut::<Params>().set(0, 0.35);
+        world.run_system_once(apply_params).unwrap();
+        let events = &world.resource::<History>().1;
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].turn, 12);
+        assert_eq!(events[0].changes[0], Some((original, 0.35)));
+        world.resource_mut::<Params>().set(0, original);
+        world.run_system_once(apply_params).unwrap();
+        assert!(world.resource::<History>().1.is_empty());
+    }
+
+    #[test]
+    fn chart_records_each_species_extinction_once() {
+        let mut world = world_mid_run();
+        edit(&mut world, 0, 0, EditTool::Aphid, EditAction::Add);
+        edit(&mut world, 3, 3, EditTool::Ladybug, EditAction::Add);
+        for index in 0..9 {
+            world.resource_mut::<Params>().set(index, 0.0);
+        }
+        world.run_system_once(apply_params).unwrap();
+        for _ in 0..40 {
+            world
+                .run_system_once(|mut sim: Simulation| sim.step())
+                .unwrap();
+        }
+        let history = world.resource::<History>();
+        for species in 0..2 {
+            let events: Vec<_> = history
+                .1
+                .iter()
+                .filter(|event| event.extinctions[species])
+                .collect();
+            assert_eq!(events.len(), 1);
+            let point = history
+                .0
+                .iter()
+                .find(|point| point.turn == events[0].turn)
+                .unwrap();
+            assert_eq!(point.series(species), 0);
+        }
+    }
+
+    #[test]
+    fn chart_events_follow_rolling_history_and_edit_undo() {
+        let mut history = History::default();
+        for turn in 0..HISTORY_LIMIT + 5 {
+            history.record(turn, 1, 1);
+            if turn == 0 || turn == HISTORY_LIMIT {
+                history.event(turn).extinctions[0] = true;
+            }
+        }
+        assert_eq!(history.1.len(), 1);
+        assert_eq!(history.1[0].turn, HISTORY_LIMIT);
+        let mut world = world_mid_run();
+        world.resource_mut::<History>().event(11).changes[0] = Some((0.7, 0.8));
+        edit(&mut world, 0, 0, EditTool::Aphid, EditAction::Add);
+        assert!(world.resource::<History>().1.is_empty());
+        run_action(&mut world, RunAction::Undo);
+        assert_eq!(world.resource::<History>().1[0].turn, 11);
+        assert_eq!(
+            world.resource::<History>().1[0].changes[0],
+            Some((0.7, 0.8))
+        );
+    }
+
+    #[test]
+    fn chart_resizing_preserves_board_space_and_remembers_height() {
+        let mut panel = ChartPanel::default();
+        panel.apply(ChartAction::Larger, 860.0);
+        assert_eq!(panel.effective_height(860.0), 260.0);
+        panel.apply(ChartAction::Toggle, 860.0);
+        assert_eq!(panel.effective_height(860.0), CHART_COLLAPSED_HEIGHT);
+        panel.apply(ChartAction::Toggle, 860.0);
+        assert_eq!(panel.effective_height(860.0), 260.0);
+        panel.height = 1000.0;
+        assert_eq!(panel.effective_height(640.0), 300.0);
+        assert!(640.0 - TOOLBAR_HEIGHT - panel.effective_height(640.0) >= 180.0);
+        let plot = plot_rect(600.0, panel.effective_height(640.0));
+        assert!(plot.height() > 0.0);
+        panel.height = 0.0;
+        assert_eq!(panel.effective_height(640.0), CHART_MIN_HEIGHT);
+    }
+
+    #[test]
+    fn distant_markers_aggregate_crowded_cells_and_keep_both_species() {
+        let mut world = world_mid_run();
+        edit(&mut world, 1, 1, EditTool::Aphid, EditAction::Add);
+        let one = population_mesh(&world.resource::<BoardRes>().0).count_vertices();
+        edit(&mut world, 1, 1, EditTool::Aphid, EditAction::Add);
+        let crowded = population_mesh(&world.resource::<BoardRes>().0).count_vertices();
+        assert_eq!(
+            one, crowded,
+            "markers represent occupied cells, not individual creatures"
+        );
+        edit(&mut world, 1, 1, EditTool::Ladybug, EditAction::Add);
+        let mixed = population_mesh(&world.resource::<BoardRes>().0).count_vertices();
+        assert!(
+            mixed > crowded,
+            "mixed cells retain a marker for each species"
+        );
+    }
 
     #[test]
     fn axis_uses_clean_steps_and_at_most_four_intervals() {
@@ -3639,11 +5188,13 @@ mod tests {
             ladybug: board.ladybug_params(),
             food: board.food_params(),
         });
+        world.insert_resource(SavedParams(*world.resource::<Params>()));
         world.insert_resource(StepTimer(Timer::from_seconds(
             STEP_SECONDS,
             TimerMode::Repeating,
         )));
         world.init_resource::<EditMode>();
+        world.init_resource::<EditHistory>();
         world.init_resource::<StatusLine>();
         world.insert_resource(Seed(DEFAULT_SEED));
         world.init_resource::<Messages<RunAction>>();
@@ -3746,6 +5297,7 @@ mod tests {
         let mut world = world_mid_run();
         world.init_resource::<InputFocus>();
         world.init_resource::<FoodOverlay>();
+        world.init_resource::<BoardView>();
         world.init_resource::<ActiveTab>();
         let field = world.spawn((SeedField, EditableText::new("7"))).id();
         world
@@ -3850,10 +5402,42 @@ mod tests {
     }
 
     #[test]
+    fn switching_food_details_off_hands_the_board_view_back() {
+        let mut world = world_mid_run();
+        world.init_resource::<InputFocus>();
+        world.init_resource::<FoodOverlay>();
+        world.init_resource::<BoardView>();
+        world.init_resource::<ActiveTab>();
+        let press_f = |world: &mut World| {
+            let mut keys = ButtonInput::<KeyCode>::default();
+            keys.press(KeyCode::KeyF);
+            world.insert_resource(keys);
+            world.run_system_once(keyboard_controls).unwrap();
+        };
+
+        // The details select the food view, and give it back on the way out,
+        // so the board is the neutral shading it started with.
+        press_f(&mut world);
+        assert!(world.resource::<FoodOverlay>().on);
+        assert_eq!(*world.resource::<BoardView>(), BoardView::Food);
+        press_f(&mut world);
+        assert!(!world.resource::<FoodOverlay>().on);
+        assert_eq!(*world.resource::<BoardView>(), BoardView::Population);
+
+        // A view picked on its own keeps the food shading when the details go.
+        *world.resource_mut::<BoardView>() = BoardView::Food;
+        press_f(&mut world);
+        press_f(&mut world);
+        assert!(!world.resource::<FoodOverlay>().on);
+        assert_eq!(*world.resource::<BoardView>(), BoardView::Food);
+    }
+
+    #[test]
     fn focused_widgets_do_not_also_trigger_global_space_shortcut() {
         let mut world = world_mid_run();
         world.init_resource::<InputFocus>();
         world.init_resource::<FoodOverlay>();
+        world.init_resource::<BoardView>();
         world.init_resource::<ActiveTab>();
         let focused_button = world.spawn_empty().id();
         world
@@ -3941,8 +5525,10 @@ mod tests {
             resolution: (900u32, 640u32).into(),
             ..default()
         };
-        assert!(!board_rect(&window).contains(Vec2::new(500.0, 40.0)));
-        assert!(board_rect(&window).contains(Vec2::new(500.0, TOOLBAR_HEIGHT + 10.0)));
+        assert!(!board_rect(&window, CHART_HEIGHT).contains(Vec2::new(500.0, 40.0)));
+        assert!(
+            board_rect(&window, CHART_HEIGHT).contains(Vec2::new(500.0, TOOLBAR_HEIGHT + 10.0))
+        );
     }
 
     #[test]
@@ -3996,6 +5582,147 @@ mod tests {
         assert!(world.resource::<Playing>().0);
         assert_eq!(world.resource::<History>().0.len(), 12);
         assert_eq!(world.resource::<Revision>().0, 0);
+        assert!(world.resource::<EditHistory>().0.is_empty());
+    }
+
+    #[test]
+    fn erase_and_undo_restore_creatures_food_and_history() {
+        let mut world = world_mid_run();
+        edit(&mut world, 1, 2, EditTool::Aphid, EditAction::Add);
+        edit(&mut world, 1, 2, EditTool::Aphid, EditAction::Add);
+        edit(&mut world, 1, 2, EditTool::Ladybug, EditAction::Add);
+        let before = world.resource::<BoardRes>().0.cell_snapshot(1, 2).unwrap();
+        let creatures = world.resource::<BoardRes>().0.creature_snapshots();
+
+        assert!(edit(&mut world, 1, 2, EditTool::Erase, EditAction::Add));
+        let cleared = world.resource::<BoardRes>().0.cell_snapshot(1, 2).unwrap();
+        assert_eq!((cleared.aphids, cleared.ladybugs), (0, 0));
+        assert_eq!(cleared.food, before.food);
+        assert!(world.resource::<Stats>().extinct);
+
+        run_action(&mut world, RunAction::Undo);
+        assert_eq!(
+            world.resource::<BoardRes>().0.cell_snapshot(1, 2),
+            Some(before)
+        );
+        assert_eq!(
+            world.resource::<BoardRes>().0.creature_snapshots(),
+            creatures
+        );
+        assert!(!world.resource::<Playing>().0);
+        assert!(world.resource::<EditMode>().enabled);
+
+        for _ in 0..3 {
+            run_action(&mut world, RunAction::Undo);
+        }
+        assert_eq!(world.resource::<Stats>().turn, 12);
+        assert_eq!(world.resource::<History>().0.len(), 12);
+        assert!(world.resource::<EditHistory>().0.is_empty());
+        let revision = world.resource::<Revision>().0;
+        run_action(&mut world, RunAction::Undo);
+        assert_eq!(
+            world.resource::<Revision>().0,
+            revision,
+            "empty undo is a no-op"
+        );
+    }
+
+    #[test]
+    fn undo_restores_random_state_and_keeps_current_parameters() {
+        let mut world = world_mid_run();
+        edit(&mut world, 1, 1, EditTool::Ladybug, EditAction::Add);
+        edit(&mut world, 1, 1, EditTool::Aphid, EditAction::Add);
+        let mut expected_board = world.resource::<BoardRes>().0.clone();
+        let mut expected_random = world.resource::<Rng>().0.clone();
+        // Placing a ladybug consumes random numbers for its preferred directions.
+        edit(&mut world, 2, 2, EditTool::Ladybug, EditAction::Add);
+        world.resource_mut::<Params>().aphid.prob_move = 0.31;
+        expected_board.set_aphid_params(world.resource::<Params>().aphid);
+        run_action(&mut world, RunAction::Undo);
+        assert_eq!(
+            world.resource::<History>().1.back().unwrap().changes[0],
+            Some((0.7, 0.31)),
+            "undo records the current rules at the restored turn boundary"
+        );
+        for _ in 0..8 {
+            let expected = expected_board.refresh(&mut expected_random);
+            world
+                .run_system_once(|mut sim: Simulation| sim.step())
+                .unwrap();
+            assert_eq!(world.resource::<BoardRes>().0.summary(), expected.summary);
+            assert_eq!(
+                world.resource::<BoardRes>().0.creature_snapshots(),
+                expected_board.creature_snapshots()
+            );
+        }
+    }
+
+    #[test]
+    fn undo_then_replacing_a_species_updates_its_sprite_in_the_same_frame() {
+        let mut world = world_mid_run();
+        let mut images = Assets::<Image>::default();
+        let aphid = images.add(Image::default());
+        let ladybug = images.add(Image::default());
+        world.insert_resource(CreatureAssets {
+            aphid: aphid.clone(),
+            ladybug: ladybug.clone(),
+            halo_mesh: Handle::default(),
+            halo_material: Handle::default(),
+            badge: Handle::default(),
+            badge_shadow_mesh: Handle::default(),
+            badge_colours: [Handle::default(), Handle::default()],
+            badge_shadow: Handle::default(),
+            font: Handle::default(),
+        });
+        world.init_resource::<CreatureIndex>();
+        edit(&mut world, 1, 1, EditTool::Aphid, EditAction::Add);
+        world.run_system_once(sync_creatures).unwrap();
+        let entity = *world.resource::<CreatureIndex>().0.values().next().unwrap();
+        assert_eq!(world.get::<Sprite>(entity).unwrap().image, aphid);
+
+        run_action(&mut world, RunAction::Undo);
+        edit(&mut world, 1, 1, EditTool::Ladybug, EditAction::Add);
+        world.run_system_once(sync_creatures).unwrap();
+        assert_eq!(world.resource::<CreatureIndex>().0.len(), 1);
+        assert_eq!(world.get::<Sprite>(entity).unwrap().image, ladybug);
+    }
+
+    #[test]
+    fn undo_is_bounded_and_cleared_by_step_and_reset() {
+        let mut world = world_mid_run();
+        for _ in 0..EDIT_UNDO_LIMIT + 3 {
+            edit(&mut world, 1, 1, EditTool::Aphid, EditAction::Add);
+        }
+        assert_eq!(world.resource::<EditHistory>().0.len(), EDIT_UNDO_LIMIT);
+        for _ in 0..EDIT_UNDO_LIMIT {
+            run_action(&mut world, RunAction::Undo);
+        }
+        assert_eq!(world.resource::<BoardRes>().0.summary().aphids, 3);
+        edit(&mut world, 0, 0, EditTool::Aphid, EditAction::Add);
+        run_action(&mut world, RunAction::Step);
+        assert!(world.resource::<EditHistory>().0.is_empty());
+        edit(&mut world, 0, 0, EditTool::Aphid, EditAction::Add);
+        run_action(&mut world, RunAction::Reset);
+        assert!(world.resource::<EditHistory>().0.is_empty());
+    }
+
+    #[test]
+    fn population_deltas_match_the_last_turn_and_reset_after_edits() {
+        let mut world = world_mid_run();
+        edit(&mut world, 1, 1, EditTool::Aphid, EditAction::Add);
+        let before = world.resource::<BoardRes>().0.summary();
+        run_action(&mut world, RunAction::Step);
+        let after = world.resource::<BoardRes>().0.summary();
+        assert_eq!(
+            world.resource::<Stats>().deltas,
+            [
+                after.aphids as i64 - before.aphids as i64,
+                after.ladybugs as i64 - before.ladybugs as i64,
+                i64::from(after.food) - i64::from(before.food),
+            ]
+        );
+        edit(&mut world, 2, 2, EditTool::Ladybug, EditAction::Add);
+        assert_eq!(world.resource::<Stats>().deltas, [0; 3]);
     }
 
     #[test]
@@ -4111,6 +5838,8 @@ mod tests {
         world.insert_resource(CreatureAssets {
             aphid: Handle::default(),
             ladybug: Handle::default(),
+            halo_mesh: circle.clone(),
+            halo_material: colour.clone(),
             badge: circle.clone(),
             badge_shadow_mesh: circle.clone(),
             badge_colours: [colour.clone(), colour.clone()],
@@ -4195,6 +5924,37 @@ mod tests {
     }
 
     #[test]
+    fn the_movement_streak_grows_then_collapses_into_the_creature() {
+        let (from, to) = (Vec2::ZERO, Vec2::new(CELL, 0.0));
+        let streak = |t: f32| {
+            let points: Vec<_> = trail_points(from, from.lerp(to, t), t).collect();
+            let (tail, head) = (points[0].0, points[points.len() - 1].0);
+            (head.distance(tail), points)
+        };
+
+        // The head is always the creature, the tail always fades to nothing,
+        // and the alpha only ever climbs towards the head.
+        for t in [0.0, 0.2, TRAIL_LAG, 0.6, 0.9, 1.0] {
+            let (_, points) = streak(t);
+            assert_eq!(points.len(), TRAIL_POINTS);
+            assert_eq!(points[0].1, 0.0, "{t}: the tail must be invisible");
+            assert_eq!(points[points.len() - 1].1, 1.0, "{t}: the head is solid");
+            assert!(points.windows(2).all(|pair| pair[0].1 <= pair[1].1));
+            assert!(
+                points[points.len() - 1]
+                    .0
+                    .abs_diff_eq(from.lerp(to, t), 1e-4)
+            );
+        }
+
+        // Until the tail is let go the streak is the whole distance travelled,
+        // then it shortens to nothing rather than popping off the board.
+        assert_eq!(streak(TRAIL_LAG).0, from.lerp(to, TRAIL_LAG).distance(from));
+        assert!(streak(0.6).0 > streak(0.9).0);
+        assert!(streak(1.0).0 < 1e-4, "a settled creature drags nothing");
+    }
+
+    #[test]
     fn badges_hide_once_cells_are_too_small_to_read() {
         let cell = CELL - GAP;
         // A viewport showing 10 cells' worth of world is plenty at 800px tall.
@@ -4252,7 +6012,7 @@ mod tests {
 
     #[test]
     fn values_map_into_the_plot_with_zero_on_the_baseline() {
-        let plot = plot_rect(800.0);
+        let plot = plot_rect(800.0, CHART_HEIGHT);
         assert_eq!(value_y(0, 60, plot), plot.max.y);
         assert_eq!(value_y(60, 60, plot), plot.min.y);
         assert_eq!(history_x(0, 10, plot), plot.min.x);

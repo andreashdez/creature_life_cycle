@@ -354,6 +354,19 @@ component off the source rather than needing nine closures over nine fields.
 
 ## The population history chart
 
+The chart now has an adjustable 180–420px height (also constrained to leave at
+least 180px for the board) and a 40px collapsed header. Cameras, chart marks,
+labels, hover tests and board hit tests share the resolved width and height.
+Height buttons and the top-edge drag affordance update the same panel state;
+collapse keeps the preferred expanded height and continues recording turns.
+
+History also owns a rolling list of events. Parameter changes compare the new
+controls against the board's active rules and coalesce per parameter at the
+current turn boundary. Extinction is recorded only on a positive-to-zero
+population transition. Diamonds and crosses mark these events; hover summaries
+explain their meaning. Events are pruned alongside the 240-turn history and are
+included in edit-undo snapshots. A one-point history displays a start prompt.
+
 Also implemented: the population history strip under the board, ported from
 `draw_history_graph` in the macroquad GUI. It keeps the same 240-turn window, a
 legend, and a crosshair with a tooltip listing both series, and adds direct end
@@ -403,6 +416,17 @@ the panel zoomed the board and dragging a slider panned it.
 
 ## The food overlay
 
+Population is now the default view and uses the neutral cell material. Food
+view restores the food palette with quieter fills, bars and speckles; `F`
+selects Food and toggles the details. Switching the details off hands the view
+back, so the board returns to the neutral shading instead of staying tinted
+with nothing drawn on it. A view picked from the two buttons owns itself: the
+details then come and go underneath it. Creatures have a shared dark circular
+backing that inherits their animated position and scale. Below a 28px cell size,
+one mesh of species markers replaces detailed creature sprites: circles and
+diamonds, with separate positions in mixed cells. This mesh rebuilds only when
+needed by board changes or the detail threshold crossing.
+
 The food overlay is also implemented and ported from the macroquad GUI. When it
 is on, each cell gets a gold bar along its bottom sized by its food level (0-9),
 plus one speckle per unit of food at fixed positions. The macroquad GUI caps
@@ -440,21 +464,32 @@ mesh falls back to a single zero-area, transparent triangle.
 
 Cell editing is implemented as a port of the macroquad GUI's edit mode:
 
-- `E`, or the panel's "editing" checkbox, turns editing on.
-- `A` / `L`, or the panel radios, pick the aphid or ladybug tool, and picking a
-  tool also turns editing on.
+- `E` toggles editing. The Edit tab has illustrated Aphid and Ladybug tool
+  buttons and an Erase tool; `A` / `L` / `X` select them. Picking a tool starts
+  editing and shows a translucent creature preview, or a cross for Erase.
 - While editing, a left click adds the selected creature to the hovered cell. A
   right click removes one creature of that kind.
 - Hand-placed creatures start with life 10 (aphid) or 15 (ladybug), the same as
   creatures loaded from the config.
 - Any edit pauses the run and restarts the turn count and population history
   from the edited board, as `after_board_edit` does.
+- Erase clears both species from a cell without changing its food. Undo (`Z`)
+  restores the board, RNG, statistics and history from before an edit, paused,
+  while keeping the current parameter controls. A deque holds at most 20 exact
+  snapshots; stepping or resetting clears it. Done leaves editing paused.
 - While editing, the hovered cell shows an outline and a ring in the tool's
   colour.
 - **Save setup**, in the Overview tab or with `S`, writes the board and the
   current probabilities to the XDG config file through `save_configured_board`,
   the same function the macroquad GUI's footer button calls. The panel names the
   file it will write, and the toolbar reports the outcome for four seconds.
+
+Population and food totals, species artwork, and per-turn changes now stay above
+the board across all tabs. Overview contains births/deaths and food layers, with
+Run setup and Controls & shortcuts collapsed by default. Their contents scroll
+with the sidebar; the toolbar and tabs stay fixed. The screenshot probe checks
+the expanded setup as well as all three tabs and requests a non-resizable window
+so tiling window managers cannot silently enlarge its compact 900×640 capture.
 
 **The seed is an entry field.** The seed is a `u64` up to 20 digits, which no
 slider or `FeathersNumberInput` can carry, so it is a `FeathersTextInput` with an
