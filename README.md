@@ -1,5 +1,7 @@
 # Aphids and Ladybugs
 
+<img src="assets/branding/logo.png" alt="Minimal red and black ladybug logo" width="180">
+
 [![CI](https://github.com/andreashdez/creature_life_cycle/actions/workflows/ci.yml/badge.svg)](https://github.com/andreashdez/creature_life_cycle/actions/workflows/ci.yml)
 
 This is a small Rust simulation of aphids and ladybugs moving around a two-dimensional board, sharing food, reproducing, starving, and fighting when predator and prey occupy the same cell.

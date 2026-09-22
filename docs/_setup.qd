@@ -1,5 +1,5 @@
 .doclang {English}
-.theme {paperwhite} layout:{minimal}
+.theme {darko} layout:{hyperlegible}
 
 .htmloptions baseurl:{https://andreashdez.github.io/creature_life_cycle}
 
@@ -19,7 +19,7 @@
 
 .pagemargin {topleft}
     .row gap:{10px} cross:{center}
-        !(26)[](assets/ladybug.png)
+        !(26)[](assets/logo.svg)
 
         [**Aphids and Ladybugs**](https://andreashdez.github.io/creature_life_cycle)
 
