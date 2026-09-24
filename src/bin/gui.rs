@@ -22,6 +22,7 @@ use bevy::feathers::dark_theme::create_dark_theme;
 use bevy::feathers::display::{label, label_small};
 use bevy::feathers::theme::{ThemeBackgroundColor, ThemedText, UiTheme};
 use bevy::feathers::{FeathersPlugins, tokens};
+use bevy::image::{ImageLoaderSettings, ImageSampler};
 use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll, MouseScrollUnit};
 use bevy::input_focus::InputFocus;
 use bevy::mesh::{Indices, PrimitiveTopology};
@@ -39,10 +40,10 @@ use creature_life_cycle::{
 };
 use std::collections::{HashMap, VecDeque};
 
-/// Width of the parameters panel, in logical pixels.
+/// Sidebar widths in logical pixels.
+const SUMMARY_WIDTH: f32 = 260.0;
 const PANEL_WIDTH: f32 = 300.0;
-const TOOLBAR_HEIGHT: f32 = 160.0;
-const PANEL_HEADER: f32 = 122.0;
+const PANEL_HEADER: f32 = 104.0;
 /// Offset of the cell popup from the pointer, and the margin it keeps from the
 /// window edges, both as `draw_hover_tooltip` in the previous macroquad GUI.
 const POPUP_OFFSET: f32 = 18.0;
@@ -244,6 +245,7 @@ fn main() {
         .add_message::<Reseed>()
         .add_message::<ParameterReset>()
         .init_resource::<ActiveTab>()
+        .init_resource::<PropertiesPanel>()
         .init_resource::<StatusLine>()
         .insert_resource(Seed(DEFAULT_SEED))
         .insert_gizmo_config(
@@ -283,7 +285,7 @@ fn main() {
                     // button restarts the run in the same frame it is asked for.
                     apply_seed,
                     apply_run_actions,
-                    sync_sidebar,
+                    (sync_sidebar, sync_properties_panel).chain(),
                     chart_resize_input.run_if(not(resource_exists::<ScreenshotProbe>)),
                     layout_viewports,
                     scroll_panel.run_if(not(resource_exists::<ScreenshotProbe>)),
@@ -768,7 +770,7 @@ impl ChartPanel {
         } else {
             self.height.clamp(
                 CHART_MIN_HEIGHT,
-                (window_height - TOOLBAR_HEIGHT - 180.0).clamp(CHART_MIN_HEIGHT, 420.0),
+                (window_height - 180.0).clamp(CHART_MIN_HEIGHT, 420.0),
             )
         }
     }
@@ -776,6 +778,9 @@ impl ChartPanel {
 
 #[derive(Component)]
 struct ChartRoot;
+
+#[derive(Component)]
+struct ChartEventLegend;
 
 #[derive(Component)]
 struct ChartExpandedOnly;
@@ -946,6 +951,27 @@ enum PanelTab {
 #[derive(Resource, Default)]
 struct ActiveTab(PanelTab);
 
+/// Hidden initially so the board and history have room even in small windows.
+#[derive(Resource, Default)]
+struct PropertiesPanel {
+    open: bool,
+}
+
+impl PropertiesPanel {
+    fn width(&self) -> f32 {
+        if self.open { PANEL_WIDTH } else { 0.0 }
+    }
+}
+
+#[derive(Component, Clone, Default, FromTemplate)]
+struct PropertiesRoot;
+
+#[derive(Component, Clone, Default, FromTemplate)]
+struct PropertiesToggleLabel;
+
+#[derive(Component, Clone, Default, FromTemplate)]
+struct PropertiesToggle;
+
 #[derive(Component, Clone, FromTemplate)]
 struct TabPage(PanelTab);
 
@@ -1007,6 +1033,7 @@ type ProbeWidgets<'w, 's> = (
     Query<'w, 's, (Entity, &'static SectionToggle)>,
     Query<'w, 's, (Entity, &'static ViewButton)>,
     Query<'w, 's, (Entity, &'static ChartControlButton)>,
+    Query<'w, 's, Entity, With<PropertiesToggle>>,
 );
 
 type ProbeState<'w> = (
@@ -1027,8 +1054,11 @@ fn screenshot_probe(
     mut commands: Commands,
     time: Res<Time>,
     probe: Option<ResMut<ScreenshotProbe>>,
-    mut board_cameras: Query<(&Camera, &GlobalTransform, &mut Projection), With<BoardCamera>>,
-    (sliders, food_toggles, tool_buttons, sections, views, chart_controls): ProbeWidgets,
+    mut board_cameras: Query<
+        (&Camera, &GlobalTransform, &mut Projection, &mut Transform),
+        With<BoardCamera>,
+    >,
+    (sliders, food_toggles, tool_buttons, sections, views, chart_controls, properties_toggles): ProbeWidgets,
     (params, board, history, overlay, edit, stats, playing): ProbeState,
     mut panel: Query<(&mut ScrollPosition, &ComputedNode), With<PanelRoot>>,
     tabs: Query<(Entity, &TabButton)>,
@@ -1164,7 +1194,7 @@ fn screenshot_probe(
             );
             // Zoom, pan and cell hover each need exactly one board camera.
             info!("board cameras matched: {}", board_cameras.iter().count());
-            if let Ok((camera, camera_transform, Projection::Orthographic(ortho))) =
+            if let Ok((camera, camera_transform, Projection::Orthographic(ortho), _)) =
                 board_cameras.single()
                 && let Some(viewport) = camera.logical_viewport_size()
             {
@@ -1239,10 +1269,22 @@ fn screenshot_probe(
         // Exercise the shader at actual camera zoom levels, rather than
         // scaling a screenshot, to catch border-width and antialiasing faults.
         8 | 10 => {
-            if let Ok((_, _, mut projection)) = board_cameras.single_mut()
+            if let Ok((_, _, mut projection, mut transform)) = board_cameras.single_mut()
                 && let Projection::Orthographic(ortho) = &mut *projection
             {
                 ortho.scale = if probe.stage == 8 { 0.35 } else { 2.0 };
+                // Keep the insects in the close-up, rather than zooming into
+                // empty cells at the centre of the board.
+                let centre = if probe.stage == 8 {
+                    cell_to_world(row, col)
+                } else {
+                    Vec2::new(
+                        (board.0.cols() as f32 - 1.0) * CELL * 0.5,
+                        -(board.0.rows() as f32 - 1.0) * CELL * 0.5,
+                    )
+                };
+                transform.translation.x = centre.x;
+                transform.translation.y = centre.y;
             }
             probe.timer = Timer::from_seconds(0.5, TimerMode::Once);
         }
@@ -1266,7 +1308,7 @@ fn screenshot_probe(
                     commands.trigger(Activate { entity });
                 }
             }
-            if let Ok((_, _, mut projection)) = board_cameras.single_mut()
+            if let Ok((_, _, mut projection, _)) = board_cameras.single_mut()
                 && let Projection::Orthographic(ortho) = &mut *projection
             {
                 ortho.scale = 1.0;
@@ -1309,7 +1351,7 @@ fn screenshot_probe(
             if let Ok((mut position, _)) = panel.single_mut() {
                 position.y = 0.0;
             }
-            if let Ok((_, _, mut projection)) = board_cameras.single_mut()
+            if let Ok((_, _, mut projection, _)) = board_cameras.single_mut()
                 && let Projection::Orthographic(ortho) = &mut *projection
             {
                 ortho.scale = 2.0;
@@ -1381,6 +1423,23 @@ fn screenshot_probe(
             commands
                 .spawn(Screenshot::primary_window())
                 .observe(save_to_disk(probe.path.replace(".png", "-events.png")));
+            probe.timer = Timer::from_seconds(1.0, TimerMode::Once);
+        }
+        24 | 26 => {
+            for entity in &properties_toggles {
+                commands.trigger(Activate { entity });
+            }
+            probe.timer = Timer::from_seconds(0.5, TimerMode::Once);
+        }
+        25 | 27 => {
+            let suffix = if probe.stage == 25 {
+                "-properties-hidden.png"
+            } else {
+                "-properties-restored.png"
+            };
+            commands
+                .spawn(Screenshot::primary_window())
+                .observe(save_to_disk(probe.path.replace(".png", suffix)));
             probe.timer = Timer::from_seconds(1.0, TimerMode::Once);
         }
         _ => {
@@ -1567,14 +1626,21 @@ fn setup(
     }
     commands.insert_resource(cell_palette);
 
-    // Each species shares one transparent texture. Badges remain mesh discs.
+    // The 32px insect art uses nearest sampling at every zoom (also in the
+    // sidebar and edit preview). Keep smooth sampling for other UI images.
     let inner = CELL - GAP;
     let font: Handle<Font> = asset_server.load(fonts::REGULAR);
     let creature_assets = CreatureAssets {
-        aphid: load_embedded_asset!(&*asset_server, "../../assets/sprites/aphid.png"),
-        ladybug: load_embedded_asset!(&*asset_server, "../../assets/sprites/ladybug.png"),
-        halo_mesh: meshes.add(Circle::new(CREATURE_SPRITE_SIZE * 0.56)),
-        halo_material: materials.add(ColorMaterial::from_color(Color::srgba_u8(10, 16, 17, 220))),
+        aphid: load_embedded_asset!(
+            &*asset_server,
+            "../../assets/sprites/aphid.png",
+            |settings: &mut ImageLoaderSettings| settings.sampler = ImageSampler::nearest()
+        ),
+        ladybug: load_embedded_asset!(
+            &*asset_server,
+            "../../assets/sprites/ladybug.png",
+            |settings: &mut ImageLoaderSettings| settings.sampler = ImageSampler::nearest()
+        ),
         badge: meshes.add(Circle::new(inner * BADGE_RADIUS)),
         badge_shadow_mesh: meshes.add(Circle::new(inner * (BADGE_RADIUS + BADGE_SHADOW_OFFSET))),
         badge_colours: [
@@ -1612,7 +1678,16 @@ fn setup(
         food: board.food_params(),
     };
     spawn_panel(&mut commands, &params, ui_camera, &creature_assets);
-    spawn_toolbar(&mut commands, ui_camera, &creature_assets);
+    spawn_summary(
+        &mut commands,
+        ui_camera,
+        &creature_assets,
+        load_embedded_asset!(
+            &*asset_server,
+            "../../assets/sprites/leaf.png",
+            |settings: &mut ImageLoaderSettings| settings.sampler = ImageSampler::nearest()
+        ),
+    );
     commands.insert_resource(creature_assets);
     commands.insert_resource(SavedParams(params));
     commands.insert_resource(params);
@@ -1681,6 +1756,7 @@ fn board_render_assets(app: &mut App) {
     embedded_asset!(app, "../../assets/shaders/board_cell.wgsl");
     embedded_asset!(app, "../../assets/sprites/aphid.png");
     embedded_asset!(app, "../../assets/sprites/ladybug.png");
+    embedded_asset!(app, "../../assets/sprites/leaf.png");
 }
 
 #[derive(Asset, TypePath, AsBindGroup, Debug, Clone)]
@@ -1714,8 +1790,6 @@ struct CellPalette([Handle<CellMaterial>; MAX_FOOD as usize + 1]);
 struct CreatureAssets {
     aphid: Handle<Image>,
     ladybug: Handle<Image>,
-    halo_mesh: Handle<Mesh>,
-    halo_material: Handle<ColorMaterial>,
     badge: Handle<Mesh>,
     badge_shadow_mesh: Handle<Mesh>,
     badge_colours: [Handle<ColorMaterial>; 2],
@@ -1929,7 +2003,10 @@ fn tab_button(caption: &'static str, tab: PanelTab) -> impl Scene {
         @FeathersButton
         Node { flex_grow: 1.0 }
         TabButton({tab})
-        on(move |_: On<Activate>, mut active: ResMut<ActiveTab>| { active.0 = tab; })
+        on(move |_: On<Activate>, mut active: ResMut<ActiveTab>, mut panel: ResMut<PropertiesPanel>| {
+            active.0 = tab;
+            panel.open = true;
+        })
         Children [(Text(caption) ThemedText)]
     }
 }
@@ -2043,8 +2120,8 @@ fn population_card(
 ) -> impl Scene {
     bsn! {
         Node {
-            flex_grow: 1.0, flex_basis: px(0), min_width: px(0),
-            height: px(68), padding: UiRect::axes(px(12), px(8)),
+            flex_shrink: 0.0,
+            height: px(76), padding: UiRect::axes(px(12), px(8)),
             column_gap: px(10), align_items: AlignItems::Center,
             border_radius: BorderRadius::all(px(8)),
         }
@@ -2067,55 +2144,94 @@ fn population_card(
     }
 }
 
-fn spawn_toolbar(commands: &mut Commands, camera: Entity, assets: &CreatureAssets) {
+fn spawn_summary(
+    commands: &mut Commands,
+    camera: Entity,
+    assets: &CreatureAssets,
+    food_icon: Handle<Image>,
+) {
     commands.spawn_scene(bsn! {
         Node {
             position_type: PositionType::Absolute,
-            left: px(PANEL_WIDTH), right: px(0), top: px(0),
-            height: px(TOOLBAR_HEIGHT),
-            padding: UiRect::axes(px(18), px(12)),
-            flex_direction: FlexDirection::Column, row_gap: px(8),
+            left: px(0), top: px(0), bottom: px(0), width: px(SUMMARY_WIDTH),
+            padding: UiRect::all(px(16)),
+            flex_direction: FlexDirection::Column, row_gap: px(12),
         }
         ThemeBackgroundColor(tokens::WINDOW_BG)
         Children [
+            ui_text("Aphids & Ladybugs", 21.0),
+            population_card("Aphids", 0, Some(assets.aphid.clone())),
+            population_card("Ladybugs", 1, Some(assets.ladybug.clone())),
+            population_card("Food available", 2, Some(food_icon)),
             (
                 Node { column_gap: px(8), align_items: AlignItems::Center }
                 Children [
                     (
                         @FeathersButton { @variant: ButtonVariant::Primary }
-                        Node { min_width: px(72) }
+                        Node { flex_grow: 1.0, min_width: px(72) }
                         on(|_: On<Activate>, mut actions: MessageWriter<RunAction>| { actions.write(RunAction::TogglePlay); })
                         Children [(Text("Pause") ThemedText PlayLabel)]
                     ),
                     run_button("Step", RunAction::Step),
                     run_button("Reset", RunAction::Reset),
-                    (Node { width: px(12) }),
+                ]
+            ),
+            (
+                Node { column_gap: px(8), align_items: AlignItems::Center }
+                Children [
                     run_button("−", RunAction::Slower),
-                    (Node { width: px(94), justify_content: JustifyContent::Center }
+                    (Node { flex_grow: 1.0, justify_content: JustifyContent::Center }
                         Children [({ui_text("", 14.0)} SpeedLabel)]),
                     run_button("+", RunAction::Faster),
-                    (Node { flex_grow: 1.0 }),
-                    run_button("Fit board", RunAction::Fit),
                 ]
             ),
+            ({ui_text("", 14.0)} PlaybackStatus),
+            run_button("Fit board", RunAction::Fit),
+            ({ui_text("", 14.0)} StatusLabel),
+            (Node { flex_grow: 1.0 }),
             (
-                Node { column_gap: px(8) }
-                Children [
-                    population_card("Aphids", 0, Some(assets.aphid.clone())),
-                    population_card("Ladybugs", 1, Some(assets.ladybug.clone())),
-                    population_card("Food available", 2, None),
-                ]
-            ),
-            (
-                Node { column_gap: px(12), align_items: AlignItems::Center }
-                Children [
-                    ({ui_text("", 14.0)} PlaybackStatus),
-                    (Node { flex_grow: 1.0 }),
-                    ({ui_text("", 14.0)} StatusLabel),
-                ]
+                @FeathersButton
+                PropertiesToggle
+                on(toggle_properties)
+                Children [(Text("Show properties") ThemedText PropertiesToggleLabel)]
             ),
         ]
     }).insert(UiTargetCamera(camera));
+}
+
+fn toggle_properties(
+    _: On<Activate>,
+    mut panel: ResMut<PropertiesPanel>,
+    mut focus: ResMut<InputFocus>,
+) {
+    panel.open = !panel.open;
+    // A hidden text field or button must not keep owning keyboard shortcuts.
+    focus.clear();
+}
+
+fn sync_properties_panel(
+    panel: Res<PropertiesPanel>,
+    mut roots: Query<&mut Node, With<PropertiesRoot>>,
+    mut labels: Query<&mut Text, With<PropertiesToggleLabel>>,
+) {
+    if !panel.is_changed() {
+        return;
+    }
+    for mut node in &mut roots {
+        node.display = if panel.open {
+            Display::Flex
+        } else {
+            Display::None
+        };
+    }
+    for mut text in &mut labels {
+        text.0 = if panel.open {
+            "Hide properties"
+        } else {
+            "Show properties"
+        }
+        .into();
+    }
 }
 
 /// One step of the food scale, in the same colour as a cell with that food.
@@ -2290,7 +2406,12 @@ fn spawn_panel(
 ) {
     let root = commands
         .spawn_scene(bsn! {
-            Node { width: px(PANEL_WIDTH), height: percent(100) }
+            Node {
+                position_type: PositionType::Absolute,
+                right: px(0), top: px(0), bottom: px(0), width: px(PANEL_WIDTH),
+                display: Display::None,
+            }
+            PropertiesRoot
             ThemeBackgroundColor(tokens::WINDOW_BG)
                 Children [
                 (
@@ -2300,8 +2421,17 @@ fn spawn_panel(
                         flex_direction: FlexDirection::Column, row_gap: px(6),
                     }
                     Children [
-                        ui_text("Aphids & Ladybugs", 21.0),
-                        label_small("An evolving ecosystem"),
+                        (
+                            Node { justify_content: JustifyContent::SpaceBetween, align_items: AlignItems::Center }
+                            Children [
+                                ui_text("Properties", 18.0),
+                                (
+                                    @FeathersButton { @variant: ButtonVariant::Plain }
+                                    on(toggle_properties)
+                                    Children [(Text("Hide") ThemedText)]
+                                ),
+                            ]
+                        ),
                         (
                             Node { column_gap: px(4), margin: UiRect::top(px(14)) }
                             Children [
@@ -2601,13 +2731,14 @@ fn apply_parameter_values(params: &Params, board: &mut Board, history: &mut Hist
     board.set_food_params(params.food);
 }
 
-/// Splits the window: panel on the left, board top-right, chart bottom-right.
-/// Runs only when the window changes. Setting camera viewports also keeps
+/// Fits the board and chart between the summary and optional properties panel.
+/// Runs when the window or either panel changes. Setting camera viewports also keeps
 /// hover picking right for free, since `viewport_to_world_2d` is
 /// viewport-aware.
 fn layout_viewports(
     windows: Query<Ref<Window>>,
     panel_state: Res<ChartPanel>,
+    properties: Res<PropertiesPanel>,
     mut board_camera: Query<&mut Camera, (With<BoardCamera>, Without<ChartCamera>)>,
     mut chart_camera: Query<(&mut Camera, &mut Projection), With<ChartCamera>>,
     mut gizmo_config: ResMut<GizmoConfigStore>,
@@ -2621,28 +2752,28 @@ fn layout_viewports(
         return;
     };
 
-    if !(window.is_changed() || panel_state.is_changed()) {
+    if !(window.is_changed() || panel_state.is_changed() || properties.is_changed()) {
         return;
     }
     let height = panel_state.effective_height(window.height());
     chart.is_active = !panel_state.collapsed;
     let scale = window.resolution.scale_factor();
     let physical = window.resolution.physical_size();
-    let panel = (PANEL_WIDTH * scale).round() as u32;
+    let summary = (SUMMARY_WIDTH * scale).round() as u32;
+    let properties = (properties.width() * scale).round() as u32;
     let strip = (height * scale).round() as u32;
-    let toolbar = (TOOLBAR_HEIGHT * scale).round() as u32;
-    if physical.x <= panel || physical.y <= strip + toolbar {
+    if physical.x <= summary + properties || physical.y <= strip {
         return;
     }
-    let width = physical.x - panel;
+    let width = physical.x - summary - properties;
 
     board.viewport = Some(Viewport {
-        physical_position: UVec2::new(panel, toolbar),
-        physical_size: UVec2::new(width, physical.y - strip - toolbar),
+        physical_position: UVec2::new(summary, 0),
+        physical_size: UVec2::new(width, physical.y - strip),
         ..default()
     });
     chart.viewport = Some(Viewport {
-        physical_position: UVec2::new(panel, physical.y - strip),
+        physical_position: UVec2::new(summary, physical.y - strip),
         physical_size: UVec2::new(width, strip),
         ..default()
     });
@@ -2670,6 +2801,7 @@ fn chart_resize_input(
     windows: Query<&Window>,
     mouse: Res<ButtonInput<MouseButton>>,
     mut panel: ResMut<ChartPanel>,
+    properties: Res<PropertiesPanel>,
 ) {
     let Ok(window) = windows.single() else {
         return;
@@ -2683,7 +2815,8 @@ fn chart_resize_input(
     let edge = window.height() - panel.effective_height(window.height());
     if !panel.collapsed
         && mouse.just_pressed(MouseButton::Left)
-        && cursor.x >= PANEL_WIDTH
+        && cursor.x >= SUMMARY_WIDTH
+        && cursor.x < window.width() - properties.width()
         && (cursor.y - edge).abs() <= 5.0
     {
         panel.dragging = true;
@@ -2691,7 +2824,7 @@ fn chart_resize_input(
     if panel.dragging {
         panel.height = (window.height() - cursor.y).clamp(
             CHART_MIN_HEIGHT,
-            (window.height() - TOOLBAR_HEIGHT - 180.0).clamp(CHART_MIN_HEIGHT, 420.0),
+            (window.height() - 180.0).clamp(CHART_MIN_HEIGHT, 420.0),
         );
     }
 }
@@ -2703,6 +2836,7 @@ type ChartNodes<'w, 's> = Query<
         Has<ChartRoot>,
         Has<ChartExpandedOnly>,
         Has<ChartEmpty>,
+        Has<ChartEventLegend>,
         &'static mut Node,
     ),
     Or<(With<ChartRoot>, With<ChartExpandedOnly>, With<ChartEmpty>)>,
@@ -2711,17 +2845,20 @@ type ChartNodes<'w, 's> = Query<
 fn sync_chart_panel(
     size: Res<ChartSize>,
     panel: Res<ChartPanel>,
+    properties: Res<PropertiesPanel>,
     history: Res<History>,
     mut nodes: ChartNodes,
     mut labels: Query<&mut Text, With<ChartToggleText>>,
     mut backgrounds: Query<&mut BackgroundColor, With<ChartRoot>>,
 ) {
-    if !(size.is_changed() || panel.is_changed() || history.is_changed()) {
+    if !(size.is_changed() || panel.is_changed() || properties.is_changed() || history.is_changed())
+    {
         return;
     }
-    for (root, expanded, empty, mut node) in &mut nodes {
+    for (root, expanded, empty, event_legend, mut node) in &mut nodes {
         if root {
             node.height = px(size.1);
+            node.right = px(properties.width());
         }
         if expanded {
             node.display = if panel.collapsed {
@@ -2736,7 +2873,12 @@ fn sync_chart_panel(
             } else {
                 Display::None
             };
-            node.top = px(PLOT_TOP + (size.1 - PLOT_TOP - PLOT_BOTTOM) * 0.4);
+            let plot = plot_rect(size.0, size.1);
+            node.top = px(plot.min.y + plot.height() * 0.4);
+        }
+        if event_legend {
+            // Both sidebars leave a narrower chart in compact windows.
+            node.top = px(if size.0 < 440.0 { 60.0 } else { 42.0 });
         }
     }
     for mut label in &mut labels {
@@ -2765,7 +2907,11 @@ fn sync_chart_panel(
 fn plot_rect(width: f32, height: f32) -> Rect {
     Rect::new(
         PLOT_LEFT,
-        PLOT_TOP,
+        if width < 440.0 {
+            PLOT_TOP + 18.0
+        } else {
+            PLOT_TOP
+        },
         (width - PLOT_RIGHT).max(PLOT_LEFT + 1.0),
         height - PLOT_BOTTOM,
     )
@@ -2848,7 +2994,7 @@ fn spawn_chart_overlay(commands: &mut Commands, ui_camera: Entity, font: Handle<
             UiTargetCamera(ui_camera),
             Node {
                 position_type: PositionType::Absolute,
-                left: px(PANEL_WIDTH),
+                left: px(SUMMARY_WIDTH),
                 right: px(0),
                 bottom: px(0),
                 height: px(CHART_HEIGHT),
@@ -2893,6 +3039,7 @@ fn spawn_chart_overlay(commands: &mut Commands, ui_camera: Entity, font: Handle<
             strip
                 .spawn((
                     ChartExpandedOnly,
+                    ChartEventLegend,
                     Node {
                         right: px(16),
                         top: px(42),
@@ -3228,9 +3375,10 @@ fn update_edit_preview(
 fn scroll_panel(
     windows: Query<&Window>,
     scroll: Res<AccumulatedMouseScroll>,
+    properties: Res<PropertiesPanel>,
     mut panel: Query<(&mut ScrollPosition, &ComputedNode), With<PanelRoot>>,
 ) {
-    if scroll.delta.y == 0.0 {
+    if !properties.open || scroll.delta.y == 0.0 {
         return;
     }
     let (Ok(window), Ok((mut position, computed))) = (windows.single(), panel.single_mut()) else {
@@ -3238,7 +3386,7 @@ fn scroll_panel(
     };
     if !window
         .cursor_position()
-        .is_some_and(|cursor| cursor.x < PANEL_WIDTH && cursor.y >= PANEL_HEADER)
+        .is_some_and(|cursor| cursor.x >= window.width() - PANEL_WIDTH && cursor.y >= PANEL_HEADER)
     {
         return;
     }
@@ -3282,7 +3430,7 @@ fn chart_hover(
             Some(probe) => (len > 0).then(|| probe.0.min(len - 1)),
             None => window.cursor_position().and_then(|cursor| {
                 let local = Vec2::new(
-                    cursor.x - PANEL_WIDTH,
+                    cursor.x - SUMMARY_WIDTH,
                     cursor.y - (window.height() - size.1),
                 );
                 // A little wider than the plot, so the first and last turns are as
@@ -3582,7 +3730,7 @@ fn keyboard_controls(
     mut actions: MessageWriter<RunAction>,
     (mut overlay, mut view): (ResMut<FoodOverlay>, ResMut<BoardView>),
     mut edit: ResMut<EditMode>,
-    mut active: ResMut<ActiveTab>,
+    (mut active, mut properties): (ResMut<ActiveTab>, ResMut<PropertiesPanel>),
     text_fields: Query<(), With<EditableText>>,
 ) {
     // Focused Feathers widgets own their keyboard input, including Space. Do
@@ -3616,21 +3764,25 @@ fn keyboard_controls(
     if keys.just_pressed(KeyCode::KeyE) {
         edit.enabled = !edit.enabled;
         active.0 = PanelTab::Edit;
+        properties.open = true;
         focus.clear();
     }
     if keys.just_pressed(KeyCode::KeyA) {
         edit.select(EditTool::Aphid);
         active.0 = PanelTab::Edit;
+        properties.open = true;
         focus.clear();
     }
     if keys.just_pressed(KeyCode::KeyL) {
         edit.select(EditTool::Ladybug);
         active.0 = PanelTab::Edit;
+        properties.open = true;
         focus.clear();
     }
     if keys.just_pressed(KeyCode::KeyX) {
         edit.select(EditTool::Erase);
         active.0 = PanelTab::Edit;
+        properties.open = true;
         focus.clear();
     }
     if keys.just_pressed(KeyCode::KeyF) {
@@ -3854,8 +4006,7 @@ fn camera_controls(
     ),
     mut pointer: ResMut<BoardPointer>,
     mut focus: ResMut<InputFocus>,
-    chart_size: Res<ChartSize>,
-    chart_panel: Res<ChartPanel>,
+    (chart_size, chart_panel, properties): (Res<ChartSize>, Res<ChartPanel>, Res<PropertiesPanel>),
 ) {
     let chart_height = chart_size.1;
     let (Ok(window), Ok((mut transform, mut projection))) = (windows.single(), camera.single_mut())
@@ -3868,7 +4019,7 @@ fn camera_controls(
     let cursor = window.cursor_position();
     let over_board = !chart_panel.dragging
         && cursor.is_some_and(|cursor| {
-            board_rect(window, chart_height).contains(cursor)
+            board_rect(window, chart_height, &properties).contains(cursor)
                 && cursor.y < window.height() - chart_height - 5.0
         });
     let buttons = [MouseButton::Left, MouseButton::Middle];
@@ -3900,13 +4051,13 @@ fn camera_controls(
     }
 }
 
-/// The board's area in logical window coordinates: right of the panel, above
-/// the chart strip.
-fn board_rect(window: &Window, chart_height: f32) -> Rect {
+/// The board's area in logical window coordinates: between the sidebars and
+/// above the chart strip.
+fn board_rect(window: &Window, chart_height: f32, properties: &PropertiesPanel) -> Rect {
     Rect::new(
-        PANEL_WIDTH,
-        TOOLBAR_HEIGHT,
-        window.width(),
+        SUMMARY_WIDTH,
+        0.0,
+        window.width() - properties.width(),
         (window.height() - chart_height).max(0.0),
     )
 }
@@ -3919,7 +4070,7 @@ fn hovered_cell(
     board: Res<BoardRes>,
     probe: Option<Res<ProbeCell>>,
     mut hovered: ResMut<Hovered>,
-    chart_size: Res<ChartSize>,
+    (chart_size, properties): (Res<ChartSize>, Res<PropertiesPanel>),
 ) {
     let chart_height = chart_size.1;
     if let Some(probe) = probe {
@@ -3932,7 +4083,7 @@ fn hovered_cell(
 
     hovered.0 = window
         .cursor_position()
-        .filter(|&cursor| board_rect(window, chart_height).contains(cursor))
+        .filter(|&cursor| board_rect(window, chart_height, &properties).contains(cursor))
         .and_then(|cursor| camera.viewport_to_world_2d(camera_transform, cursor).ok())
         .and_then(|world| {
             let col = (world.x / CELL + 0.5).floor();
@@ -4379,13 +4530,6 @@ fn sync_creatures(
                             MoveTween::born(target, scale)
                         },
                     ))
-                    .with_children(|creature| {
-                        creature.spawn((
-                            Mesh2d(assets.halo_mesh.clone()),
-                            MeshMaterial2d(assets.halo_material.clone()),
-                            Transform::from_xyz(0.0, 0.0, -0.1),
-                        ));
-                    })
                     .id();
                 seen.insert(snapshot.id, entity);
             }
@@ -4699,7 +4843,7 @@ fn update_cell_popup(
     board: Res<BoardRes>,
     mut popup: Query<(&mut Node, &ComputedNode, &mut Visibility), With<CellPopup>>,
     mut lines: Query<(&PopupLine, &mut Text)>,
-    chart_size: Res<ChartSize>,
+    (chart_size, properties): (Res<ChartSize>, Res<PropertiesPanel>),
 ) {
     let chart_height = chart_size.1;
     let (Ok(window), Ok((mut node, computed, mut visibility))) =
@@ -4715,7 +4859,14 @@ fn update_cell_popup(
         visibility.set_if_neq(Visibility::Hidden);
         return;
     };
-    let Some(anchor) = popup_anchor(window, cameras.single().ok(), row, col, chart_height) else {
+    let Some(anchor) = popup_anchor(
+        window,
+        cameras.single().ok(),
+        row,
+        col,
+        chart_height,
+        &properties,
+    ) else {
         visibility.set_if_neq(Visibility::Hidden);
         return;
     };
@@ -4752,10 +4903,11 @@ fn popup_anchor(
     row: usize,
     col: usize,
     chart_height: f32,
+    properties: &PropertiesPanel,
 ) -> Option<Vec2> {
     window
         .cursor_position()
-        .filter(|&cursor| board_rect(window, chart_height).contains(cursor))
+        .filter(|&cursor| board_rect(window, chart_height, properties).contains(cursor))
         .or_else(|| {
             let (camera, transform) = camera?;
             camera
@@ -4801,7 +4953,7 @@ fn update_hud(
         return;
     }
     let state = if edit.enabled {
-        "Editing · simulation paused"
+        "Editing (paused)"
     } else if stats.extinct {
         "Extinct"
     } else if playing.0 {
@@ -5045,8 +5197,8 @@ mod tests {
         panel.apply(ChartAction::Toggle, 860.0);
         assert_eq!(panel.effective_height(860.0), 260.0);
         panel.height = 1000.0;
-        assert_eq!(panel.effective_height(640.0), 300.0);
-        assert!(640.0 - TOOLBAR_HEIGHT - panel.effective_height(640.0) >= 180.0);
+        assert_eq!(panel.effective_height(640.0), 420.0);
+        assert!(640.0 - panel.effective_height(640.0) >= 180.0);
         let plot = plot_rect(600.0, panel.effective_height(640.0));
         assert!(plot.height() > 0.0);
         panel.height = 0.0;
@@ -5299,6 +5451,7 @@ mod tests {
         world.init_resource::<FoodOverlay>();
         world.init_resource::<BoardView>();
         world.init_resource::<ActiveTab>();
+        world.init_resource::<PropertiesPanel>();
         let field = world.spawn((SeedField, EditableText::new("7"))).id();
         world
             .resource_mut::<InputFocus>()
@@ -5408,6 +5561,7 @@ mod tests {
         world.init_resource::<FoodOverlay>();
         world.init_resource::<BoardView>();
         world.init_resource::<ActiveTab>();
+        world.init_resource::<PropertiesPanel>();
         let press_f = |world: &mut World| {
             let mut keys = ButtonInput::<KeyCode>::default();
             keys.press(KeyCode::KeyF);
@@ -5439,6 +5593,7 @@ mod tests {
         world.init_resource::<FoodOverlay>();
         world.init_resource::<BoardView>();
         world.init_resource::<ActiveTab>();
+        world.init_resource::<PropertiesPanel>();
         let focused_button = world.spawn_empty().id();
         world
             .resource_mut::<InputFocus>()
@@ -5500,7 +5655,7 @@ mod tests {
     }
 
     #[test]
-    fn fit_restores_camera_and_toolbar_is_outside_board_hit_area() {
+    fn fit_restores_camera_and_sidebars_are_outside_board_hit_area() {
         let mut world = world_mid_run();
         let camera = world
             .spawn((
@@ -5525,10 +5680,13 @@ mod tests {
             resolution: (900u32, 640u32).into(),
             ..default()
         };
-        assert!(!board_rect(&window, CHART_HEIGHT).contains(Vec2::new(500.0, 40.0)));
-        assert!(
-            board_rect(&window, CHART_HEIGHT).contains(Vec2::new(500.0, TOOLBAR_HEIGHT + 10.0))
-        );
+        let mut properties = PropertiesPanel::default();
+        assert!(!board_rect(&window, CHART_HEIGHT, &properties).contains(Vec2::new(40.0, 40.0)));
+        assert!(board_rect(&window, CHART_HEIGHT, &properties).contains(Vec2::new(800.0, 40.0)));
+        properties.open = true;
+        assert!(!board_rect(&window, CHART_HEIGHT, &properties).contains(Vec2::new(800.0, 40.0)));
+        assert!(board_rect(&window, CHART_HEIGHT, &properties).contains(Vec2::new(500.0, 40.0)));
+        assert!(!board_rect(&window, CHART_HEIGHT, &properties).contains(Vec2::new(500.0, 600.0)));
     }
 
     #[test]
@@ -5666,8 +5824,6 @@ mod tests {
         world.insert_resource(CreatureAssets {
             aphid: aphid.clone(),
             ladybug: ladybug.clone(),
-            halo_mesh: Handle::default(),
-            halo_material: Handle::default(),
             badge: Handle::default(),
             badge_shadow_mesh: Handle::default(),
             badge_colours: [Handle::default(), Handle::default()],
@@ -5838,8 +5994,6 @@ mod tests {
         world.insert_resource(CreatureAssets {
             aphid: Handle::default(),
             ladybug: Handle::default(),
-            halo_mesh: circle.clone(),
-            halo_material: colour.clone(),
             badge: circle.clone(),
             badge_shadow_mesh: circle.clone(),
             badge_colours: [colour.clone(), colour.clone()],

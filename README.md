@@ -38,7 +38,7 @@ The repository is organized around a CLI executable, a GUI executable, and one e
 
 `src/bin/gui.rs` contains the Bevy visual simulation: the board, a
 `bevy_feathers` settings sidebar, a population history chart, the food overlay,
-cell editing, illustrated aphid/ladybug sprites, and count badges for crowded
+cell editing, pixel-art aphid/ladybug sprites, and count badges for crowded
 cells. `notes/bevy-board-rendering.md` records the design and the trade-offs
 behind it.
 
@@ -111,24 +111,28 @@ cargo run --bin gui
 
 ## GUI Controls
 
-The Bevy UI has a persistent toolbar with Play/Pause, Step, Reset, speed controls,
-and Fit board. Step pauses and advances one turn. Reset pauses and restores the
-last saved setup, or the board loaded at launch if nothing has been saved, using
-the current seed and probabilities. The toolbar's status line reports the outcome
+The Bevy UI has a persistent left sidebar with population and food totals,
+Play/Pause, Step, Reset, speed controls, and Fit board. Step pauses and advances
+one turn. Reset pauses and restores the last saved setup, or the board loaded at launch if nothing has been saved, using
+the current seed and probabilities. The sidebar's status line reports the outcome
 of the most recent save or seed change for a few seconds.
 
-The sidebar has **Overview**, **Parameters**, and **Edit** tabs. Parameters are
-grouped by Aphids, Ladybugs, and Environment. Each parameter has a slider, an
+Use **Show properties** at the bottom left to open the right sidebar with
+**Overview**, **Parameters**, and **Edit** tabs. **Hide properties** (or **Hide**
+in the right sidebar) closes it. The board stays centered in the available space,
+with population history below it. Edit shortcuts open the properties sidebar.
+
+Parameters are grouped by Aphids, Ladybugs, and Environment. Each parameter has a slider, an
 editable percentage, and a short explanation. Enter or leaving the field applies
 a value from 0 to 100; invalid input restores the previous value and reports an
 error. Sliders also support arrow-key adjustment. A bullet marks values changed
 from the saved setup, and each group has **Restore defaults** for the built-in
 values. A successful Save setup updates the saved-value baseline. The settings area scrolls
-with the wheel or its scrollbar, while the tabs and toolbar stay visible.
+with the wheel or its scrollbar, while the tabs and left sidebar stay visible.
 Hovering a cell opens the cell inspector as a popup beside the pointer, so
 inspecting a cell never moves the controls.
 
-Aphid, ladybug, and food totals stay visible above the board in every tab,
+Aphid, ladybug, and food totals stay visible in the left sidebar in every tab,
 alongside their changes in the last turn. Overview keeps recent births and
 deaths and the food layer controls in view; **Run setup** and **Controls &
 shortcuts** expand when needed.
@@ -136,9 +140,9 @@ shortcuts** expand when needed.
 **Population** view uses neutral cells to emphasize creatures. **Food** view
 shades cells by food supply and offers optional, subdued bars and speckles.
 Creatures have a dark backing for contrast in both views. When cells are smaller
-than 28 logical pixels, illustrated creatures become one marker per occupied
+than 28 logical pixels, pixel-art creatures become one marker per occupied
 cell and species: green circles for aphids and red diamonds for ladybugs. Mixed
-cells retain both markers. Zooming in restores the detailed sprites and counts.
+cells retain both markers. Zooming in restores the pixel-art sprites and counts.
 `F` switches to Food view and toggles its details.
 
 The Overview tab's expandable Run setup section shows the seed the run started from and a
@@ -163,7 +167,7 @@ The GUI reads and writes the same XDG `simulation.toml` as the CLI. Reloading a
 saved setup from disk without restarting is not implemented; Reset restores the
 last setup saved in this session, or the board loaded at launch.
 
-The Edit tab has illustrated **Aphid** (`A`) and **Ladybug** (`L`) tools and an
+The Edit tab has pixel-art **Aphid** (`A`) and **Ladybug** (`L`) tools and an
 **Erase** (`X`) tool. Choosing a tool pauses the simulation and shows a placement
 preview on the board. Left click places a creature; right click removes one of
 the selected species. Erase removes all creatures in the cell, leaving its food.

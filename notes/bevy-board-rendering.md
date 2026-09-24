@@ -183,10 +183,11 @@ from `draw_round_rect_lines` folds into the same shader.
 
 ## Creatures and animation
 
-The current renderer uses transparent illustrated PNGs in `assets/sprites/`:
+The current renderer uses transparent 32 × 32 pixel-art PNGs in `assets/sprites/`:
 a pear-shaped chartreuse aphid and a coral ladybug with a spotted round shell.
 The PNGs are embedded in the executable so standalone launches find them too.
-Each species shares a texture, with an explicit sprite size that includes its
+Each species shares a nearest-neighbor sampled texture. Dark outlines and bright
+edge accents provide contrast without a background disc. The explicit sprite size includes its
 transparent margin and appendages. Existing movement and birth tweens, cell
 slots, crowding scale, and count badges are preserved. The original circle-mesh
 experiment described below has been replaced. Art details and generation
