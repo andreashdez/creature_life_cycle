@@ -54,8 +54,9 @@ static STABLE_DENSE_CONFIG: LazyLock<String> = LazyLock::new(build_stable_dense_
 
 fn board_with_config(config: &str) -> (Board, Random) {
     let mut random = Random::with_seed(SEED);
-    let mut board = Board::new();
-    parse_simulation_config(config, &mut board, &mut random).expect("benchmark config is valid");
+    let board = parse_simulation_config(config, &mut random)
+        .expect("benchmark config is valid")
+        .board;
     (board, random)
 }
 

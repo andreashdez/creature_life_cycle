@@ -373,19 +373,17 @@ pub struct Board {
     food_params: FoodParams,
 }
 
-impl Default for Board {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl Board {
-    /// Creates an empty board. `parse_simulation_config` or `load_standard_data` must initialize the field.
-    pub fn new() -> Self {
-        Self {
-            rows: 0,
-            cols: 0,
-            field: Vec::new(),
+    /// Creates a board of the given size with random starting food and no creatures.
+    ///
+    /// This is the only way a `Board` comes into being, so every board has its cells from the
+    /// start. The public constructors, `Board::standard` and `parse_simulation_config`, build on
+    /// it and then add creatures.
+    fn with_field(rows: usize, cols: usize, random: &mut Random) -> Self {
+        let mut board = Self {
+            rows,
+            cols,
+            field: Vec::with_capacity(rows * cols),
             creatures: Vec::new(),
             cell_slots: Vec::new(),
             active_creatures: Vec::new(),
@@ -397,7 +395,37 @@ impl Board {
             aphid_params: AphidParams::default(),
             ladybug_params: LadybugParams::default(),
             food_params: FoodParams::default(),
+        };
+
+        for _ in 0..rows * cols {
+            let food = random.int_inclusive(0, MAX_CELL_FOOD);
+            board.field.push(Location {
+                aphids: Vec::new(),
+                ladybugs: Vec::new(),
+                food,
+            });
+            board.summary.food += food;
         }
+
+        board
+    }
+
+    /// Creates the built-in standard board, the same one `simulation.example.toml` describes.
+    pub fn standard(random: &mut Random) -> Self {
+        let mut board = Self::with_field(10, 10, random);
+
+        board.add_aphid(3, 5, 10);
+        board.add_aphid(4, 8, 10);
+        board.add_aphid(2, 9, 10);
+        board.add_aphid(1, 6, 10);
+        board.add_aphid(1, 9, 10);
+
+        board.add_ladybug(5, 9, 15, random);
+        board.add_ladybug(1, 1, 15, random);
+        board.add_ladybug(3, 8, 15, random);
+        board.add_ladybug(9, 2, 15, random);
+
+        board
     }
 
     /// Sets active aphid behavior parameters.
@@ -485,33 +513,6 @@ impl Board {
                     location: creature.location(),
                     cell_slot: self.cell_slots[id],
                 });
-            }
-        }
-    }
-
-    /// Creates a new board field and assigns random starting food to each cell.
-    fn create_field(&mut self, rows: usize, cols: usize, random: &mut Random) {
-        self.rows = rows;
-        self.cols = cols;
-        self.field.clear();
-        self.creatures.clear();
-        self.cell_slots.clear();
-        self.active_creatures.clear();
-        self.turn_creatures.clear();
-        self.dead_creatures.clear();
-        self.death_marks.clear();
-        self.death_mark_epoch = 0;
-        self.summary = BoardSummary::default();
-
-        for _ in 0..rows {
-            for _ in 0..cols {
-                let food = random.int_inclusive(0, MAX_CELL_FOOD);
-                self.field.push(Location {
-                    aphids: Vec::new(),
-                    ladybugs: Vec::new(),
-                    food,
-                });
-                self.summary.food += food;
             }
         }
     }
@@ -1247,15 +1248,15 @@ pub struct LoadedBoard {
     pub notices: Vec<ConfigNotice>,
 }
 
-/// Parses TOML runtime configuration and initializes a board from it.
+/// Parses TOML runtime configuration and builds the board it describes.
 ///
 /// Starting creatures outside the board are left out rather than failing the load, and are
-/// returned as `ConfigNotice::OutsideBoard` so the caller can report them.
+/// returned as `ConfigNotice::OutsideBoard` so the caller can report them. Everything is validated
+/// before the board is built, so an invalid config draws nothing from `random`.
 pub fn parse_simulation_config(
     contents: &str,
-    board: &mut Board,
     random: &mut Random,
-) -> Result<Vec<ConfigNotice>, InvalidConfig> {
+) -> Result<LoadedBoard, InvalidConfig> {
     let config: SimulationConfig = toml::from_str(contents).map_err(InvalidConfig::Toml)?;
     let aphid_params = config
         .aphid
@@ -1277,7 +1278,7 @@ pub fn parse_simulation_config(
         return Err(InvalidConfig::EmptyBoard);
     }
 
-    board.create_field(config.board.rows, config.board.columns, random);
+    let mut board = Board::with_field(config.board.rows, config.board.columns, random);
 
     let mut notices = Vec::new();
     for ConfigCoordinates { x, y } in config.board.aphids {
@@ -1304,7 +1305,7 @@ pub fn parse_simulation_config(
     board.set_ladybug_params(ladybug_params);
     board.set_food_params(food_params);
 
-    Ok(notices)
+    Ok(LoadedBoard { board, notices })
 }
 
 /// Formats the current board and active behavior parameters as `simulation.toml` content.
@@ -1443,8 +1444,7 @@ fn back_up_invalid_config(path: &Path) -> Result<Option<PathBuf>, ConfigError> {
     };
     // The parse only checks validity, so it draws from a throwaway generator
     // and leaves the caller's random sequence untouched.
-    let mut scratch = Board::new();
-    if parse_simulation_config(&contents, &mut scratch, &mut Random::with_seed(0)).is_ok() {
+    if parse_simulation_config(&contents, &mut Random::with_seed(0)).is_ok() {
         return Ok(None);
     }
 
@@ -1556,17 +1556,14 @@ impl FoodConfig {
 /// asked for.
 pub fn load_configured_board(random: &mut Random) -> Result<LoadedBoard, ConfigError> {
     let Ok(path) = simulation_config_path() else {
-        let mut board = Board::new();
-        load_standard_data(&mut board, random);
         return Ok(LoadedBoard {
-            board,
+            board: Board::standard(random),
             notices: vec![ConfigNotice::NoConfigHome],
         });
     };
 
     let Some(contents) = read_config_file(&path)? else {
-        let mut board = Board::new();
-        load_standard_data(&mut board, random);
+        let board = Board::standard(random);
         let notice = match save_simulation_config(&board, &path) {
             Ok(()) => ConfigNotice::Created { path },
             Err(error) => ConfigNotice::NotCreated { error },
@@ -1613,30 +1610,10 @@ fn board_from_config(
     path: &Path,
     random: &mut Random,
 ) -> Result<LoadedBoard, ConfigError> {
-    let mut board = Board::new();
-    let notices = parse_simulation_config(contents, &mut board, random).map_err(|error| {
-        ConfigError::Invalid {
-            path: path.to_path_buf(),
-            error,
-        }
-    })?;
-    Ok(LoadedBoard { board, notices })
-}
-
-/// Loads the same default board data represented by `simulation.example.toml`.
-pub fn load_standard_data(board: &mut Board, random: &mut Random) {
-    board.create_field(10, 10, random);
-
-    board.add_aphid(3, 5, 10);
-    board.add_aphid(4, 8, 10);
-    board.add_aphid(2, 9, 10);
-    board.add_aphid(1, 6, 10);
-    board.add_aphid(1, 9, 10);
-
-    board.add_ladybug(5, 9, 15, random);
-    board.add_ladybug(1, 1, 15, random);
-    board.add_ladybug(3, 8, 15, random);
-    board.add_ladybug(9, 2, 15, random);
+    parse_simulation_config(contents, random).map_err(|error| ConfigError::Invalid {
+        path: path.to_path_buf(),
+        error,
+    })
 }
 
 /// Validates a probability value is in `0.0..=1.0`.
@@ -1668,10 +1645,7 @@ mod tests {
     use super::*;
 
     fn board_with_field(rows: usize, cols: usize) -> Board {
-        let mut random = Random::with_seed(1);
-        let mut board = Board::new();
-        board.create_field(rows, cols, &mut random);
-        board
+        Board::with_field(rows, cols, &mut Random::with_seed(1))
     }
 
     fn creature_cell_slot(board: &Board, id: usize) -> usize {
@@ -1691,9 +1665,8 @@ mod tests {
     #[test]
     fn parse_simulation_config_loads_board_and_params() {
         let mut random = Random::with_seed(1);
-        let mut board = Board::new();
 
-        parse_simulation_config(
+        let board = parse_simulation_config(
             r#"
 [board]
 rows = 2
@@ -1716,10 +1689,10 @@ procreation_probability = 0.1
 [food]
 regeneration_probability = 0.9
 "#,
-            &mut board,
             &mut random,
         )
-        .unwrap();
+        .unwrap()
+        .board;
 
         assert_eq!(board.rows, 2);
         assert_eq!(board.cols, 3);
@@ -1744,10 +1717,45 @@ regeneration_probability = 0.9
     }
 
     #[test]
+    fn standard_board_matches_the_example_config() {
+        let standard = Board::standard(&mut Random::with_seed(1));
+        let example = parse_simulation_config(
+            include_str!("../simulation.example.toml"),
+            &mut Random::with_seed(1),
+        )
+        .unwrap();
+
+        assert!(example.notices.is_empty());
+        assert_eq!(
+            format_simulation_config(&standard),
+            format_simulation_config(&example.board)
+        );
+        // Same seed, same draws: the food each cell starts with matches too.
+        assert_eq!(standard.summary(), example.board.summary());
+    }
+
+    #[test]
+    fn an_invalid_config_draws_nothing_from_the_generator() {
+        let mut random = Random::with_seed(1);
+        let invalid = "[board]\nrows = 0\ncolumns = 2\naphids = []\nladybugs = []\n";
+        assert!(matches!(
+            parse_simulation_config(invalid, &mut random),
+            Err(InvalidConfig::EmptyBoard)
+        ));
+
+        // A failed parse followed by the fallback must match the fallback alone,
+        // so the GUI's seeded run does not depend on whether the config was valid.
+        let after_failure = Board::standard(&mut random);
+        let mut reference = Random::with_seed(1);
+        let fresh = Board::standard(&mut reference);
+        assert_eq!(after_failure.summary(), fresh.summary());
+        assert_eq!(random.probability(), reference.probability());
+    }
+
+    #[test]
     fn format_simulation_config_round_trips() {
         let mut random = Random::with_seed(1);
-        let mut board = Board::new();
-        parse_simulation_config(
+        let board = parse_simulation_config(
             r#"
 [board]
 rows = 2
@@ -1770,15 +1778,16 @@ procreation_probability = 0.1
 [food]
 regeneration_probability = 0.9
 "#,
-            &mut board,
             &mut random,
         )
-        .unwrap();
+        .unwrap()
+        .board;
 
         let contents = format_simulation_config(&board);
         let mut round_trip_random = Random::with_seed(1);
-        let mut round_trip = Board::new();
-        parse_simulation_config(&contents, &mut round_trip, &mut round_trip_random).unwrap();
+        let round_trip = parse_simulation_config(&contents, &mut round_trip_random)
+            .unwrap()
+            .board;
 
         assert_eq!(round_trip.rows, 2);
         assert_eq!(round_trip.cols, 3);
@@ -1852,10 +1861,8 @@ regeneration_probability = 0.9
     #[test]
     fn creatures_outside_the_board_are_left_out_and_reported() {
         let mut random = Random::with_seed(1);
-        let mut board = Board::new();
-        let notices = parse_simulation_config(
+        let LoadedBoard { board, notices } = parse_simulation_config(
             "[board]\nrows = 2\ncolumns = 2\naphids = [{ x = 1, y = 1 }, { x = 2, y = 0 }]\nladybugs = [{ x = 0, y = 5 }]\n",
-            &mut board,
             &mut random,
         )
         .unwrap();
@@ -1963,7 +1970,6 @@ regeneration_probability = 0.9
     #[test]
     fn parse_simulation_config_rejects_out_of_range_probabilities() {
         let mut random = Random::with_seed(1);
-        let mut board = Board::new();
         assert!(matches!(
             parse_simulation_config(
                 r#"
@@ -1979,7 +1985,6 @@ kill_probability = 0.2
 accomplice_probability = 0.1
 procreation_probability = 0.4
 "#,
-                &mut board,
                 &mut random,
             ),
             Err(InvalidConfig::Probability {
@@ -2000,7 +2005,6 @@ ladybugs = []
 [food]
 regeneration_probability = -0.1
 "#,
-                &mut board,
                 &mut random,
             )
             .is_err()
@@ -2010,7 +2014,6 @@ regeneration_probability = -0.1
     #[test]
     fn parse_simulation_config_rejects_unknown_fields() {
         let mut random = Random::with_seed(1);
-        let mut board = Board::new();
 
         assert!(
             parse_simulation_config(
@@ -2022,7 +2025,6 @@ aphids = []
 ladybugs = []
 extra = true
 "#,
-                &mut board,
                 &mut random,
             )
             .is_err()

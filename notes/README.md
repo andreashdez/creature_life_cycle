@@ -36,7 +36,8 @@ exploratory documents written while working something out.
 | [0014](0014-stable-rng-algorithm.md) | The RNG algorithm is named explicitly as `ChaCha12Rng` | `b3f2441` |
 | [0015](0015-invalid-config-is-an-error.md) | An invalid config is an error, and Save backs it up | `20ad753` |
 | [0016](0016-cli-config-flag.md) | The CLI loads any config file with `--config` | `20ad753` |
-| [0017](0017-library-returns-typed-errors.md) | The library returns typed errors and notices, and never prints | — |
+| [0017](0017-library-returns-typed-errors.md) | The library returns typed errors and notices, and never prints | `d4d2ee5` |
+| [0018](0018-board-built-in-one-step.md) | A `Board` is built in one step | — |
 
 ## Design sketches
 

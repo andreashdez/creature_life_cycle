@@ -36,8 +36,7 @@ use bevy::ui::{Checked, InteractionDisabled};
 use bevy::ui_widgets::{Activate, SliderPrecision, SliderValue, ValueChange};
 use creature_life_cycle::{
     AphidParams, Board, Coordinates, CreatureSnapshot, CreatureSnapshotKind, FoodParams,
-    LadybugParams, Random, TurnStats, load_configured_board, load_standard_data,
-    save_configured_board,
+    LadybugParams, Random, TurnStats, load_configured_board, save_configured_board,
 };
 use std::collections::{HashMap, VecDeque};
 
@@ -1552,9 +1551,7 @@ fn setup(
             // overwriting it.
             eprintln!("Error: {error}; showing the standard board.");
             status.pin("Config file is invalid; showing the defaults.", false);
-            let mut board = Board::new();
-            load_standard_data(&mut board, &mut random);
-            board
+            Board::standard(&mut random)
         }
     };
     let (rows, cols) = (board.rows(), board.cols());
@@ -3865,13 +3862,10 @@ fn apply_run_actions(
             RunAction::Reset => {
                 sim.edits.0.clear();
                 let mut random = Random::with_seed(setup.seed.0);
-                let mut board = Board::new();
-                creature_life_cycle::parse_simulation_config(
-                    &setup.start.0,
-                    &mut board,
-                    &mut random,
-                )
-                .expect("the starting setup is generated from a valid board");
+                let mut board =
+                    creature_life_cycle::parse_simulation_config(&setup.start.0, &mut random)
+                        .expect("the starting setup is generated from a valid board")
+                        .board;
                 board.set_aphid_params(setup.params.aphid);
                 board.set_ladybug_params(setup.params.ladybug);
                 board.set_food_params(setup.params.food);
@@ -5361,8 +5355,9 @@ mod tests {
     fn world_mid_run() -> World {
         let config = "[board]\nrows = 4\ncolumns = 4\naphids = []\nladybugs = []\n";
         let mut random = Random::with_seed(7);
-        let mut board = Board::new();
-        creature_life_cycle::parse_simulation_config(config, &mut board, &mut random).unwrap();
+        let board = creature_life_cycle::parse_simulation_config(config, &mut random)
+            .unwrap()
+            .board;
 
         let mut history = History::default();
         for turn in 0..12 {
@@ -5545,8 +5540,9 @@ mod tests {
         )
         .unwrap();
         let mut random = Random::with_seed(1);
-        let mut reloaded = Board::new();
-        creature_life_cycle::parse_simulation_config(&saved, &mut reloaded, &mut random).unwrap();
+        let reloaded = creature_life_cycle::parse_simulation_config(&saved, &mut random)
+            .unwrap()
+            .board;
         assert_eq!(reloaded.cell_counts(1, 2), Some((1, 0)));
         assert_eq!(reloaded.aphid_params().prob_move, 0.31);
 
@@ -5594,8 +5590,7 @@ mod tests {
             broken
         );
         let saved = std::fs::read_to_string(config_dir.join("simulation.toml")).unwrap();
-        creature_life_cycle::parse_simulation_config(&saved, &mut Board::new(), &mut random)
-            .unwrap();
+        creature_life_cycle::parse_simulation_config(&saved, &mut random).unwrap();
     }
 
     #[test]
@@ -6068,8 +6063,9 @@ mod tests {
 
         let config = "[board]\nrows = 4\ncolumns = 4\naphids = []\nladybugs = []\n";
         let mut random = Random::with_seed(7);
-        let mut board = Board::new();
-        creature_life_cycle::parse_simulation_config(config, &mut board, &mut random).unwrap();
+        let mut board = creature_life_cycle::parse_simulation_config(config, &mut random)
+            .unwrap()
+            .board;
         for _ in 0..3 {
             board.add_aphid(1, 1, EDIT_APHID_LIFE);
         }

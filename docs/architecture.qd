@@ -65,6 +65,11 @@ Configuration moves through `parse_simulation_config`,
 `save_configured_board`, which keeps the TOML format in one place for both the
 CLI and the GUI.
 
+A `Board` is only ever built complete. `parse_simulation_config` returns the
+board a config describes, and `Board::standard` returns the built-in 10 × 10
+board that `simulation.example.toml` mirrors. There is no empty `Board::new`
+to fill in afterwards.
+
 The library never prints. Failures come back as a `ConfigError`, which names
 the file and wraps the underlying I/O error or `InvalidConfig`. Anything a
 successful load should report, such as a created default file or a starting
@@ -138,6 +143,7 @@ Longer **design sketches** keep descriptive names.
 | .repolink {0015} {blob/main/notes/0015-invalid-config-is-an-error.md} | An invalid config is an error, and Save backs it up |
 | .repolink {0016} {blob/main/notes/0016-cli-config-flag.md} | The CLI loads any config file with `--config` |
 | .repolink {0017} {blob/main/notes/0017-library-returns-typed-errors.md} | The library returns typed errors and notices, and never prints |
+| .repolink {0018} {blob/main/notes/0018-board-built-in-one-step.md} | A `Board` is built in one step |
 
 The design sketch
 .repolink {notes/bevy-board-rendering.md} {blob/main/notes/bevy-board-rendering.md}
