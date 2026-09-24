@@ -69,6 +69,12 @@ the README's rule sections, which are the spec.
 The GUI keeps `Board` in a resource and advances only through `Board::refresh`;
 edits go through `add_*` / `remove_*_at`.
 
+**The library never prints.** Failures are returned as `ConfigError` /
+`InvalidConfig`, and things a successful load should report as `ConfigNotice`.
+Printing, and choosing where a message goes, belongs to `src/main.rs` and
+`src/bin/gui.rs`. Add a variant rather than returning a `String`. See
+`notes/0017`.
+
 **The `gui` feature gate.** Bevy is optional behind the default-on `gui`
 feature. The library, CLI, tests, and benches must build without it (CI checks
 with `--no-default-features`). Do not use Bevy types outside `src/bin/gui.rs`.

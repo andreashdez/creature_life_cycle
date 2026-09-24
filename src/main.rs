@@ -35,7 +35,12 @@ fn main() -> ExitCode {
         None => load_configured_board(&mut random),
     };
     let mut board = match loaded {
-        Ok(board) => board,
+        Ok(loaded) => {
+            for notice in &loaded.notices {
+                eprintln!("{notice}");
+            }
+            loaded.board
+        }
         Err(error) => {
             eprintln!("Error: {error}");
             return ExitCode::FAILURE;

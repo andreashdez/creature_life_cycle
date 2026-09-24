@@ -1538,16 +1538,25 @@ fn setup(
     mut status: ResMut<StatusLine>,
 ) {
     let mut random = Random::with_seed(DEFAULT_SEED);
-    let board = load_configured_board(&mut random).unwrap_or_else(|error| {
-        // A broken config should not keep the window from opening, so the GUI
-        // shows the standard board and says so where the reader will see it.
-        // Saving later moves the broken file aside instead of overwriting it.
-        eprintln!("Error: {error}; showing the standard board.");
-        status.pin("Config file is invalid; showing the defaults.", false);
-        let mut board = Board::new();
-        load_standard_data(&mut board, &mut random);
-        board
-    });
+    let board = match load_configured_board(&mut random) {
+        Ok(loaded) => {
+            for notice in &loaded.notices {
+                eprintln!("{notice}");
+            }
+            loaded.board
+        }
+        Err(error) => {
+            // A broken config should not keep the window from opening, so the
+            // GUI shows the standard board and says so where the reader will
+            // see it. Saving later moves the broken file aside instead of
+            // overwriting it.
+            eprintln!("Error: {error}; showing the standard board.");
+            status.pin("Config file is invalid; showing the defaults.", false);
+            let mut board = Board::new();
+            load_standard_data(&mut board, &mut random);
+            board
+        }
+    };
     let (rows, cols) = (board.rows(), board.cols());
     let summary = board.summary();
     commands.insert_resource(StartingSetup(

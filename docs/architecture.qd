@@ -65,6 +65,12 @@ Configuration moves through `parse_simulation_config`,
 `save_configured_board`, which keeps the TOML format in one place for both the
 CLI and the GUI.
 
+The library never prints. Failures come back as a `ConfigError`, which names
+the file and wraps the underlying I/O error or `InvalidConfig`. Anything a
+successful load should report, such as a created default file or a starting
+creature outside the board, comes back as a `ConfigNotice`. Each front end
+decides where these go; today both write them to stderr.
+
 ## Dependencies
 
 | Crate | Purpose |
@@ -128,6 +134,10 @@ Longer **design sketches** keep descriptive names.
 | .repolink {0011} {blob/main/notes/0011-optional-gui-feature.md} | Bevy sits behind an optional, default-on `gui` feature |
 | .repolink {0012} {blob/main/notes/0012-github-actions-ci.md} | CI runs on GitHub Actions instead of Woodpecker |
 | .repolink {0013} {blob/main/notes/0013-docs-deployed-to-github-pages.md} | The documentation site deploys to GitHub Pages from CI |
+| .repolink {0014} {blob/main/notes/0014-stable-rng-algorithm.md} | The RNG algorithm is named explicitly as `ChaCha12Rng` |
+| .repolink {0015} {blob/main/notes/0015-invalid-config-is-an-error.md} | An invalid config is an error, and Save backs it up |
+| .repolink {0016} {blob/main/notes/0016-cli-config-flag.md} | The CLI loads any config file with `--config` |
+| .repolink {0017} {blob/main/notes/0017-library-returns-typed-errors.md} | The library returns typed errors and notices, and never prints |
 
 The design sketch
 .repolink {notes/bevy-board-rendering.md} {blob/main/notes/bevy-board-rendering.md}

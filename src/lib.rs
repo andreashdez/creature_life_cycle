@@ -7,9 +7,11 @@ use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha12Rng;
 use serde::Deserialize;
 use std::env;
+use std::error::Error;
+use std::fmt;
 use std::fmt::Write as _;
 use std::fs;
-use std::io::ErrorKind;
+use std::io::{self, ErrorKind};
 use std::path::{Path, PathBuf};
 
 const CONFIG_DIR_NAME: &str = "creature_life_cycle";
@@ -522,11 +524,11 @@ impl Board {
         self.field[index].food = food;
     }
 
-    /// Adds an aphid if the coordinate is valid and returns its stable ID.
+    /// Adds an aphid if the coordinate is valid and returns its stable ID, or `None` when the
+    /// coordinate is outside the board.
     pub fn add_aphid(&mut self, x: usize, y: usize, life: i32) -> Option<usize> {
         let location = Coordinates { x, y };
         if !self.in_bounds(location) {
-            eprintln!("Aphid position {x} {y} is outside the board; skipping.");
             return None;
         }
 
@@ -543,7 +545,8 @@ impl Board {
         Some(id)
     }
 
-    /// Adds a ladybug if the coordinate is valid and returns its stable ID.
+    /// Adds a ladybug if the coordinate is valid and returns its stable ID, or `None` when the
+    /// coordinate is outside the board.
     pub fn add_ladybug(
         &mut self,
         x: usize,
@@ -553,7 +556,6 @@ impl Board {
     ) -> Option<usize> {
         let location = Coordinates { x, y };
         if !self.in_bounds(location) {
-            eprintln!("Ladybug position {x} {y} is outside the board; skipping.");
             return None;
         }
 
@@ -1101,13 +1103,160 @@ impl Random {
     }
 }
 
+/// Why config file contents do not describe a board.
+///
+/// Messages are complete on their own, so front ends print them as they are.
+#[derive(Debug)]
+pub enum InvalidConfig {
+    /// The contents are not TOML, or do not match the config schema.
+    Toml(toml::de::Error),
+    /// `rows` or `columns` is zero.
+    EmptyBoard,
+    /// A probability lies outside `0.0..=1.0`.
+    Probability {
+        /// Which probability, named as a reader would name it.
+        label: &'static str,
+        /// The value found in the file.
+        value: f64,
+    },
+}
+
+impl fmt::Display for InvalidConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Toml(error) => write!(f, "{error}"),
+            Self::EmptyBoard => f.write_str("board dimensions must be greater than zero"),
+            Self::Probability { label, value } => {
+                write!(f, "{label} must be between 0 and 1, not {value}")
+            }
+        }
+    }
+}
+
+// The message already includes the TOML error, so it is not repeated as a
+// `source`, which would print it twice for callers that walk the chain.
+impl Error for InvalidConfig {}
+
+/// Why a config file could not be found, read, parsed, or written.
+///
+/// Each message names the file involved and already includes the underlying error, so front ends
+/// print it as it is. The underlying error stays in the variant for callers that need to tell the
+/// cases apart.
+#[derive(Debug)]
+pub enum ConfigError {
+    /// Neither `XDG_CONFIG_HOME` nor `HOME` is set, so there is no default config location.
+    NoConfigHome,
+    /// A config file named by the caller does not exist.
+    NotFound { path: PathBuf },
+    /// A config file exists but could not be read.
+    Read { path: PathBuf, error: io::Error },
+    /// A config file was read but does not describe a board.
+    Invalid { path: PathBuf, error: InvalidConfig },
+    /// The directory for a config file could not be created.
+    CreateDir { path: PathBuf, error: io::Error },
+    /// A config file could not be written.
+    Write { path: PathBuf, error: io::Error },
+    /// An invalid config file could not be moved aside before being saved over.
+    Backup {
+        path: PathBuf,
+        backup: PathBuf,
+        error: io::Error,
+    },
+}
+
+impl fmt::Display for ConfigError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NoConfigHome => f.write_str("XDG_CONFIG_HOME and HOME are not set"),
+            Self::NotFound { path } => write!(f, "{} does not exist", path.display()),
+            Self::Read { path, error } => write!(f, "could not read {}: {error}", path.display()),
+            Self::Invalid { path, error } => write!(f, "invalid {}: {error}", path.display()),
+            Self::CreateDir { path, error } => write!(
+                f,
+                "failed to create config directory {}: {error}",
+                path.display()
+            ),
+            Self::Write { path, error } => write!(f, "failed to write {}: {error}", path.display()),
+            Self::Backup {
+                path,
+                backup,
+                error,
+            } => write!(
+                f,
+                "failed to back up invalid {} to {}: {error}",
+                path.display(),
+                backup.display()
+            ),
+        }
+    }
+}
+
+// See `InvalidConfig`: the message already carries the inner error.
+impl Error for ConfigError {}
+
+/// Something a successful load did, or left out, that the user should hear about.
+///
+/// The library never prints. It hands these to the front end, which decides where they go: the
+/// CLI and the GUI both write them to stderr.
+#[derive(Debug)]
+pub enum ConfigNotice {
+    /// There is no config location, so the standard board runs without being saved.
+    NoConfigHome,
+    /// The config file was missing and has been created from the standard board.
+    Created { path: PathBuf },
+    /// The config file was missing and could not be created, so the standard board runs without
+    /// being saved.
+    NotCreated { error: ConfigError },
+    /// A starting creature lies outside the board and was left out.
+    OutsideBoard {
+        kind: CreatureSnapshotKind,
+        x: usize,
+        y: usize,
+    },
+}
+
+impl fmt::Display for ConfigNotice {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NoConfigHome => write!(
+                f,
+                "Config path unavailable ({}), using standard data.",
+                ConfigError::NoConfigHome
+            ),
+            Self::Created { path } => write!(f, "Created default config at {}.", path.display()),
+            Self::NotCreated { error } => write!(
+                f,
+                "Config file not found, using standard data. Could not create default config: {error}"
+            ),
+            Self::OutsideBoard { kind, x, y } => {
+                let kind = match kind {
+                    CreatureSnapshotKind::Aphid => "Aphid",
+                    CreatureSnapshotKind::Ladybug => "Ladybug",
+                };
+                write!(f, "{kind} position {x} {y} is outside the board; skipping.")
+            }
+        }
+    }
+}
+
+/// A board loaded from a config file, with anything the user should be told about the load.
+pub struct LoadedBoard {
+    /// The board, ready to run.
+    pub board: Board,
+    /// What the load did or left out, in the order it happened.
+    pub notices: Vec<ConfigNotice>,
+}
+
 /// Parses TOML runtime configuration and initializes a board from it.
+///
+/// Starting creatures outside the board are left out rather than failing the load, and are
+/// returned as `ConfigNotice::OutsideBoard` so the caller can report them.
 pub fn parse_simulation_config(
     contents: &str,
     board: &mut Board,
     random: &mut Random,
-) -> Result<(), String> {
-    let config: SimulationConfig = toml::from_str(contents).map_err(|error| error.to_string())?;
+) -> Result<Vec<ConfigNotice>, InvalidConfig> {
+    let config: SimulationConfig = toml::from_str(contents).map_err(InvalidConfig::Toml)?;
     let aphid_params = config
         .aphid
         .map(AphidConfig::params)
@@ -1125,24 +1274,37 @@ pub fn parse_simulation_config(
         .unwrap_or_default();
 
     if config.board.rows == 0 || config.board.columns == 0 {
-        return Err("board dimensions must be greater than zero".to_string());
+        return Err(InvalidConfig::EmptyBoard);
     }
 
     board.create_field(config.board.rows, config.board.columns, random);
 
-    for coordinates in config.board.aphids {
-        board.add_aphid(coordinates.x, coordinates.y, 10);
+    let mut notices = Vec::new();
+    for ConfigCoordinates { x, y } in config.board.aphids {
+        if board.add_aphid(x, y, 10).is_none() {
+            notices.push(ConfigNotice::OutsideBoard {
+                kind: CreatureSnapshotKind::Aphid,
+                x,
+                y,
+            });
+        }
     }
 
-    for coordinates in config.board.ladybugs {
-        board.add_ladybug(coordinates.x, coordinates.y, 15, random);
+    for ConfigCoordinates { x, y } in config.board.ladybugs {
+        if board.add_ladybug(x, y, 15, random).is_none() {
+            notices.push(ConfigNotice::OutsideBoard {
+                kind: CreatureSnapshotKind::Ladybug,
+                x,
+                y,
+            });
+        }
     }
 
     board.set_aphid_params(aphid_params);
     board.set_ladybug_params(ladybug_params);
     board.set_food_params(food_params);
 
-    Ok(())
+    Ok(notices)
 }
 
 /// Formats the current board and active behavior parameters as `simulation.toml` content.
@@ -1237,7 +1399,7 @@ pub fn format_simulation_config(board: &Board) -> String {
 ///
 /// `XDG_CONFIG_HOME` is used when set; otherwise this falls back to
 /// `$HOME/.config/creature_life_cycle/simulation.toml`.
-pub fn simulation_config_path() -> Result<PathBuf, String> {
+pub fn simulation_config_path() -> Result<PathBuf, ConfigError> {
     let config_home = env::var_os("XDG_CONFIG_HOME")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
@@ -1246,7 +1408,7 @@ pub fn simulation_config_path() -> Result<PathBuf, String> {
                 .filter(|value| !value.is_empty())
                 .map(|home| PathBuf::from(home).join(".config"))
         })
-        .ok_or_else(|| "XDG_CONFIG_HOME and HOME are not set".to_string())?;
+        .ok_or(ConfigError::NoConfigHome)?;
 
     Ok(config_home.join(CONFIG_DIR_NAME).join(CONFIG_FILE_NAME))
 }
@@ -1265,7 +1427,7 @@ pub struct SavedConfig {
 /// An existing file that does not parse is moved aside to `simulation.toml.bak` first. Such a file
 /// is one the board was never loaded from, most likely a hand edit with a mistake in it, and
 /// overwriting it would throw that work away.
-pub fn save_configured_board(board: &Board) -> Result<SavedConfig, String> {
+pub fn save_configured_board(board: &Board) -> Result<SavedConfig, ConfigError> {
     let path = simulation_config_path()?;
     let backup = back_up_invalid_config(&path)?;
     save_simulation_config(board, &path)?;
@@ -1275,7 +1437,7 @@ pub fn save_configured_board(board: &Board) -> Result<SavedConfig, String> {
 /// Moves a config file that does not parse to `<path>.bak`, returning the backup path.
 ///
 /// A valid file, or no file at all, is left where it is.
-fn back_up_invalid_config(path: &Path) -> Result<Option<PathBuf>, String> {
+fn back_up_invalid_config(path: &Path) -> Result<Option<PathBuf>, ConfigError> {
     let Some(contents) = read_config_file(path)? else {
         return Ok(None);
     };
@@ -1289,34 +1451,34 @@ fn back_up_invalid_config(path: &Path) -> Result<Option<PathBuf>, String> {
     let mut backup = path.as_os_str().to_owned();
     backup.push(".bak");
     let backup = PathBuf::from(backup);
-    fs::rename(path, &backup).map_err(|error| {
-        format!(
-            "failed to back up invalid {} to {}: {error}",
-            path.display(),
-            backup.display()
-        )
-    })?;
-    Ok(Some(backup))
+    match fs::rename(path, &backup) {
+        Ok(()) => Ok(Some(backup)),
+        Err(error) => Err(ConfigError::Backup {
+            path: path.to_path_buf(),
+            backup,
+            error,
+        }),
+    }
 }
 
 /// Saves the current board and active behavior parameters to a TOML config file.
-pub fn save_simulation_config(board: &Board, path: impl AsRef<Path>) -> Result<(), String> {
+pub fn save_simulation_config(board: &Board, path: impl AsRef<Path>) -> Result<(), ConfigError> {
     let path = path.as_ref();
 
     if let Some(parent) = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
     {
-        fs::create_dir_all(parent).map_err(|error| {
-            format!(
-                "failed to create config directory {}: {error}",
-                parent.display()
-            )
+        fs::create_dir_all(parent).map_err(|error| ConfigError::CreateDir {
+            path: parent.to_path_buf(),
+            error,
         })?;
     }
 
-    fs::write(path, format_simulation_config(board))
-        .map_err(|error| format!("failed to write {}: {error}", path.display()))
+    fs::write(path, format_simulation_config(board)).map_err(|error| ConfigError::Write {
+        path: path.to_path_buf(),
+        error,
+    })
 }
 
 /// Writes a TOML inline-table coordinate array.
@@ -1340,7 +1502,7 @@ fn write_coordinate_array(contents: &mut String, label: &str, coordinates: &[Coo
 
 impl AphidConfig {
     /// Converts TOML values into validated aphid parameters.
-    fn params(self) -> Result<AphidParams, String> {
+    fn params(self) -> Result<AphidParams, InvalidConfig> {
         Ok(AphidParams {
             prob_move: validate_probability(self.move_probability, "aphid move probability")?,
             prob_kill: validate_probability(self.kill_probability, "aphid kill probability")?,
@@ -1358,7 +1520,7 @@ impl AphidConfig {
 
 impl LadybugConfig {
     /// Converts TOML values into validated ladybug parameters.
-    fn params(self) -> Result<LadybugParams, String> {
+    fn params(self) -> Result<LadybugParams, InvalidConfig> {
         Ok(LadybugParams {
             prob_move: validate_probability(self.move_probability, "ladybug move probability")?,
             prob_kill: validate_probability(self.kill_probability, "ladybug kill probability")?,
@@ -1376,7 +1538,7 @@ impl LadybugConfig {
 
 impl FoodConfig {
     /// Converts TOML values into validated food parameters.
-    fn params(self) -> Result<FoodParams, String> {
+    fn params(self) -> Result<FoodParams, InvalidConfig> {
         Ok(FoodParams {
             prob_regenerate: validate_probability(
                 self.regeneration_probability,
@@ -1392,29 +1554,27 @@ impl FoodConfig {
 /// data is also used when there is no config directory at all. A file that exists but cannot be
 /// read or parsed is an error: running the defaults instead would quietly simulate a board nobody
 /// asked for.
-pub fn load_configured_board(random: &mut Random) -> Result<Board, String> {
-    let path = match simulation_config_path() {
-        Ok(path) => path,
-        Err(error) => {
-            eprintln!("Config path unavailable ({error}), using standard data.");
-            let mut board = Board::new();
-            load_standard_data(&mut board, random);
-            return Ok(board);
-        }
+pub fn load_configured_board(random: &mut Random) -> Result<LoadedBoard, ConfigError> {
+    let Ok(path) = simulation_config_path() else {
+        let mut board = Board::new();
+        load_standard_data(&mut board, random);
+        return Ok(LoadedBoard {
+            board,
+            notices: vec![ConfigNotice::NoConfigHome],
+        });
     };
 
     let Some(contents) = read_config_file(&path)? else {
-        eprintln!(
-            "Config file {} not found, using standard data.",
-            path.display()
-        );
         let mut board = Board::new();
         load_standard_data(&mut board, random);
-        match save_simulation_config(&board, &path) {
-            Ok(()) => eprintln!("Created default config at {}.", path.display()),
-            Err(error) => eprintln!("Could not create default config: {error}"),
-        }
-        return Ok(board);
+        let notice = match save_simulation_config(&board, &path) {
+            Ok(()) => ConfigNotice::Created { path },
+            Err(error) => ConfigNotice::NotCreated { error },
+        };
+        return Ok(LoadedBoard {
+            board,
+            notices: vec![notice],
+        });
     };
 
     board_from_config(&contents, &path, random)
@@ -1424,28 +1584,43 @@ pub fn load_configured_board(random: &mut Random) -> Result<Board, String> {
 ///
 /// Unlike `load_configured_board`, a missing file is an error rather than a cue to create one: the
 /// caller asked for this file, so a typo in its path should not run something else.
-pub fn load_board_from(path: impl AsRef<Path>, random: &mut Random) -> Result<Board, String> {
+pub fn load_board_from(
+    path: impl AsRef<Path>,
+    random: &mut Random,
+) -> Result<LoadedBoard, ConfigError> {
     let path = path.as_ref();
-    let contents =
-        read_config_file(path)?.ok_or_else(|| format!("{} does not exist", path.display()))?;
+    let contents = read_config_file(path)?.ok_or_else(|| ConfigError::NotFound {
+        path: path.to_path_buf(),
+    })?;
     board_from_config(&contents, path, random)
 }
 
 /// Reads a config file, returning `None` when it does not exist.
-fn read_config_file(path: &Path) -> Result<Option<String>, String> {
+fn read_config_file(path: &Path) -> Result<Option<String>, ConfigError> {
     match fs::read_to_string(path) {
         Ok(contents) => Ok(Some(contents)),
         Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(format!("could not read {}: {error}", path.display())),
+        Err(error) => Err(ConfigError::Read {
+            path: path.to_path_buf(),
+            error,
+        }),
     }
 }
 
 /// Builds a board from config file contents, naming the file in any error.
-fn board_from_config(contents: &str, path: &Path, random: &mut Random) -> Result<Board, String> {
+fn board_from_config(
+    contents: &str,
+    path: &Path,
+    random: &mut Random,
+) -> Result<LoadedBoard, ConfigError> {
     let mut board = Board::new();
-    parse_simulation_config(contents, &mut board, random)
-        .map_err(|error| format!("invalid {}: {error}", path.display()))?;
-    Ok(board)
+    let notices = parse_simulation_config(contents, &mut board, random).map_err(|error| {
+        ConfigError::Invalid {
+            path: path.to_path_buf(),
+            error,
+        }
+    })?;
+    Ok(LoadedBoard { board, notices })
 }
 
 /// Loads the same default board data represented by `simulation.example.toml`.
@@ -1465,11 +1640,11 @@ pub fn load_standard_data(board: &mut Board, random: &mut Random) {
 }
 
 /// Validates a probability value is in `0.0..=1.0`.
-fn validate_probability(value: f64, label: &str) -> Result<f64, String> {
+fn validate_probability(value: f64, label: &'static str) -> Result<f64, InvalidConfig> {
     if (0.0..=1.0).contains(&value) {
         Ok(value)
     } else {
-        Err(format!("{label} must be between 0 and 1"))
+        Err(InvalidConfig::Probability { label, value })
     }
 }
 
@@ -1653,20 +1828,48 @@ regeneration_probability = 0.9
             "[board]\nrows = 2\ncolumns = 3\naphids = [{ x = 1, y = 2 }]\nladybugs = []\n",
         )
         .unwrap();
-        let board = load_board_from(&valid, &mut random).unwrap();
-        assert_eq!((board.rows(), board.cols()), (2, 3));
-        assert_eq!(board.cell_counts(1, 2), Some((1, 0)));
+        let loaded = load_board_from(&valid, &mut random).unwrap();
+        assert_eq!((loaded.board.rows(), loaded.board.cols()), (2, 3));
+        assert_eq!(loaded.board.cell_counts(1, 2), Some((1, 0)));
+        assert!(loaded.notices.is_empty());
 
         let missing = dir.join("missing.toml");
         let error = load_board_from(&missing, &mut random).err().unwrap();
-        assert!(error.contains("does not exist"), "{error}");
+        assert!(matches!(&error, ConfigError::NotFound { path } if *path == missing));
+        assert!(error.to_string().ends_with("missing.toml does not exist"));
         assert!(!missing.exists(), "a named file is never created");
 
         let invalid = dir.join("invalid.toml");
         fs::write(&invalid, "[board]\nrows = 2\n").unwrap();
         let error = load_board_from(&invalid, &mut random).err().unwrap();
-        assert!(error.starts_with("invalid "), "{error}");
-        assert!(error.contains("invalid.toml"), "{error}");
+        assert!(matches!(
+            &error,
+            ConfigError::Invalid { path, error: InvalidConfig::Toml(_) } if *path == invalid
+        ));
+        assert!(error.to_string().starts_with("invalid "), "{error}");
+    }
+
+    #[test]
+    fn creatures_outside_the_board_are_left_out_and_reported() {
+        let mut random = Random::with_seed(1);
+        let mut board = Board::new();
+        let notices = parse_simulation_config(
+            "[board]\nrows = 2\ncolumns = 2\naphids = [{ x = 1, y = 1 }, { x = 2, y = 0 }]\nladybugs = [{ x = 0, y = 5 }]\n",
+            &mut board,
+            &mut random,
+        )
+        .unwrap();
+
+        assert_eq!(board.summary().aphids, 1);
+        assert_eq!(board.summary().ladybugs, 0);
+        let messages: Vec<String> = notices.iter().map(ToString::to_string).collect();
+        assert_eq!(
+            messages,
+            [
+                "Aphid position 2 0 is outside the board; skipping.",
+                "Ladybug position 0 5 is outside the board; skipping.",
+            ]
+        );
     }
 
     #[test]
@@ -1675,15 +1878,15 @@ regeneration_probability = 0.9
         let path = dir.join("simulation.toml");
         let backup = dir.join("simulation.toml.bak");
 
-        assert_eq!(back_up_invalid_config(&path), Ok(None));
+        assert_eq!(back_up_invalid_config(&path).unwrap(), None);
 
         save_simulation_config(&board_with_field(1, 1), &path).unwrap();
-        assert_eq!(back_up_invalid_config(&path), Ok(None));
+        assert_eq!(back_up_invalid_config(&path).unwrap(), None);
         assert!(path.exists());
 
         let broken = "[board]\nrows = 3\ncolums = 4\n";
         fs::write(&path, broken).unwrap();
-        assert_eq!(back_up_invalid_config(&path), Ok(Some(backup.clone())));
+        assert_eq!(back_up_invalid_config(&path).unwrap(), Some(backup.clone()));
         assert!(!path.exists());
         assert_eq!(fs::read_to_string(&backup).unwrap(), broken);
     }
@@ -1761,7 +1964,7 @@ regeneration_probability = 0.9
     fn parse_simulation_config_rejects_out_of_range_probabilities() {
         let mut random = Random::with_seed(1);
         let mut board = Board::new();
-        assert!(
+        assert!(matches!(
             parse_simulation_config(
                 r#"
 [board]
@@ -1778,9 +1981,12 @@ procreation_probability = 0.4
 "#,
                 &mut board,
                 &mut random,
-            )
-            .is_err()
-        );
+            ),
+            Err(InvalidConfig::Probability {
+                label: "aphid move probability",
+                value: 1.2,
+            })
+        ));
 
         assert!(
             parse_simulation_config(
