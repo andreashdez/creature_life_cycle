@@ -61,7 +61,7 @@ build needs no asset directory beside it.
 | `CellSnapshot`, `CreatureSnapshot` | Read-only views for rendering and reporting |
 
 Configuration moves through `parse_simulation_config`,
-`load_configured_board`, `format_simulation_config`, and
+`load_configured_board`, `load_board_from`, `format_simulation_config`, and
 `save_configured_board`, which keeps the TOML format in one place for both the
 CLI and the GUI.
 

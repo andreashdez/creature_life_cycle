@@ -43,8 +43,13 @@ the keyboard, so the playback shortcuts below do not fire as you type.
 
 **Save setup** (.keybinding {S}), in the same section, writes the current
 creature positions and probabilities to the same configuration file the CLI
-uses, creating parent directories as needed. Food values, creature life values,
-and the current turn are not saved. What is saved becomes what Reset restores.
+uses, creating parent directories as needed. If that file does not parse, it
+is first moved to `simulation.toml.bak`, and the status line says so. Food
+values, creature life values, and the current turn are not saved. What is saved
+becomes what Reset restores.
+
+If the configuration file is invalid at launch, the GUI opens on the built-in
+defaults and the status line reports it until the next message replaces it.
 
 > Note: Reloading a setup from disk without restarting is not implemented.
 > Reset restores the last setup saved in this session, or the board loaded at

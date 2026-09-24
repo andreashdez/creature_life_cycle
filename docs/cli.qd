@@ -15,12 +15,19 @@ cargo run -- --turns 20 --delay-ms 0 --seed 12345
 | `--turns` | number | `60` | Maximum number of turns to simulate |
 | `--delay-ms` | number | `400` | Delay between printed turns, in milliseconds |
 | `--seed` | number | none | Seed for reproducible random behavior |
+| `--config` | path | XDG file | Config file to load instead of the one in the XDG config directory |
 | `-h`, `--help` | | | Print help text |
 | `-V`, `--version` | | | Print the package version |
 
 Arguments are parsed and validated by `clap`. Invalid flags, missing values,
 and unparseable numbers are reported as errors; the process then prints usage
 text and exits with status code `2`.
+
+A config file that cannot be read or parsed is an error: the CLI prints it on
+stderr and exits with status code `1` without simulating anything, rather than
+quietly running a board you did not ask for. `--config` names the file
+exactly, so a path that does not exist is an error too; only the XDG file is
+created when missing. See [Configuration](configuration.qd).
 
 ## Board output
 

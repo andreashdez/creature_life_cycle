@@ -156,7 +156,8 @@ the playback shortcuts below do not fire as you type.
 **Save setup** (or `S`), in the same section, writes the current creature
 positions and probabilities to the same
 `${XDG_CONFIG_HOME:-$HOME/.config}/creature_life_cycle/simulation.toml` the CLI
-uses, creating parent directories as needed. Food
+uses, creating parent directories as needed. If that file does not parse, it is
+first moved to `simulation.toml.bak`. Food
 values, creature life values, and the current turn are not saved. What is saved
 becomes what Reset restores.
 
@@ -227,6 +228,12 @@ Run a short deterministic simulation:
 cargo run -- --turns 10 --delay-ms 0 --seed 42
 ```
 
+Run a setup kept somewhere else, leaving the XDG configuration file alone:
+
+```sh
+cargo run -- --config setups/crowded.toml
+```
+
 Run the GUI visualizer. It starts from fixed seed `42` by default:
 
 ```sh
@@ -247,11 +254,12 @@ The executable accepts these optional flags:
 --turns <number>     Maximum number of turns to simulate. Default: 60.
 --delay-ms <number>  Delay between printed turns in milliseconds. Default: 400.
 --seed <number>      Optional seed for reproducible random behavior.
+--config <path>      Config file to load instead of the XDG simulation.toml.
 -h, --help           Print help text.
 -V, --version        Print the package version.
 ```
 
-`clap` validates command-line arguments. Invalid flags, missing values, and invalid numeric values are reported as errors. The process exits with status code `2` after printing usage text.
+`clap` validates command-line arguments. Invalid flags, missing values, and invalid numeric values are reported as errors. The process exits with status code `2` after printing usage text. A config file that cannot be read or parsed, or a `--config` path that does not exist, is reported on stderr and the process exits with status code `1` without simulating anything.
 
 ## Simulation Configuration
 
@@ -292,7 +300,7 @@ regeneration_probability = 0.1
 
 Coordinates are zero-based. `x` is the row and `y` is the column.
 
-Rows and columns must both be greater than zero. If the XDG config file is missing, the program creates it from built-in standard board data and default behavior parameters. If it is invalid, the program loads those defaults without overwriting the file.
+Rows and columns must both be greater than zero. If the XDG config file is missing, the program creates it from built-in standard board data and default behavior parameters. If it exists but is invalid, the CLI reports the error and exits with status code `1` rather than quietly running the defaults. The GUI still opens, on the defaults, and says so in its status line; its Save setup then moves the invalid file to `simulation.toml.bak` before writing, so a broken hand edit is never lost.
 
 Creature positions outside the board are skipped with a warning.
 

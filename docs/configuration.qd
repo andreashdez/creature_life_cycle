@@ -14,9 +14,12 @@ With the default environment, that is
 `~/.config/creature_life_cycle/simulation.toml`.
 
 If the file is missing, the program creates it from built-in standard board
-data and default behavior parameters. If it exists but is invalid, the program
-loads those defaults **without overwriting the file**, so a typo never costs
-you your setup.
+data and default behavior parameters. If it exists but is invalid, the CLI
+reports the error and exits rather than running a board you did not ask for.
+The GUI opens on the defaults and says so in its status line.
+
+The CLI can load a different file with `--config <path>`. That file is never
+created: if it does not exist, the run fails.
 
 The repository ships .repolink {simulation.example.toml} {blob/main/simulation.example.toml},
 which mirrors the built-in defaults.
@@ -103,12 +106,14 @@ Food is capped at `9` per cell and never drops below `0`.
   section falls back to its default probabilities.
 - Creature positions outside the board are skipped with a warning.
 
-> Warning: An invalid file is not repaired automatically. The run continues on
-> built-in defaults, and your file stays exactly as written so you can fix it.
+> Warning: An invalid file is not repaired automatically. The CLI refuses to
+> run until you fix it. If you save from the GUI instead, the invalid file is
+> moved to `simulation.toml.bak` first, so your edit is never lost.
 
 ## Saving from the GUI
 
 **Save setup** in the GUI's Overview tab (.keybinding {S}) writes the current
 creature positions and probabilities back to this same file, creating parent
-directories as needed. Food values, creature life values, and the current turn
-are not saved. See [Graphical interface](gui.qd) for the surrounding controls.
+directories as needed. If the file there does not parse, it is moved to
+`simulation.toml.bak` before the new one is written. Food values, creature life
+values, and the current turn are not saved. See [Graphical interface](gui.qd) for the surrounding controls.

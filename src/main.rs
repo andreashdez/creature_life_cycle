@@ -1,10 +1,12 @@
 use clap::Parser;
-use creature_life_cycle::{Board, Random, TurnStats, load_configured_board};
+use creature_life_cycle::{Board, Random, TurnStats, load_board_from, load_configured_board};
+use std::path::PathBuf;
+use std::process::ExitCode;
 use std::thread;
 use std::time::Duration;
 
 /// Command-line simulation options.
-#[derive(Clone, Copy, Debug, Parser, PartialEq, Eq)]
+#[derive(Clone, Debug, Parser, PartialEq, Eq)]
 #[command(version, about = "Simulate aphids and ladybugs on a board.")]
 struct SimOptions {
     /// Maximum number of turns to simulate.
@@ -16,16 +18,29 @@ struct SimOptions {
     /// Optional deterministic random seed.
     #[arg(long, value_name = "number")]
     seed: Option<u64>,
+    /// Config file to load instead of `simulation.toml` in the XDG config directory.
+    #[arg(long, value_name = "path")]
+    config: Option<PathBuf>,
 }
 
 /// Program entry point: parse options, load configuration, and run the simulation loop.
-fn main() {
+fn main() -> ExitCode {
     let options = SimOptions::parse();
     let mut random = match options.seed {
         Some(seed) => Random::with_seed(seed),
         None => Random::new(),
     };
-    let mut board = load_configured_board(&mut random);
+    let loaded = match &options.config {
+        Some(path) => load_board_from(path, &mut random),
+        None => load_configured_board(&mut random),
+    };
+    let mut board = match loaded {
+        Ok(board) => board,
+        Err(error) => {
+            eprintln!("Error: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
 
     print_board(&board);
 
@@ -43,6 +58,8 @@ fn main() {
             thread::sleep(Duration::from_millis(options.delay_ms));
         }
     }
+
+    ExitCode::SUCCESS
 }
 
 /// Prints the board as two count symbols per cell: aphids first, ladybugs second.
@@ -101,9 +118,19 @@ mod tests {
             SimOptions {
                 turns: 3,
                 delay_ms: 0,
-                seed: Some(99)
+                seed: Some(99),
+                config: None,
             }
         );
+    }
+
+    #[test]
+    fn parse_options_accepts_config_path() {
+        let options =
+            SimOptions::try_parse_from(["creature_life_cycle", "--config", "setups/crowded.toml"])
+                .unwrap();
+
+        assert_eq!(options.config, Some(PathBuf::from("setups/crowded.toml")));
     }
 
     #[test]

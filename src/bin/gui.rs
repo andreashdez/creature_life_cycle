@@ -36,7 +36,8 @@ use bevy::ui::{Checked, InteractionDisabled};
 use bevy::ui_widgets::{Activate, SliderPrecision, SliderValue, ValueChange};
 use creature_life_cycle::{
     AphidParams, Board, Coordinates, CreatureSnapshot, CreatureSnapshotKind, FoodParams,
-    LadybugParams, Random, TurnStats, load_configured_board, save_configured_board,
+    LadybugParams, Random, TurnStats, load_configured_board, load_standard_data,
+    save_configured_board,
 };
 use std::collections::{HashMap, VecDeque};
 
@@ -921,6 +922,14 @@ impl StatusLine {
         self.success = success;
         self.remaining = STATUS_SECONDS;
     }
+
+    /// Shows a message that stays until another one replaces it, for news the
+    /// reader must not miss by looking away for a few seconds.
+    fn pin(&mut self, message: impl Into<String>, success: bool) {
+        self.message = message.into();
+        self.success = success;
+        self.remaining = f32::INFINITY;
+    }
 }
 
 #[derive(Message, Clone, Copy)]
@@ -1526,9 +1535,19 @@ fn setup(
     mut materials: ResMut<Assets<ColorMaterial>>,
     mut cell_materials: ResMut<Assets<CellMaterial>>,
     asset_server: Res<AssetServer>,
+    mut status: ResMut<StatusLine>,
 ) {
     let mut random = Random::with_seed(DEFAULT_SEED);
-    let board = load_configured_board(&mut random);
+    let board = load_configured_board(&mut random).unwrap_or_else(|error| {
+        // A broken config should not keep the window from opening, so the GUI
+        // shows the standard board and says so where the reader will see it.
+        // Saving later moves the broken file aside instead of overwriting it.
+        eprintln!("Error: {error}; showing the standard board.");
+        status.pin("Config file is invalid; showing the defaults.", false);
+        let mut board = Board::new();
+        load_standard_data(&mut board, &mut random);
+        board
+    });
     let (rows, cols) = (board.rows(), board.cols());
     let summary = board.summary();
     commands.insert_resource(StartingSetup(
@@ -3970,12 +3989,21 @@ fn save_setup(
     board.0.set_food_params(params.food);
 
     match save_configured_board(&board.0) {
-        Ok(_) => {
+        Ok(saved_config) => {
             // What was saved is the starting setup from now on, so Reset returns
             // to it instead of to the board loaded at launch.
             start.0 = creature_life_cycle::format_simulation_config(&board.0);
             saved.0 = *params;
-            status.set("Starting setup saved.", true);
+            match saved_config.backup {
+                Some(backup) => {
+                    let name = backup.file_name().unwrap_or(backup.as_os_str());
+                    status.pin(
+                        format!("Saved. The invalid file is now {}.", name.display()),
+                        true,
+                    );
+                }
+                None => status.set("Starting setup saved.", true),
+            }
         }
         Err(error) => status.set(format!("Save failed: {error}"), false),
     }
@@ -5477,7 +5505,7 @@ mod tests {
         world.run_system_once(save_setup).unwrap();
     }
 
-    /// Both the save and the failure case live in one test: they set
+    /// The save, the failure, and the backup cases live in one test: they set
     /// `XDG_CONFIG_HOME`, which is process-wide, so they cannot run in parallel.
     #[test]
     fn saving_writes_the_edited_board_and_makes_it_what_reset_restores() {
@@ -5536,6 +5564,29 @@ mod tests {
             status.message
         );
         assert_eq!(world.resource::<StartingSetup>().0, saved_setup);
+
+        // Saving over a file that does not parse moves it aside first, so a
+        // broken hand edit survives, and the message stays until replaced.
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", &config_home) };
+        let config_dir = config_home.join("creature_life_cycle");
+        let broken = "[board]\nrows = 3\ncolums = 4\n";
+        std::fs::write(config_dir.join("simulation.toml"), broken).unwrap();
+        save_action(&mut world);
+
+        let status = world.resource::<StatusLine>();
+        assert!(status.success, "{}", status.message);
+        assert_eq!(
+            status.message,
+            "Saved. The invalid file is now simulation.toml.bak."
+        );
+        assert_eq!(status.remaining, f32::INFINITY);
+        assert_eq!(
+            std::fs::read_to_string(config_dir.join("simulation.toml.bak")).unwrap(),
+            broken
+        );
+        let saved = std::fs::read_to_string(config_dir.join("simulation.toml")).unwrap();
+        creature_life_cycle::parse_simulation_config(&saved, &mut Board::new(), &mut random)
+            .unwrap();
     }
 
     #[test]

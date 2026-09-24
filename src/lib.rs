@@ -1251,11 +1251,52 @@ pub fn simulation_config_path() -> Result<PathBuf, String> {
     Ok(config_home.join(CONFIG_DIR_NAME).join(CONFIG_FILE_NAME))
 }
 
+/// Where `save_configured_board` wrote the board.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SavedConfig {
+    /// The config file that now holds the board.
+    pub path: PathBuf,
+    /// Where the previous file was moved because it did not parse, if it was.
+    pub backup: Option<PathBuf>,
+}
+
 /// Saves the current board and active behavior parameters to the XDG config path.
-pub fn save_configured_board(board: &Board) -> Result<PathBuf, String> {
+///
+/// An existing file that does not parse is moved aside to `simulation.toml.bak` first. Such a file
+/// is one the board was never loaded from, most likely a hand edit with a mistake in it, and
+/// overwriting it would throw that work away.
+pub fn save_configured_board(board: &Board) -> Result<SavedConfig, String> {
     let path = simulation_config_path()?;
+    let backup = back_up_invalid_config(&path)?;
     save_simulation_config(board, &path)?;
-    Ok(path)
+    Ok(SavedConfig { path, backup })
+}
+
+/// Moves a config file that does not parse to `<path>.bak`, returning the backup path.
+///
+/// A valid file, or no file at all, is left where it is.
+fn back_up_invalid_config(path: &Path) -> Result<Option<PathBuf>, String> {
+    let Some(contents) = read_config_file(path)? else {
+        return Ok(None);
+    };
+    // The parse only checks validity, so it draws from a throwaway generator
+    // and leaves the caller's random sequence untouched.
+    let mut scratch = Board::new();
+    if parse_simulation_config(&contents, &mut scratch, &mut Random::with_seed(0)).is_ok() {
+        return Ok(None);
+    }
+
+    let mut backup = path.as_os_str().to_owned();
+    backup.push(".bak");
+    let backup = PathBuf::from(backup);
+    fs::rename(path, &backup).map_err(|error| {
+        format!(
+            "failed to back up invalid {} to {}: {error}",
+            path.display(),
+            backup.display()
+        )
+    })?;
+    Ok(Some(backup))
 }
 
 /// Saves the current board and active behavior parameters to a TOML config file.
@@ -1347,55 +1388,64 @@ impl FoodConfig {
 
 /// Loads the runtime TOML configuration file from the XDG config directory.
 ///
-/// Invalid config falls back to built-in standard data and default behavior parameters. Missing
-/// config is created from those defaults before continuing.
-pub fn load_configured_board(random: &mut Random) -> Board {
-    let mut board = Board::new();
-
-    read_simulation_config(&mut board, random);
-
-    board
-}
-
-/// Reads `simulation.toml` from the XDG config directory, falling back to built-in standard data on errors.
-fn read_simulation_config(board: &mut Board, random: &mut Random) {
+/// A missing file is created from the built-in standard data, which is then used, and the standard
+/// data is also used when there is no config directory at all. A file that exists but cannot be
+/// read or parsed is an error: running the defaults instead would quietly simulate a board nobody
+/// asked for.
+pub fn load_configured_board(random: &mut Random) -> Result<Board, String> {
     let path = match simulation_config_path() {
         Ok(path) => path,
         Err(error) => {
             eprintln!("Config path unavailable ({error}), using standard data.");
-            load_standard_data(board, random);
-            return;
+            let mut board = Board::new();
+            load_standard_data(&mut board, random);
+            return Ok(board);
         }
     };
 
-    let contents = match fs::read_to_string(&path) {
-        Ok(contents) => contents,
-        Err(error) if error.kind() == ErrorKind::NotFound => {
-            eprintln!(
-                "Config file {} not found, using standard data.",
-                path.display()
-            );
-            load_standard_data(board, random);
-            match save_simulation_config(board, &path) {
-                Ok(()) => eprintln!("Created default config at {}.", path.display()),
-                Err(error) => eprintln!("Could not create default config: {error}"),
-            }
-            return;
+    let Some(contents) = read_config_file(&path)? else {
+        eprintln!(
+            "Config file {} not found, using standard data.",
+            path.display()
+        );
+        let mut board = Board::new();
+        load_standard_data(&mut board, random);
+        match save_simulation_config(&board, &path) {
+            Ok(()) => eprintln!("Created default config at {}.", path.display()),
+            Err(error) => eprintln!("Could not create default config: {error}"),
         }
-        Err(error) => {
-            eprintln!(
-                "Could not read {} ({error}), using standard data.",
-                path.display()
-            );
-            load_standard_data(board, random);
-            return;
-        }
+        return Ok(board);
     };
 
-    if let Err(error) = parse_simulation_config(&contents, board, random) {
-        eprintln!("Invalid {} ({error}), using standard data.", path.display());
-        load_standard_data(board, random);
+    board_from_config(&contents, &path, random)
+}
+
+/// Loads a board from a named TOML configuration file.
+///
+/// Unlike `load_configured_board`, a missing file is an error rather than a cue to create one: the
+/// caller asked for this file, so a typo in its path should not run something else.
+pub fn load_board_from(path: impl AsRef<Path>, random: &mut Random) -> Result<Board, String> {
+    let path = path.as_ref();
+    let contents =
+        read_config_file(path)?.ok_or_else(|| format!("{} does not exist", path.display()))?;
+    board_from_config(&contents, path, random)
+}
+
+/// Reads a config file, returning `None` when it does not exist.
+fn read_config_file(path: &Path) -> Result<Option<String>, String> {
+    match fs::read_to_string(path) {
+        Ok(contents) => Ok(Some(contents)),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!("could not read {}: {error}", path.display())),
     }
+}
+
+/// Builds a board from config file contents, naming the file in any error.
+fn board_from_config(contents: &str, path: &Path, random: &mut Random) -> Result<Board, String> {
+    let mut board = Board::new();
+    parse_simulation_config(contents, &mut board, random)
+        .map_err(|error| format!("invalid {}: {error}", path.display()))?;
+    Ok(board)
 }
 
 /// Loads the same default board data represented by `simulation.example.toml`.
@@ -1580,6 +1630,62 @@ regeneration_probability = 0.9
         save_simulation_config(&board, &path).unwrap();
 
         assert!(path.exists());
+    }
+
+    fn clean_test_dir(name: &str) -> PathBuf {
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("test-output")
+            .join(name);
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn load_board_from_reads_a_named_file_and_rejects_missing_or_invalid_ones() {
+        let dir = clean_test_dir("load_board_from");
+        let mut random = Random::with_seed(1);
+
+        let valid = dir.join("valid.toml");
+        fs::write(
+            &valid,
+            "[board]\nrows = 2\ncolumns = 3\naphids = [{ x = 1, y = 2 }]\nladybugs = []\n",
+        )
+        .unwrap();
+        let board = load_board_from(&valid, &mut random).unwrap();
+        assert_eq!((board.rows(), board.cols()), (2, 3));
+        assert_eq!(board.cell_counts(1, 2), Some((1, 0)));
+
+        let missing = dir.join("missing.toml");
+        let error = load_board_from(&missing, &mut random).err().unwrap();
+        assert!(error.contains("does not exist"), "{error}");
+        assert!(!missing.exists(), "a named file is never created");
+
+        let invalid = dir.join("invalid.toml");
+        fs::write(&invalid, "[board]\nrows = 2\n").unwrap();
+        let error = load_board_from(&invalid, &mut random).err().unwrap();
+        assert!(error.starts_with("invalid "), "{error}");
+        assert!(error.contains("invalid.toml"), "{error}");
+    }
+
+    #[test]
+    fn an_invalid_config_is_backed_up_and_a_valid_one_is_left_in_place() {
+        let dir = clean_test_dir("back_up_invalid_config");
+        let path = dir.join("simulation.toml");
+        let backup = dir.join("simulation.toml.bak");
+
+        assert_eq!(back_up_invalid_config(&path), Ok(None));
+
+        save_simulation_config(&board_with_field(1, 1), &path).unwrap();
+        assert_eq!(back_up_invalid_config(&path), Ok(None));
+        assert!(path.exists());
+
+        let broken = "[board]\nrows = 3\ncolums = 4\n";
+        fs::write(&path, broken).unwrap();
+        assert_eq!(back_up_invalid_config(&path), Ok(Some(backup.clone())));
+        assert!(!path.exists());
+        assert_eq!(fs::read_to_string(&backup).unwrap(), broken);
     }
 
     #[test]

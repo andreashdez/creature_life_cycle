@@ -75,6 +75,74 @@ fn missing_config_is_created_with_defaults() {
 }
 
 #[test]
+fn invalid_config_is_an_error_and_is_left_untouched() {
+    let config_home = clean_config_home("invalid_config_error");
+    let config_path = config_home
+        .join("creature_life_cycle")
+        .join("simulation.toml");
+    let broken = "[board]\nrows = 3\ncolums = 4\n";
+    fs::create_dir_all(config_path.parent().unwrap()).expect("create test config directory");
+    fs::write(&config_path, broken).expect("write invalid simulation config");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_creature_life_cycle"))
+        .args(["--turns", "1", "--delay-ms", "0", "--seed", "1"])
+        .env("XDG_CONFIG_HOME", &config_home)
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("run creature_life_cycle binary");
+    let stderr = String::from_utf8(output.stderr).expect("stderr is valid UTF-8");
+
+    assert!(
+        !output.status.success(),
+        "an invalid config must fail the run"
+    );
+    assert!(output.stdout.is_empty(), "no board is simulated");
+    assert!(stderr.starts_with("Error: invalid "), "{stderr}");
+    assert_eq!(
+        fs::read_to_string(&config_path).expect("read simulation config"),
+        broken
+    );
+}
+
+#[test]
+fn config_flag_loads_the_named_file_instead_of_the_xdg_one() {
+    // The XDG config is left missing: with `--config` it is neither read nor
+    // created.
+    let config_home = clean_config_home("config_flag");
+    let setup = config_home.join("one_aphid.toml");
+    fs::write(
+        &setup,
+        "[board]\nrows = 1\ncolumns = 2\naphids = [{ x = 0, y = 1 }]\nladybugs = []\n",
+    )
+    .expect("write named simulation config");
+
+    let run = |config: &std::path::Path| {
+        Command::new(env!("CARGO_BIN_EXE_creature_life_cycle"))
+            .args(["--turns", "0", "--delay-ms", "0", "--seed", "1", "--config"])
+            .arg(config)
+            .env("XDG_CONFIG_HOME", &config_home)
+            .current_dir(env!("CARGO_MANIFEST_DIR"))
+            .output()
+            .expect("run creature_life_cycle binary")
+    };
+
+    let output = run(&setup);
+    assert!(
+        output.status.success(),
+        "process exited with {}",
+        output.status
+    );
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), "\n __ 1_\n");
+    assert!(output.stderr.is_empty());
+    assert!(!config_home.join("creature_life_cycle").exists());
+
+    let output = run(&config_home.join("missing.toml"));
+    let stderr = String::from_utf8(output.stderr).expect("stderr is valid UTF-8");
+    assert!(!output.status.success());
+    assert!(stderr.contains("missing.toml does not exist"), "{stderr}");
+}
+
+#[test]
 fn seeded_e2e_run_matches_death_snapshot() {
     assert_seeded_snapshot(
         "death_snapshot",
