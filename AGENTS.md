@@ -24,14 +24,17 @@ front ends drive it.
 
 ## Commands
 
-Run these before calling a change done. They are exactly what CI runs
-(`.github/workflows/ci.yml`):
+Run these before calling a change done. They are exactly what the Linux CI
+job runs (`.github/workflows/ci.yml`). A second job runs `cargo test --locked`
+on macOS, where the GUI ships:
 
 ```sh
 cargo fmt --check
 cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked
+cargo test --locked --bench '*'
 cargo check --locked --no-default-features --all-targets
+RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps --document-private-items
 ```
 
 Other useful commands:
@@ -154,4 +157,6 @@ no marketing tone.
 
 Messages are short, lowercase, and imperative, with no prefix or scope:
 `add benchmark`, `fix creature sizing`, `refactor ui`. Work lands on `main`;
-CI runs on pushes to `main` and on PRs.
+CI runs on pushes to `main` and on PRs. Dependabot opens weekly update PRs
+(`.github/dependabot.yml`). One that changes the seeded snapshots needs the
+same deliberate handling as any other change to seeded output.

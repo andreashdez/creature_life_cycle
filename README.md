@@ -201,18 +201,31 @@ Text is set in Fira Sans, which ships embedded in `bevy_feathers`.
 
 GitHub Actions is configured in `.github/workflows/ci.yml`.
 
-The workflow runs on pushes to `main` and on pull requests, installs the Linux
-libraries Bevy needs to compile, then checks:
+The workflow runs on pushes to `main` and on pull requests. Its Linux job
+installs the libraries Bevy needs to compile, then checks:
 
 ```sh
 cargo fmt --check
 cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked
+cargo test --locked --bench '*'
 cargo check --locked --no-default-features --all-targets
+RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps --document-private-items
 ```
 
-The last check keeps the `gui` feature gate honest: the library, CLI, benches,
-and tests must still build without Bevy.
+The fourth check runs each benchmark once, untimed, in Criterion's test mode, so a
+benchmark that compiles but panics is caught; `cargo test` alone does not run
+bench targets. The fifth keeps the `gui` feature gate honest: the library, CLI,
+benches, and tests must still build without Bevy. The last one builds the API docs,
+private items included, and fails on warnings such as broken doc links.
+
+A second job runs `cargo test --locked` on macOS. The GUI ships as a macOS app,
+and Bevy compiles different windowing and rendering code there, so a Linux-only
+build would miss breakage on the platform that is actually released.
+
+Dependabot (`.github/dependabot.yml`) opens weekly pull requests for Cargo
+dependencies and GitHub Actions. Patch releases are grouped into one pull
+request; larger updates get their own.
 
 ## Run
 

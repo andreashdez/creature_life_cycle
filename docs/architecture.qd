@@ -144,6 +144,8 @@ Longer **design sketches** keep descriptive names.
 | .repolink {0016} {blob/main/notes/0016-cli-config-flag.md} | The CLI loads any config file with `--config` |
 | .repolink {0017} {blob/main/notes/0017-library-returns-typed-errors.md} | The library returns typed errors and notices, and never prints |
 | .repolink {0018} {blob/main/notes/0018-board-built-in-one-step.md} | A `Board` is built in one step |
+| .repolink {0019} {blob/main/notes/0019-ci-covers-macos-docs-and-updates.md} | CI covers macOS, the API docs, and dependency updates |
+| .repolink {0020} {blob/main/notes/0020-benchmarks-run-untimed-in-ci.md} | CI runs the benchmarks once, untimed |
 
 The design sketch
 .repolink {notes/bevy-board-rendering.md} {blob/main/notes/bevy-board-rendering.md}

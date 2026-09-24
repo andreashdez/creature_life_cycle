@@ -42,7 +42,42 @@ jobs:
       - name: cargo test
         run: cargo test --locked
 
+      # `cargo test` does not run bench targets, so without this a benchmark
+      # could compile yet panic. Criterion's test mode runs each benchmark once,
+      # untimed, in a few seconds. Timings stay local: shared runners vary too
+      # much from run to run for them to mean anything here.
+      - name: cargo test benchmarks
+        run: cargo test --locked --bench '*'
+
       # The CLI must keep building without Bevy, so the `gui` feature gate
       # cannot rot unnoticed.
       - name: cargo check without default features
         run: cargo check --locked --no-default-features --all-targets
+
+      # Every item carries a `///` comment, the GUI's private ones included, so
+      # the docs are built with private items and broken links fail the run.
+      - name: cargo doc
+        run: cargo doc --locked --no-deps --document-private-items
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+  macos:
+    name: macOS build and tests
+    # The GUI ships as a macOS app bundle (scripts/package_gui.sh), but the
+    # checks above only ever build it on Linux. Bevy's windowing and rendering
+    # compile against different platform code on macOS, so building and testing
+    # here catches breakage that Linux cannot.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install the Rust toolchain
+        run: rustup toolchain install stable --profile minimal --no-self-update
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Builds every target, the GUI binary included, and runs the whole suite.
+      # Formatting, lints, and the docs are platform-independent and stay in
+      # the Linux job.
+      - name: cargo test
+        run: cargo test --locked

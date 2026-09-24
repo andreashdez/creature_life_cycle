@@ -35,24 +35,46 @@ cargo bench
 
 Criterion writes HTML reports to `target/criterion`.
 
+CI runs each benchmark once, untimed, with `cargo test --bench '*'`, so a
+benchmark that stops working is caught. It does not compare timings. To check
+a change for speed, run `cargo bench` before and after it on the same machine.
+
 ## Continuous integration
 
 GitHub Actions is configured in
 [`.github/workflows/ci.yml`](https://github.com/andreashdez/creature_life_cycle/blob/main/.github/workflows/ci.yml). The
-workflow runs on pushes to `main` and on pull requests, installs the Linux
-libraries Bevy needs to compile, then runs:
+workflow runs on pushes to `main` and on pull requests. Its Linux job installs
+the libraries Bevy needs to compile, then runs:
 
 ```sh
 cargo fmt --check
 cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked
+cargo test --locked --bench '*'
 cargo check --locked --no-default-features --all-targets
+RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps --document-private-items
 ```
 
-The last check keeps the `gui` feature gate honest: the library, CLI, benches,
-and tests must still build without Bevy.
+The fourth check runs each benchmark once, untimed, in Criterion's test mode, so
+a benchmark that compiles but panics is caught; `cargo test` alone does not run
+bench targets. Timings are not checked in CI, because shared runners vary too
+much between runs to catch a real slowdown. The fifth check keeps the `gui`
+feature gate honest: the library, CLI, benches, and tests must still build
+without Bevy. The last one builds the API docs,
+private items included, and fails on warnings such as broken doc links.
 
-> Tip: Running those four commands locally before pushing reproduces CI exactly.
+A second job runs `cargo test --locked` on macOS. The GUI ships as a macOS app,
+and Bevy compiles different windowing and rendering code there, so a Linux-only
+build would miss breakage on the platform that is actually released.
+
+> Tip: Running those six commands locally before pushing reproduces the Linux
+> job exactly.
+
+[Dependabot](https://github.com/andreashdez/creature_life_cycle/blob/main/.github/dependabot.yml)
+opens weekly pull requests for Cargo dependencies and GitHub Actions. Patch
+releases are grouped into one pull request; larger updates, such as a new Bevy
+or `rand_chacha`, get their own. CI runs on each, so an update that changes
+seeded runs fails the snapshot tests rather than merging quietly.
 
 ## Packaging
 

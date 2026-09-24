@@ -37,7 +37,9 @@ exploratory documents written while working something out.
 | [0015](0015-invalid-config-is-an-error.md) | An invalid config is an error, and Save backs it up | `20ad753` |
 | [0016](0016-cli-config-flag.md) | The CLI loads any config file with `--config` | `20ad753` |
 | [0017](0017-library-returns-typed-errors.md) | The library returns typed errors and notices, and never prints | `d4d2ee5` |
-| [0018](0018-board-built-in-one-step.md) | A `Board` is built in one step | — |
+| [0018](0018-board-built-in-one-step.md) | A `Board` is built in one step | `bdef145` |
+| [0019](0019-ci-covers-macos-docs-and-updates.md) | CI covers macOS, the API docs, and dependency updates | — |
+| [0020](0020-benchmarks-run-untimed-in-ci.md) | CI runs the benchmarks once, untimed | — |
 
 ## Design sketches
 

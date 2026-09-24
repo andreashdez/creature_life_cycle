@@ -1,0 +1,22 @@
+# Weekly dependency update pull requests. CI runs on each one, so the seeded
+# snapshot tests catch any update that changes simulation output.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      # Patch releases are expected to be drop-in, so they arrive as one pull
+      # request. Anything larger (a new Bevy, a new `rand_chacha`) gets its own,
+      # because it may need code changes or change seeded runs on purpose.
+      cargo-patch:
+        update-types: [patch]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      github-actions:
+        patterns: ["*"]
