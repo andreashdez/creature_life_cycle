@@ -110,8 +110,10 @@ configured chance to regain `1` food. The default regeneration probability is
 
 ## Randomness
 
-The simulation uses `rand::rngs::StdRng` through a small wrapper in
-.repolink {src/lib.rs} {blob/main/src/lib.rs}.
+The simulation uses `rand_chacha::ChaCha12Rng` through a small wrapper in
+.repolink {src/lib.rs} {blob/main/src/lib.rs}. The algorithm is named
+directly rather than through `rand::rngs::StdRng`, which `rand` may change
+between releases, so a seed keeps producing the same run across upgrades.
 
 Without a seed, the generator is seeded from operating-system randomness. With
 a seed, the same starting configuration and seed produce the same sequence of

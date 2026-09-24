@@ -33,6 +33,7 @@ exploratory documents written while working something out.
 | [0011](0011-optional-gui-feature.md) | Bevy sits behind an optional, default-on `gui` feature | `5f85ae0` |
 | [0012](0012-github-actions-ci.md) | CI runs on GitHub Actions instead of Woodpecker | `2b16e22` |
 | [0013](0013-docs-deployed-to-github-pages.md) | The documentation site deploys to GitHub Pages from CI | — |
+| [0014](0014-stable-rng-algorithm.md) | The RNG algorithm is named explicitly as `ChaCha12Rng` | — |
 
 ## Design sketches
 

@@ -63,6 +63,7 @@ The active runtime config lives at `${XDG_CONFIG_HOME:-$HOME/.config}/creature_l
 bevy   realtime GUI visualization, windowing, and UI widgets
 clap   command-line parsing and help output
 rand   seeded and unseeded random number generation
+rand_chacha   the fixed ChaCha12 algorithm behind seeded runs
 serde   TOML deserialization
 toml   runtime configuration parsing
 ```
@@ -409,7 +410,7 @@ A creature dies when its life drops below `1`.
 
 ## Randomness
 
-The simulation uses `rand::rngs::StdRng` through a small wrapper in `src/lib.rs`.
+The simulation uses `rand_chacha::ChaCha12Rng` through a small wrapper in `src/lib.rs`. It names the algorithm directly instead of using `rand::rngs::StdRng`, which may change between `rand` releases, so seeded runs stay the same across dependency upgrades.
 
 Without `--seed`, the generator is seeded from operating system randomness.
 

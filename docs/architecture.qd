@@ -55,7 +55,7 @@ build needs no asset directory beside it.
 | Type | Role |
 |------|------|
 | `Board` | Cells, creatures, and the `refresh` call that advances one turn |
-| `Random` | Seeded or OS-seeded wrapper over `rand::rngs::StdRng` |
+| `Random` | Seeded or OS-seeded wrapper over `rand_chacha::ChaCha12Rng` |
 | `AphidParams`, `LadybugParams`, `FoodParams` | Tunable probabilities, with defaults |
 | `BoardSummary`, `TurnStats` | Population, food, and per-turn birth and death counts |
 | `CellSnapshot`, `CreatureSnapshot` | Read-only views for rendering and reporting |

@@ -3,8 +3,8 @@
 //! The library owns the board state, creature rules, configuration loading/parsing, and random
 //! number generator wrapper. The binaries own command-line parsing, rendering, and sleeping.
 
-use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
+use rand_chacha::ChaCha12Rng;
 use serde::Deserialize;
 use std::env;
 use std::fmt::Write as _;
@@ -1059,12 +1059,14 @@ impl Board {
 
 /// Random number generator wrapper used by the simulation.
 ///
-/// `StdRng` gives deterministic seeded runs while `from_os_rng` provides non-deterministic default
-/// runs from the operating system.
+/// `ChaCha12Rng` gives deterministic seeded runs while `from_os_rng` provides non-deterministic
+/// default runs from the operating system. It is named directly rather than through
+/// `rand::rngs::StdRng`, whose algorithm `rand` may change between releases, so a given seed keeps
+/// producing the same run across dependency upgrades.
 #[derive(Clone)]
 pub struct Random {
     /// Internal generator from the `rand` crate.
-    rng: StdRng,
+    rng: ChaCha12Rng,
 }
 
 impl Default for Random {
@@ -1077,14 +1079,14 @@ impl Random {
     /// Creates a generator seeded from operating system randomness.
     pub fn new() -> Self {
         Self {
-            rng: StdRng::from_os_rng(),
+            rng: ChaCha12Rng::from_os_rng(),
         }
     }
 
     /// Creates a generator from an explicit seed.
     pub fn with_seed(seed: u64) -> Self {
         Self {
-            rng: StdRng::seed_from_u64(seed),
+            rng: ChaCha12Rng::seed_from_u64(seed),
         }
     }
 
