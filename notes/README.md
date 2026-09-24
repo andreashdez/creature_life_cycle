@@ -40,6 +40,7 @@ exploratory documents written while working something out.
 | [0018](0018-board-built-in-one-step.md) | A `Board` is built in one step | `bdef145` |
 | [0019](0019-ci-covers-macos-docs-and-updates.md) | CI covers macOS, the API docs, and dependency updates | — |
 | [0020](0020-benchmarks-run-untimed-in-ci.md) | CI runs the benchmarks once, untimed | — |
+| [0021](0021-gui-split-into-modules.md) | The GUI is split into modules by concern | — |
 
 ## Design sketches
 

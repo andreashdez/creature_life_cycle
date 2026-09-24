@@ -27,7 +27,9 @@ The repository is organized around a CLI executable, a GUI executable, and one e
 |-- notes/
 `-- src/
     |-- bin/
-    |   `-- gui.rs
+    |   `-- gui/
+    |       |-- main.rs
+    |       `-- ...
     |-- lib.rs
     `-- main.rs
 ```
@@ -36,10 +38,12 @@ The repository is organized around a CLI executable, a GUI executable, and one e
 
 `src/main.rs` contains command-line parsing, board rendering, turn-summary printing, sleeping, and CLI tests.
 
-`src/bin/gui.rs` contains the Bevy visual simulation: the board, a
+`src/bin/gui/` contains the Bevy visual simulation: the board, a
 `bevy_feathers` settings sidebar, a population history chart, the food overlay,
 cell editing, pixel-art aphid/ladybug sprites, and count badges for crowded
-cells. `notes/bevy-board-rendering.md` records the design and the trade-offs
+cells. `main.rs` assembles the app and its schedule; each other module owns one
+concern, such as `board.rs`, `creatures.rs`, `chart.rs`, or `editing.rs`.
+`notes/bevy-board-rendering.md` records the design and the trade-offs
 behind it.
 
 `assets/` holds the sprite artwork with its generation prompts and the cell

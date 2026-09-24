@@ -29,7 +29,7 @@ criterion = { version = "0.8", features = ["html_reports"] }
 
 [[bin]]
 name = "gui"
-path = "src/bin/gui.rs"
+path = "src/bin/gui/main.rs"
 required-features = ["gui"]
 
 [[bench]]

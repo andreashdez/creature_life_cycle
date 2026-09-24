@@ -20,7 +20,9 @@ example configuration file.
       - package_gui.sh
     - src/
       - bin/
-        - gui.rs
+        - gui/
+          - main.rs
+          - ...
       - **lib.rs**
       - main.rs
     - tests/
@@ -37,10 +39,12 @@ ends behave identically.
 board rendering, turn-summary printing, sleeping between turns, and the CLI
 tests.
 
-.repolink {src/bin/gui.rs} {blob/main/src/bin/gui.rs} holds the Bevy visual
+.repolink {src/bin/gui/} {tree/main/src/bin/gui} holds the Bevy visual
 simulation: the board, a `bevy_feathers` settings sidebar, the population
 history chart, the food overlay, cell editing, illustrated sprites, and count
-badges for crowded cells.
+badges for crowded cells. `main.rs` assembles the app and its schedule, and
+each other module owns one concern, such as `board.rs`, `creatures.rs`,
+`chart.rs`, or `editing.rs`.
 .repolink {notes/bevy-board-rendering.md} {blob/main/notes/bevy-board-rendering.md}
 records its design and the trade-offs behind it.
 
@@ -146,6 +150,7 @@ Longer **design sketches** keep descriptive names.
 | .repolink {0018} {blob/main/notes/0018-board-built-in-one-step.md} | A `Board` is built in one step |
 | .repolink {0019} {blob/main/notes/0019-ci-covers-macos-docs-and-updates.md} | CI covers macOS, the API docs, and dependency updates |
 | .repolink {0020} {blob/main/notes/0020-benchmarks-run-untimed-in-ci.md} | CI runs the benchmarks once, untimed |
+| .repolink {0021} {blob/main/notes/0021-gui-split-into-modules.md} | The GUI is split into modules by concern |
 
 The design sketch
 .repolink {notes/bevy-board-rendering.md} {blob/main/notes/bevy-board-rendering.md}

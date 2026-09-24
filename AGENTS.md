@@ -9,18 +9,18 @@ A small Rust (edition 2024) simulation of aphids and ladybugs on a 2D board:
 they move, fight, reproduce, eat, and starve. One library holds the rules; two
 front ends drive it.
 
-| Path                            | Contents                                                                                                                            |
-| ------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
-| `src/lib.rs`                    | The whole simulation: `Board`, `Random`, params, TOML config load/parse/format/save, and the rule tests. The only place rules live. |
-| `src/main.rs`                   | CLI (`clap`): prints the board and a per-turn summary. Small.                                                                       |
-| `src/bin/gui.rs`                | Bevy GUI (~6k lines, single file): board, `bevy_feathers` sidebars, population chart, food overlay, cell editing, GUI tests.        |
-| `tests/seeded_e2e_snapshots.rs` | End-to-end CLI runs compared byte-for-byte against expected stdout.                                                                 |
-| `benches/board_refresh.rs`      | Criterion benchmark of `Board::refresh`.                                                                                            |
-| `assets/`                       | Cell shader and 32×32 pixel-art sprites, embedded into the binary with `embedded_asset!`.                                           |
-| `docs/`                         | User-facing [Quarkdown](https://quarkdown.com) site (`.qd`), deployed to GitHub Pages.                                              |
-| `notes/`                        | Internal engineering notes: numbered decision records plus design sketches.                                                         |
-| `scripts/package_gui.sh`        | macOS `.app` bundle + zip (macOS only).                                                                                             |
-| `simulation.example.toml`       | Mirrors the built-in defaults; the e2e tests use it as their config.                                                                |
+| Path                            | Contents                                                                                                                                   |
+| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| `src/lib.rs`                    | The whole simulation: `Board`, `Random`, params, TOML config load/parse/format/save, and the rule tests. The only place rules live.        |
+| `src/main.rs`                   | CLI (`clap`): prints the board and a per-turn summary. Small.                                                                              |
+| `src/bin/gui/`                  | Bevy GUI, one module per concern: board, creatures, `bevy_feathers` sidebars, population chart, editing, GUI tests. `main.rs` wires it up. |
+| `tests/seeded_e2e_snapshots.rs` | End-to-end CLI runs compared byte-for-byte against expected stdout.                                                                        |
+| `benches/board_refresh.rs`      | Criterion benchmark of `Board::refresh`.                                                                                                   |
+| `assets/`                       | Cell shader and 32×32 pixel-art sprites, embedded into the binary with `embedded_asset!`.                                                  |
+| `docs/`                         | User-facing [Quarkdown](https://quarkdown.com) site (`.qd`), deployed to GitHub Pages.                                                     |
+| `notes/`                        | Internal engineering notes: numbered decision records plus design sketches.                                                                |
+| `scripts/package_gui.sh`        | macOS `.app` bundle + zip (macOS only).                                                                                                    |
+| `simulation.example.toml`       | Mirrors the built-in defaults; the e2e tests use it as their config.                                                                       |
 
 ## Commands
 
@@ -75,12 +75,12 @@ edits go through `add_*` / `remove_*_at`.
 **The library never prints.** Failures are returned as `ConfigError` /
 `InvalidConfig`, and things a successful load should report as `ConfigNotice`.
 Printing, and choosing where a message goes, belongs to `src/main.rs` and
-`src/bin/gui.rs`. Add a variant rather than returning a `String`. See
+`src/bin/gui/`. Add a variant rather than returning a `String`. See
 `notes/0017`.
 
 **The `gui` feature gate.** Bevy is optional behind the default-on `gui`
 feature. The library, CLI, tests, and benches must build without it (CI checks
-with `--no-default-features`). Do not use Bevy types outside `src/bin/gui.rs`.
+with `--no-default-features`). Do not use Bevy types outside `src/bin/gui/`.
 
 **One config format.** TOML parsing and writing live together in `lib.rs`
 (`parse_simulation_config`, `format_simulation_config`, `save_simulation_config`).
@@ -99,12 +99,40 @@ per-cell occupant slots maintained by swap-remove (`notes/0009`). Keep
 `Board::refresh` allocation-light. If you touch it, run `cargo bench` before
 and after and report the difference.
 
-## GUI conventions (`src/bin/gui.rs`)
+## GUI conventions (`src/bin/gui/`)
 
-- The file is split into banner sections (`// Resources and components`,
-  `// Geometry`, `// Startup`, `// Parameters panel`,
-  `// Population history chart`, `// Input`, `// Simulation`, `// Rendering`).
-  Put new code in the matching section.
+- The GUI is split into modules by concern, each owning its resources,
+  components, constants, and systems. Put new code in the matching module (see
+  `notes/0021`):
+
+  | Module        | Owns                                                                 |
+  | ------------- | -------------------------------------------------------------------- |
+  | `main`        | The `App`: plugins, resources, and the whole `Update` schedule       |
+  | `startup`     | `setup`: loading the board, spawning cameras, cells, and panels      |
+  | `simulation`  | `BoardRes`, `Rng`, `Stats`, and `Simulation`, the one path to a turn |
+  | `history`     | The population history and its rule-change and extinction events     |
+  | `board`       | Cell shader, food shading and overlay, distant population markers    |
+  | `creatures`   | Sprites, movement tweens and trails, count badges                    |
+  | `hover`       | The hovered cell, its outline, and the inspector popup               |
+  | `editing`     | Edit tools, `CellEdit`, undo, and the edit tab's controls            |
+  | `input`       | Keyboard shortcuts, board pan and zoom, click versus drag            |
+  | `run_control` | `RunAction` and `Reseed`: playback, reset, seed, save, status line   |
+  | `params`      | The nine probabilities and the parameters tab                        |
+  | `panel`       | The properties panel: tabs, sections, scrolling, board view          |
+  | `summary`     | The left sidebar: population cards, playback buttons, readouts       |
+  | `chart`       | The population chart and the palette its text is checked against     |
+  | `layout`      | Sidebar widths, camera markers, and viewport layout                  |
+  | `widgets`     | Small shared UI helpers                                              |
+  | `probe`       | The `CLC_SCREENSHOT` probe                                           |
+  | `tests`       | GUI tests, sharing one `World` fixture                               |
+
+- Items are `pub` only so sibling modules can reach them; nothing leaves the
+  binary. Import them by name (`use crate::board::{CELL, GAP};`), not by glob,
+  except in `tests`.
+- `embedded_asset!`, `load_embedded_asset!`, and `embedded_path!` resolve paths
+  relative to the calling file, so every module uses `../../../assets/...`.
+  Keep asset macros in `src/bin/gui/` itself, not a subdirectory, or the
+  registered and loaded paths stop matching.
 - `main` registers `Update` systems as `.chain()`ed tuples: input and
   simulation first, then rendering from the settled state. Order matters and the
   inline comments explain why. A tuple holds at most 20 systems, so split
