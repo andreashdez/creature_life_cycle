@@ -4,10 +4,9 @@
 //! Run with: `cargo run --bin gui`
 //!
 //! The simulation itself is untouched: `Board` lives in a resource and every
-//! turn still comes from `Board::refresh`. Much of this is a port of the
-//! earlier macroquad GUI, removed in favour of this one;
-//! `notes/bevy-board-rendering.md` records the design and the trade-offs, and
-//! comments referring to it explain where a constant or layout came from.
+//! turn still comes from `Board::refresh`. It replaced an earlier macroquad
+//! GUI (`notes/0010`); `notes/bevy-board-rendering.md` records the design and
+//! the trade-offs.
 
 mod board;
 mod chart;

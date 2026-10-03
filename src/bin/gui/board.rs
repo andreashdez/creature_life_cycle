@@ -27,8 +27,8 @@ pub const FED_CELL_RIM: Color = Color::srgba_u8(135, 153, 89, 65);
 
 /// Food cap per cell, mirroring `MAX_CELL_FOOD` in `src/lib.rs`.
 pub const MAX_FOOD: i32 = 9;
-// Food overlay marks, lifted from `draw_cell_background` and
-// `draw_food_speckles` in the previous macroquad GUI.
+// Food overlay marks. Both are translucent so the cell shading underneath
+// still reads as the main food signal and the marks only add detail.
 const FOOD_BAR: Color = Color::srgba_u8(194, 184, 83, 85);
 const FOOD_SPECKLE: Color = Color::srgba_u8(219, 205, 116, 42);
 
@@ -237,7 +237,7 @@ pub fn food_colour(food: i32) -> Color {
 }
 
 /// Collects the overlay's triangles. Bars and speckles are appended in draw
-/// order, so speckles land on top of bars as in the previous macroquad GUI.
+/// order, so speckles land on top of bars.
 #[derive(Default)]
 pub struct OverlayMesh {
     pub positions: Vec<[f32; 3]>,
@@ -325,9 +325,9 @@ impl OverlayMesh {
     }
 }
 
-/// Builds every cell's food bar and speckles into one mesh, using the
-/// macroquad GUI's proportions (`draw_cell_background`, `draw_food_speckles`)
-/// converted from a y-down cell rectangle to y-up world space.
+/// Builds every cell's food bar and speckles into one mesh. Proportions are
+/// given in a y-down cell rectangle, the natural way to lay out marks within a
+/// cell, and converted to y-up world space here.
 pub fn food_overlay_mesh(board: &Board) -> Mesh {
     let inner = CELL - GAP;
     let mut mesh = OverlayMesh::default();
@@ -370,7 +370,7 @@ pub fn food_overlay_mesh(board: &Board) -> Mesh {
 /// measured from its top-left corner (x right, y down). Positions are fixed per
 /// cell, so speckles stay put as food changes rather than jittering every turn.
 ///
-/// The macroquad GUI capped this at six, which made cells holding 6, 7, 8 and 9
+/// The first GUI capped this at six, which made cells holding 6, 7, 8 and 9
 /// food look identical apart from bar length. There is room for all nine: across
 /// a 100x100 board the closest two centres are 0.17 of a cell apart against a
 /// speckle diameter of 0.04, and none comes within reach of the bar.

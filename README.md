@@ -128,7 +128,8 @@ in the right sidebar) closes it. The board stays centered in the available space
 with population history below it. Edit shortcuts open the properties sidebar.
 
 Parameters are grouped by Aphids, Ladybugs, and Environment. Each parameter has a slider, an
-editable percentage, and a short explanation. Enter or leaving the field applies
+editable percentage, and a short explanation. The ladybug prey life gain is not a probability and
+has no control here; it is set in the config file, and Save setup keeps it. Enter or leaving the field applies
 a value from 0 to 100; invalid input restores the previous value and reports an
 error. Sliders also support arrow-key adjustment. A bullet marks values changed
 from the saved setup, and each group has **Restore defaults** for the built-in
@@ -310,6 +311,7 @@ move_probability = 0.7
 kill_probability = 0.2
 direction_change_probability = 0.4
 procreation_probability = 0.2
+prey_life_gain = 3
 
 [food]
 regeneration_probability = 0.1
@@ -323,7 +325,7 @@ Creature positions outside the board are skipped with a warning.
 
 Starting aphids have `10` life.
 
-Starting ladybugs have `15` life.
+Starting ladybugs have `15` life, which is also the most life eating aphids can give a ladybug.
 
 Each board cell starts with a random food value from `0` through `9`.
 
@@ -331,7 +333,9 @@ Food is capped at `9` per cell.
 
 All probability values must be from `0.0` through `1.0`.
 
-The `[aphid]`, `[ladybug]`, and `[food]` sections are optional. If a section is omitted, that behavior uses its default probabilities.
+`prey_life_gain` is the life a ladybug regains for each aphid it kills. It must be a whole number from `0` through `15`. It is optional within `[ladybug]` and defaults to `3`, so files written before it existed still load; `0` restores the earlier rules exactly.
+
+The `[aphid]`, `[ladybug]`, and `[food]` sections are optional. If a section is omitted, that behavior uses its default values.
 
 ## Board Output
 
@@ -407,7 +411,7 @@ aphid kill probability + other aphids in the same cell * aphid accomplice probab
 
 The acting aphid does not count as its own accomplice. The final probability is capped at `1.0`.
 
-A ladybug can kill one aphid in its cell using the configured ladybug kill probability.
+A ladybug can kill one aphid in its cell using the configured ladybug kill probability. A ladybug that kills an aphid eats it and regains `prey_life_gain` life (default `3`), up to the `15` life a starting ladybug has. A ladybug that already has more, for example one placed with more life, keeps it. Because combat comes before starvation, a meal can save a ladybug from starving later in the same turn.
 
 Killed creatures are removed after the combat phase and cannot procreate or starve later in the same turn.
 
@@ -479,4 +483,4 @@ Remove build artifacts:
 cargo clean
 ```
 
-The simulation tests live in `src/lib.rs` under the `tests` module. The CLI parsing tests live in `src/main.rs`. Together they cover deterministic randomness, CLI parsing, TOML configuration parsing, probability validation, edge movement, combat, procreation, starvation, and phased turn order.
+The simulation tests live in `src/lib.rs` under the `tests` module. The CLI parsing tests live in `src/main.rs`. Together they cover deterministic randomness, CLI parsing, TOML configuration parsing, probability validation, edge movement, combat and feeding, procreation, starvation, and phased turn order. A randomized test runs 200 seeded boards of random size and parameters for up to 60 turns, with creatures added and removed between turns, and after every edit and turn recounts the cell lists, cell slots, active list, free IDs, and cached totals against what the board reports.

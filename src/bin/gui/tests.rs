@@ -517,8 +517,7 @@ fn saving_writes_the_edited_board_and_makes_it_what_reset_restores() {
     assert_eq!(reloaded.cell_counts(1, 2), Some((1, 0)));
     assert_eq!(reloaded.aphid_params().prob_move, 0.31);
 
-    // Reset follows the save, as the previous macroquad GUI's reset does by reloading
-    // the config file.
+    // Reset follows the save, so it restores what is now in the config file.
     let saved_setup = world.resource::<StartingSetup>().0.clone();
     run_action(&mut world, RunAction::Reset);
     let board = &world.resource::<BoardRes>().0;

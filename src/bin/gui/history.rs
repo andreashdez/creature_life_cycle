@@ -5,7 +5,8 @@ use crate::chart::CHART_SERIES_NAMES;
 use bevy::prelude::*;
 use std::collections::VecDeque;
 
-/// Turns kept in the history, matching `HISTORY_LIMIT` in the previous macroquad GUI.
+/// Turns kept in the history. Older turns scroll off the chart, and their
+/// events expire with them.
 pub const HISTORY_LIMIT: usize = 240;
 
 #[derive(Clone, Copy)]
@@ -25,7 +26,8 @@ impl HistoryPoint {
     }
 }
 
-/// Rolling population history, capped like the previous macroquad GUI's.
+/// Rolling population history, capped at `HISTORY_LIMIT` turns, with the
+/// rule-change and extinction events that fall inside it.
 #[derive(Resource, Default, Clone)]
 pub struct History(pub VecDeque<HistoryPoint>, pub VecDeque<HistoryEvent>);
 
