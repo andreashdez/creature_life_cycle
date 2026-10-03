@@ -53,6 +53,16 @@ pub struct StartingSetup(pub String);
 #[derive(Resource, Clone, Copy)]
 pub struct Seed(pub u64);
 
+/// Advances one turn when the playback timer fires.
+///
+/// At most one turn runs per frame, even if a slow frame let the timer fire
+/// more than once: the run slows down instead of skipping turns. That keeps
+/// every turn on screen, and `sync_creatures` relies on it. It matches
+/// sprites to creatures by ID once per frame, and the board reuses a dead
+/// creature's ID for a creature born in a later turn. With two turns in one
+/// frame, a dead aphid's sprite could glide to the newborn that took its ID.
+/// The fastest speed, 0.05 s a turn, only reaches this limit below 20 frames
+/// a second.
 pub fn step_simulation(time: Res<Time>, mut timer: ResMut<StepTimer>, mut sim: Simulation) {
     if !sim.playing.0 || sim.stats.extinct || !timer.0.tick(time.delta()).just_finished() {
         return;

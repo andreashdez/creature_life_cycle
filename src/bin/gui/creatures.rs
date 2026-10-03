@@ -234,7 +234,8 @@ pub fn sync_creatures(
         match index.0.get(&snapshot.id) {
             Some(&entity) => {
                 if let Ok((mut tween, transform, mut sprite)) = tweens.get_mut(entity) {
-                    // Undo followed by a new edit can reuse an ID for another species.
+                    // IDs freed by deaths are reused, so an ID can return as
+                    // another species.
                     if sprite.image != image {
                         sprite.image = image;
                     }

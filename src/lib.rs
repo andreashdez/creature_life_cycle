@@ -252,7 +252,8 @@ pub enum CreatureSnapshotKind {
 /// Read-only living creature data for renderers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CreatureSnapshot {
-    /// Stable creature ID.
+    /// Creature ID. It stays the same for the creature's whole life, and after its death may be
+    /// given to a creature born or placed in a later turn.
     pub id: usize,
     /// Creature kind.
     pub kind: CreatureSnapshotKind,
@@ -361,8 +362,11 @@ pub struct Board {
     cols: usize,
     /// Row-major board cells.
     field: Vec<Location>,
-    /// Stable creature ID table. Dead creatures are stored as `None`.
+    /// Creature ID table. Dead creatures are stored as `None` until a new creature takes the ID.
     creatures: Vec<Option<Creature>>,
+    /// IDs whose creature has died and that the next new creature may take, so the ID table stays
+    /// as large as the most creatures alive at once rather than every creature ever born.
+    free_ids: Vec<usize>,
     /// Per-ID index inside the creature's current cell occupant list.
     cell_slots: Vec<usize>,
     /// IDs for currently living creatures, in creation order.
@@ -397,6 +401,7 @@ impl Board {
             cols,
             field: Vec::with_capacity(rows * cols),
             creatures: Vec::new(),
+            free_ids: Vec::new(),
             cell_slots: Vec::new(),
             active_creatures: Vec::new(),
             turn_creatures: Vec::new(),
@@ -502,7 +507,7 @@ impl Board {
         })
     }
 
-    /// Returns read-only data for every living creature in stable ID order.
+    /// Returns read-only data for every living creature in creation order.
     pub fn creature_snapshots(&self) -> Vec<CreatureSnapshot> {
         let mut snapshots = Vec::with_capacity(self.active_creatures.len());
         self.write_creature_snapshots(&mut snapshots);
@@ -545,17 +550,7 @@ impl Board {
             return None;
         }
 
-        let id = self.creatures.len();
-        let index = self.index(location);
-        let cell_slot = self.field[index].aphids.len();
-        self.field[index].aphids.push(id);
-        self.cell_slots.push(cell_slot);
-        self.active_creatures.push(id);
-        self.death_marks.push(0);
-        self.summary.aphids += 1;
-        self.creatures
-            .push(Some(Creature::Aphid(Aphid { location, life })));
-        Some(id)
+        Some(self.insert_creature(Creature::Aphid(Aphid { location, life })))
     }
 
     /// Adds a ladybug if the coordinate is valid and returns its stable ID, or `None` when the
@@ -572,18 +567,37 @@ impl Board {
             return None;
         }
 
-        let id = self.creatures.len();
-        let index = self.index(location);
-        let cell_slot = self.field[index].ladybugs.len();
-        self.field[index].ladybugs.push(id);
-        self.cell_slots.push(cell_slot);
+        let ladybug = Ladybug::new(location, life, random);
+        Some(self.insert_creature(Creature::Ladybug(ladybug)))
+    }
+
+    /// Stores a new creature in its cell, the ID table, and the active list, and returns its ID.
+    ///
+    /// A free ID is taken before the table grows. The active list, not the ID, records creation
+    /// order, so which ID a creature gets never changes the order creatures act in.
+    fn insert_creature(&mut self, creature: Creature) -> usize {
+        let kind = creature.kind();
+        let location = creature.location();
+        let id = match self.free_ids.pop() {
+            Some(id) => {
+                self.creatures[id] = Some(creature);
+                id
+            }
+            None => {
+                self.creatures.push(Some(creature));
+                self.cell_slots.push(0);
+                self.death_marks.push(0);
+                self.creatures.len() - 1
+            }
+        };
+
+        self.cell_slots[id] = self.add_to_location(kind, location, id);
         self.active_creatures.push(id);
-        self.death_marks.push(0);
-        self.summary.ladybugs += 1;
-        self.creatures.push(Some(Creature::Ladybug(Ladybug::new(
-            location, life, random,
-        ))));
-        Some(id)
+        match kind {
+            CreatureKind::Aphid => self.summary.aphids += 1,
+            CreatureKind::Ladybug => self.summary.ladybugs += 1,
+        }
+        id
     }
 
     /// Removes one aphid from a cell and returns whether a creature was removed.
@@ -646,10 +660,11 @@ impl Board {
             }
         }
 
-        // Phase 3: combat deaths are applied before procreation and starvation.
-        stats.deaths += dead_creatures.len();
+        // Phase 3: combat deaths are applied before procreation and starvation. The dead IDs stay
+        // listed until the turn ends; see below.
+        let combat_deaths = dead_creatures.len();
+        stats.deaths += combat_deaths;
         let mut removed_creatures = self.remove_dead_creatures(&dead_creatures);
-        dead_creatures.clear();
 
         // Phase 4: survivors from the original turn snapshot may procreate.
         for id in turn_creatures.iter().copied() {
@@ -672,12 +687,18 @@ impl Board {
         }
 
         // Phase 6: starvation deaths are applied after every survivor had a starvation turn.
-        stats.deaths += dead_creatures.len();
-        removed_creatures |= self.remove_dead_creatures(&dead_creatures);
-        dead_creatures.clear();
+        let starvation_deaths = &dead_creatures[combat_deaths..];
+        stats.deaths += starvation_deaths.len();
+        removed_creatures |= self.remove_dead_creatures(starvation_deaths);
         if removed_creatures {
             self.compact_active_creatures();
         }
+
+        // IDs freed this turn only become available now. A newborn that took a combat victim's ID
+        // during procreation would still be in the turn snapshot under that ID, and would starve
+        // in phase 5 although newborns do not act until the next turn.
+        self.free_ids.extend_from_slice(&dead_creatures);
+        dead_creatures.clear();
 
         self.turn_creatures = turn_creatures;
         self.dead_creatures = dead_creatures;
@@ -898,6 +919,8 @@ impl Board {
         self.remove_from_location(kind, location, id, cell_slot);
         self.mark_creature_removed(id, kind);
         self.active_creatures.retain(|active_id| *active_id != id);
+        // Only edits call this, never `refresh`, so no turn snapshot can still hold the ID.
+        self.free_ids.push(id);
     }
 
     /// Removes scheduled creatures without compacting active IDs.
@@ -1776,13 +1799,34 @@ mod tests {
                 }
             }
 
-            // IDs are handed out in creation order, so the living IDs in ascending order are
-            // exactly what the active list must hold.
             let living: Vec<usize> = (0..self.creatures.len())
                 .filter(|id| self.creatures[*id].is_some())
                 .collect();
             assert_eq!(listed, living.len(), "every living creature is in one cell");
-            assert_eq!(self.active_creatures, living, "active creatures");
+
+            // Reused IDs mean creation order is no longer ID order, so the active list is checked
+            // as a set here. The seeded snapshots pin down its order.
+            let mut active = self.active_creatures.clone();
+            active.sort_unstable();
+            assert_eq!(
+                active, living,
+                "active creatures are the living ones, once each"
+            );
+
+            // Every ID is either alive or free, never both and never neither.
+            let mut free = self.free_ids.clone();
+            free.sort_unstable();
+            free.dedup();
+            assert_eq!(free.len(), self.free_ids.len(), "free IDs are listed once");
+            assert!(
+                free.iter().all(|id| self.creatures[*id].is_none()),
+                "free IDs belong to no creature"
+            );
+            assert_eq!(
+                living.len() + free.len(),
+                self.creatures.len(),
+                "every ID is alive or free"
+            );
 
             let aphids = living
                 .iter()
@@ -1834,6 +1878,9 @@ mod tests {
                 prob_regenerate: choices.probability(),
             });
 
+            // The ID table may only grow to the most IDs ever in use at once: every creature alive
+            // at a turn's start plus that turn's births, since deaths are freed at the turn's end.
+            let mut busiest = 0;
             for turn in 0..60 {
                 // Edits land before most turns, and several at once before the first, the way
                 // the GUI's edit tools change a board between turns.
@@ -1853,6 +1900,8 @@ mod tests {
                         _ => _ = board.remove_ladybug_at(x, y),
                     }
                     board.check_invariants();
+                    let alive = board.summary().aphids + board.summary().ladybugs;
+                    busiest = busiest.max(alive);
                 }
 
                 let before = board.summary();
@@ -1864,6 +1913,12 @@ mod tests {
                     stats.summary.aphids + stats.summary.ladybugs + stats.deaths,
                     "births and deaths account for the change, seed {seed} turn {turn}"
                 );
+                busiest = busiest.max(before.aphids + before.ladybugs + stats.births);
+                assert!(
+                    board.creatures.len() <= busiest,
+                    "ID table of {} for at most {busiest} IDs in use, seed {seed} turn {turn}",
+                    board.creatures.len()
+                );
 
                 // Aphids can double every turn when food runs high, and a few thousand
                 // creatures are enough to exercise every path.
@@ -1872,6 +1927,54 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn a_newborn_never_takes_an_id_freed_in_the_same_turn() {
+        // A ladybug kills one of three aphids in combat, then the two survivors each have a
+        // child. Had a child taken the victim's ID, it would still be in the turn snapshot under
+        // that ID and would starve in phase 5, in the turn it was born.
+        let mut board = board_with_field(1, 1);
+        board.set_cell_food(Coordinates { x: 0, y: 0 }, 0);
+        let mut random = Random::with_seed(3);
+        for _ in 0..3 {
+            board.add_aphid(0, 0, 10).unwrap();
+        }
+        board.add_ladybug(0, 0, 10, &mut random).unwrap();
+        board.aphid_params = AphidParams {
+            prob_move: 0.0,
+            prob_kill: 0.0,
+            prob_accomplice: 0.0,
+            prob_procreate: 1.0,
+        };
+        board.ladybug_params = LadybugParams {
+            prob_move: 0.0,
+            prob_kill: 1.0,
+            prob_direction: 0.0,
+            prob_procreate: 0.0,
+            prey_life_gain: 0,
+        };
+        board.food_params.prob_regenerate = 0.0;
+
+        let stats = board.refresh(&mut random);
+        assert_eq!((stats.births, stats.deaths), (2, 1));
+
+        // Both children are untouched by starvation. They took fresh IDs, and the victim's ID is
+        // free for the next turn.
+        let children = &board.active_creatures[3..];
+        assert_eq!(children.len(), 2);
+        for child in children {
+            assert_eq!(creature_life(&board, *child), 2, "child {child}");
+            assert!(*child >= 4, "child {child} took a freed ID");
+        }
+        assert_eq!(board.free_ids.len(), 1);
+        board.check_invariants();
+
+        // The next birth takes the freed ID instead of growing the table.
+        let table = board.creatures.len();
+        let next = board.add_aphid(0, 0, 10).unwrap();
+        assert!(next < 4);
+        assert_eq!(board.creatures.len(), table);
     }
 
     #[test]

@@ -152,6 +152,7 @@ Longer **design sketches** keep descriptive names.
 | .repolink {0020} {blob/main/notes/0020-benchmarks-run-untimed-in-ci.md} | CI runs the benchmarks once, untimed |
 | .repolink {0021} {blob/main/notes/0021-gui-split-into-modules.md} | The GUI is split into modules by concern |
 | .repolink {0022} {blob/main/notes/0022-ladybugs-feed-on-aphids.md} | Ladybugs regain life from the aphids they kill |
+| .repolink {0023} {blob/main/notes/0023-creature-ids-are-reused.md} | A dead creature's ID is reused, from the next turn on |
 
 The design sketch
 .repolink {notes/bevy-board-rendering.md} {blob/main/notes/bevy-board-rendering.md}
