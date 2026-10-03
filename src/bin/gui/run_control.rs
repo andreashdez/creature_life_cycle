@@ -12,15 +12,14 @@ use bevy::prelude::*;
 use bevy::text::{EditableText, EditableTextFilter};
 use creature_life_cycle::{Random, save_configured_board};
 
-/// How long a message stays on the toolbar, matching `SaveStatus::ttl` in the
-/// macroquad GUI.
+/// How long a message stays on the toolbar before `StatusLine` clears it.
 pub const STATUS_SECONDS: f32 = 4.0;
 /// Digits in `u64::MAX`, so the seed field cannot hold a number that could never
 /// parse.
 pub const SEED_DIGITS: usize = 20;
 
 /// What the toolbar reports about the last thing the reader asked for, a save or
-/// a seed, cleared after a few seconds as the previous macroquad GUI's footer status is.
+/// a seed, cleared after `STATUS_SECONDS`.
 #[derive(Resource, Default)]
 pub struct StatusLine {
     pub message: String,
@@ -155,7 +154,7 @@ pub fn apply_run_actions(
 }
 
 /// Feathers spawns the field empty, so fill it with the seed the run started
-/// from and hold it to digits, as the previous macroquad GUI's field does.
+/// from and hold it to digits, since anything else could never parse as a seed.
 pub fn init_seed_field(
     mut commands: Commands,
     seed: Res<Seed>,
@@ -171,11 +170,10 @@ pub fn init_seed_field(
     }
 }
 
-/// Applies the seed in the panel's field and restarts the run from it, as
-/// `set_seed` does in the previous macroquad GUI. The restart itself is left to
-/// `RunAction::Reset`, so there is one restart path rather than two.
-/// Enter applies the seed while the field has focus, as Enter commits the
-/// macroquad GUI's field.
+/// Applies the seed in the panel's field and restarts the run from it. The
+/// restart itself is left to `RunAction::Reset`, so there is one restart path
+/// rather than two. Enter applies the seed while the field has focus, the way
+/// Enter commits a single-line field.
 pub fn seed_field_keyboard(
     keys: Res<ButtonInput<KeyCode>>,
     focus: Res<InputFocus>,
@@ -212,14 +210,14 @@ pub fn apply_seed(
             actions.write(RunAction::Reset);
             status.set(format!("Restarted from seed {value}."), true);
         }
-        // An unreadable seed leaves the run alone, as a failed `commit` does in
-        // the previous macroquad GUI.
+        // An unreadable seed leaves the run alone: restarting from a guess would
+        // throw away the current run for a seed nobody asked for.
         Err(_) => status.set(format!("Enter a whole seed from 0 to {}.", u64::MAX), false),
     }
 }
 
-/// Writes the current board and probabilities to the XDG config file, as
-/// `save_config` does in the previous macroquad GUI.
+/// Writes the current board and probabilities to the XDG config file the CLI
+/// also reads, so a setup built here runs the same from the command line.
 pub fn save_setup(
     mut actions: MessageReader<RunAction>,
     mut board: ResMut<BoardRes>,

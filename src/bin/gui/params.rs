@@ -17,8 +17,9 @@ use bevy::ui_widgets::{Activate, SliderPrecision, SliderValue, ValueChange};
 use creature_life_cycle::{AphidParams, Board, FoodParams, LadybugParams};
 
 /// The nine tunable probabilities, owned by the panel and pushed into the board
-/// when they change. Indices match `probability`/`set_probability` in
-/// the previous macroquad GUI's parameter panel, so saved configs line up.
+/// when they change. Indices follow the parameters tab from top to bottom, the
+/// order of `PARAM_LABELS`. Anything else in the params structs, such as the
+/// ladybug prey life gain, is carried through unchanged.
 #[derive(Resource, Clone, Copy, Default)]
 pub struct Params {
     pub aphid: AphidParams,

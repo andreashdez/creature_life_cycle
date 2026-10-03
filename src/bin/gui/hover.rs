@@ -11,8 +11,8 @@ use crate::simulation::BoardRes;
 use crate::widgets::set_text;
 use bevy::prelude::*;
 
-/// Offset of the cell popup from the pointer, and the margin it keeps from the
-/// window edges, both as `draw_hover_tooltip` in the previous macroquad GUI.
+/// Offset of the cell popup from the pointer, so the pointer never covers its
+/// text, and the margin it keeps from the window edges.
 const POPUP_OFFSET: f32 = 18.0;
 const POPUP_MARGIN: f32 = 12.0;
 
@@ -32,9 +32,8 @@ pub enum PopupLine {
     Counts,
 }
 
-/// Cell inspector popup. It lives outside the panel and follows the pointer, as
-/// `draw_hover_tooltip` in the previous macroquad GUI does, so hovering a cell never
-/// moves the controls. `update_cell_popup` places it and fills it in.
+/// Cell inspector popup. It lives outside the panel and follows the pointer, so
+/// hovering a cell never moves the controls. `update_cell_popup` places it and fills it in.
 pub fn spawn_cell_popup(commands: &mut Commands, ui_camera: Entity, font: Handle<Font>) {
     let line = |size: f32, colour: Color| {
         (
@@ -75,8 +74,9 @@ pub fn spawn_cell_popup(commands: &mut Commands, ui_camera: Entity, font: Handle
         });
 }
 
-/// Replaces the inverse-layout arithmetic the previous macroquad GUI does to find the
-/// hovered cell: project the cursor back through the camera instead.
+/// Finds the hovered cell by projecting the cursor back through the board
+/// camera, which keeps working under any pan and zoom without redoing the
+/// layout arithmetic.
 pub fn hovered_cell(
     windows: Query<&Window>,
     camera: Query<(&Camera, &GlobalTransform), With<BoardCamera>>,
@@ -146,9 +146,8 @@ pub fn draw_hover(
 }
 
 /// Fills the cell inspector popup and parks it beside the pointer, hiding it
-/// whenever no cell is hovered. This is the Bevy counterpart to
-/// `draw_hover_tooltip` in the previous macroquad GUI, down to the 18px offset and the
-/// clamp that keeps the popup on screen near the window edges.
+/// whenever no cell is hovered. Near the window edges it is clamped back on
+/// screen, `POPUP_MARGIN` from the edge.
 pub fn update_cell_popup(
     windows: Query<&Window>,
     cameras: Query<(&Camera, &GlobalTransform), With<BoardCamera>>,

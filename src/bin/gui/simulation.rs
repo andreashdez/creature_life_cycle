@@ -25,8 +25,7 @@ pub struct StepTimer(pub Timer);
 #[derive(Resource)]
 pub struct Playing(pub bool);
 
-/// Board changes that the renderers must react to. The macroquad GUI uses a
-/// `board_revision` counter for the same reason; relying on `ResMut` change
+/// Board changes that the renderers must react to. Relying on `ResMut` change
 /// detection instead would repaint on every parameter tweak, because editing a
 /// parameter also touches the board.
 #[derive(Resource)]
@@ -45,14 +44,12 @@ pub struct Stats {
 }
 
 /// The board Reset returns to. Captured at launch and replaced by a save, so
-/// Reset follows the config file the way the previous macroquad GUI's reset does by
-/// reloading it from disk.
+/// Reset follows the config file without reading it from disk again.
 #[derive(Resource)]
 pub struct StartingSetup(pub String);
 
 /// Seed the current run was started from. The board loaded at launch uses
-/// `DEFAULT_SEED`; the panel's seed field replaces it and restarts the run, as
-/// `set_seed` does in the previous macroquad GUI.
+/// `DEFAULT_SEED`; the panel's seed field replaces it and restarts the run.
 #[derive(Resource, Clone, Copy)]
 pub struct Seed(pub u64);
 
@@ -139,9 +136,9 @@ impl Simulation<'_> {
         true
     }
 
-    /// An edited board is a new starting setup, as `after_board_edit` treats it
-    /// in the previous macroquad GUI: the run pauses, and the turn count and population
-    /// history start over from what is on the board now.
+    /// An edited board is a new starting setup: the run pauses, and the turn
+    /// count and population history start over from what is on the board now.
+    /// History from before the edit would chart a board that no longer exists.
     pub fn restart_from_edit(&mut self) {
         let summary = self.board.0.summary();
         *self.stats = Stats {

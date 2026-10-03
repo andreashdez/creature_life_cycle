@@ -18,11 +18,13 @@ use creature_life_cycle::{Board, Random};
 use std::collections::VecDeque;
 
 /// Starting life for hand-placed creatures: the same values `src/lib.rs` gives
-/// creatures loaded from the config, and that the macroquad editor uses.
+/// creatures loaded from the config, so a placed creature is no different from
+/// one in a saved setup.
 pub const EDIT_APHID_LIFE: i32 = 10;
 pub const EDIT_LADYBUG_LIFE: i32 = 15;
 
-// Edit preview outline per tool, from `draw_edit_overlay` in the previous macroquad GUI.
+// Edit preview outline per tool, in each species' colour so the outline says
+// what a click will place.
 pub const EDIT_APHID: Color = Color::srgba_u8(111, 219, 91, 175);
 pub const EDIT_LADYBUG: Color = Color::srgba_u8(231, 78, 61, 175);
 
@@ -34,8 +36,8 @@ pub enum EditTool {
     Erase,
 }
 
-/// Board editing state, as `editing_enabled` / `edit_tool` in the previous macroquad GUI.
-/// Keys and panel controls write it; the panel controls are synced from it.
+/// Board editing state: whether editing is on and which tool is chosen. Keys
+/// and panel controls write it; the panel controls are synced from it.
 #[derive(Resource, Default)]
 pub struct EditMode {
     pub enabled: bool,
@@ -43,7 +45,8 @@ pub struct EditMode {
 }
 
 impl EditMode {
-    /// Picking a tool also starts editing, as `A` / `L` do in the previous macroquad GUI.
+    /// Picking a tool also starts editing, so `A`, `L`, and `X` work in one key
+    /// press rather than needing editing switched on first.
     pub fn select(&mut self, tool: EditTool) {
         self.tool = tool;
         self.enabled = true;

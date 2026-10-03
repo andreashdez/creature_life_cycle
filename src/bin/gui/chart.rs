@@ -669,9 +669,9 @@ pub fn draw_chart_marks(
 
     // Populations are small integers, so the two lines often sit on exactly
     // the same value for many turns, and a solid line on top would hide the
-    // other completely. Ladybugs are dashed so aphids show through the gaps,
-    // as in the previous macroquad GUI. (The palette passes CVD checks on its own; the
-    // dash is for coincident values, not colour.)
+    // other completely. Ladybugs are dashed so aphids show through the gaps.
+    // (The palette passes CVD checks on its own; the dash is for coincident
+    // values, not colour.)
     for (index, colour) in CHART_SERIES.into_iter().enumerate() {
         let points: Vec<Vec2> = history
             .0

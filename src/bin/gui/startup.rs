@@ -62,8 +62,7 @@ pub fn setup(
         creature_life_cycle::format_simulation_config(&board),
     ));
 
-    // Centre the camera on the board and scale so the whole thing fits, which
-    // is the job `layout_for_size` does by hand in the previous macroquad GUI.
+    // Centre the camera on the board and scale so the whole thing fits.
     let board_size = Vec2::new(cols as f32 * CELL, rows as f32 * CELL);
     let centre = Vec2::new(
         board_size.x * 0.5 - CELL * 0.5,

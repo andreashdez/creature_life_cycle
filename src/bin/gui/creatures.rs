@@ -13,8 +13,8 @@ pub const CREATURE_RADIUS: f32 = 0.16;
 /// Includes the sprites' transparent margin and appendages. The painted
 /// silhouette stays inside the edit ring; crowded cells use the usual scale.
 pub const CREATURE_SPRITE_SIZE: f32 = (CELL - GAP) * CREATURE_RADIUS * 2.75;
-// Count badges, from `draw_count_badge` in the previous macroquad GUI: a small disc on a
-// dropped shadow with the count in dark text, sized relative to the cell.
+// Count badges: a small disc on a dropped shadow with the count in dark text,
+// sized relative to the cell so they scale with zoom.
 pub const BADGE_RADIUS: f32 = 0.157;
 pub const BADGE_FONT: f32 = 0.23;
 pub const BADGE_SHADOW_OFFSET: f32 = 0.014;
@@ -26,11 +26,11 @@ pub const BADGE_SLOTS: [Vec2; 2] = [Vec2::new(0.22, 0.22), Vec2::new(0.78, 0.78)
 pub const BADGE_RASTER_STEP: f32 = 4.0;
 pub const BADGE_RASTER_RANGE: (f32, f32) = (8.0, 96.0);
 /// A badge is only worth drawing once the cell is this many logical pixels
-/// across, as the `size >= 26.0` gate in the previous macroquad GUI.
+/// across. Below it the count text would be too small to read.
 pub const BADGE_MIN_CELL_PIXELS: f32 = 26.0;
 
 pub const BADGE_APHID: Color = Color::srgb_u8(93, 188, 85);
-// A step lighter than the macroquad badge red (#d94234). The count sits inside
+// A step lighter than the original badge red (#d94234). The count sits inside
 // the fill, and dark ink on that red measures 4.07:1, under WCAG's 4.5:1 for
 // normal text, with white no better at 4.39:1. Holding the hue and chroma and
 // lifting OKLCH lightness to 0.63 gives 4.60:1.
@@ -96,9 +96,8 @@ pub struct Badge {
 #[derive(Component)]
 pub struct CountBadge;
 
-/// Maps `CreatureSnapshot::id` to the entity currently rendering it, which is
-/// what replaces the `previous_creatures` / `current_creatures` diffing in the
-/// macroquad GUI.
+/// Maps `CreatureSnapshot::id` to the entity currently rendering it, so each
+/// board change spawns, moves, or despawns only the creatures it touched.
 #[derive(Resource, Default)]
 pub struct CreatureIndex(pub HashMap<usize, Entity>);
 
@@ -136,9 +135,8 @@ impl MoveTween {
     }
 }
 
-/// Where a creature sits in its cell and how large it is drawn, ported from
-/// `creature_slots` and `creature_render_scale` in the previous macroquad GUI. The offset
-/// is a fraction of the cell from its top-left corner (x right, y down).
+/// Where a creature sits in its cell and how large it is drawn. The offset is a
+/// fraction of the cell from its top-left corner (x right, y down).
 ///
 /// `cell_slot` counts per kind, so a mixed cell needs separate layouts: with one
 /// shared layout the first aphid and the first ladybug land on the same spot and
@@ -184,8 +182,8 @@ pub fn creature_slot(
 }
 
 pub fn creature_world(location: Coordinates, offset: Vec2) -> Vec2 {
-    // `Coordinates.x` is the row and `.y` is the column, matching
-    // `creature_position` in the previous macroquad GUI.
+    // `Coordinates.x` is the row and `.y` is the column, so `x` moves the
+    // creature down the board and `y` moves it across.
     let inner = CELL - GAP;
     let top_left = cell_to_world(location.x, location.y) + Vec2::new(-inner * 0.5, inner * 0.5);
     top_left + Vec2::new(inner * offset.x, -inner * offset.y)
