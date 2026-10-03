@@ -18,6 +18,12 @@ const CONFIG_DIR_NAME: &str = "creature_life_cycle";
 const CONFIG_FILE_NAME: &str = "simulation.toml";
 const MAX_CELL_FOOD: i32 = 9;
 const DEFAULT_FOOD_REGEN_PROBABILITY: f64 = 0.1;
+const DEFAULT_PREY_LIFE_GAIN: i32 = 3;
+/// Life a starting aphid has.
+const APHID_START_LIFE: i32 = 10;
+/// Life a starting ladybug has. Eating aphids never raises a ladybug above it, so a well-fed
+/// ladybug is as long-lived as a fresh one but cannot bank food from a large swarm.
+const LADYBUG_START_LIFE: i32 = 15;
 
 /// Zero-based board coordinate: `x` is the row and `y` is the column.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -112,6 +118,9 @@ struct LadybugConfig {
     direction_change_probability: f64,
     /// Chance that a ladybug creates a child when sharing a cell with another ladybug.
     procreation_probability: f64,
+    /// Life a ladybug regains for each aphid it kills. Optional so that configs written before
+    /// the rule existed still load, with the default.
+    prey_life_gain: Option<i64>,
 }
 
 /// TOML food behavior configuration.
@@ -160,7 +169,7 @@ impl Default for AphidParams {
     }
 }
 
-/// Tunable ladybug probabilities loaded from the runtime config.
+/// Tunable ladybug behavior loaded from the runtime config.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LadybugParams {
     /// Chance that a ladybug moves during movement phase.
@@ -171,6 +180,8 @@ pub struct LadybugParams {
     pub prob_direction: f64,
     /// Chance that a ladybug creates a child when sharing a cell with another ladybug.
     pub prob_procreate: f64,
+    /// Life a ladybug regains for each aphid it kills, up to its starting life.
+    pub prey_life_gain: i32,
 }
 
 impl Default for LadybugParams {
@@ -180,6 +191,7 @@ impl Default for LadybugParams {
             prob_kill: 0.2,
             prob_direction: 0.4,
             prob_procreate: 0.2,
+            prey_life_gain: DEFAULT_PREY_LIFE_GAIN,
         }
     }
 }
@@ -414,16 +426,16 @@ impl Board {
     pub fn standard(random: &mut Random) -> Self {
         let mut board = Self::with_field(10, 10, random);
 
-        board.add_aphid(3, 5, 10);
-        board.add_aphid(4, 8, 10);
-        board.add_aphid(2, 9, 10);
-        board.add_aphid(1, 6, 10);
-        board.add_aphid(1, 9, 10);
+        board.add_aphid(3, 5, APHID_START_LIFE);
+        board.add_aphid(4, 8, APHID_START_LIFE);
+        board.add_aphid(2, 9, APHID_START_LIFE);
+        board.add_aphid(1, 6, APHID_START_LIFE);
+        board.add_aphid(1, 9, APHID_START_LIFE);
 
-        board.add_ladybug(5, 9, 15, random);
-        board.add_ladybug(1, 1, 15, random);
-        board.add_ladybug(3, 8, 15, random);
-        board.add_ladybug(9, 2, 15, random);
+        board.add_ladybug(5, 9, LADYBUG_START_LIFE, random);
+        board.add_ladybug(1, 1, LADYBUG_START_LIFE, random);
+        board.add_ladybug(3, 8, LADYBUG_START_LIFE, random);
+        board.add_ladybug(9, 2, LADYBUG_START_LIFE, random);
 
         board
     }
@@ -762,11 +774,26 @@ impl Board {
                 }
 
                 if random.probability() < self.ladybug_params.prob_kill {
-                    self.field[index].aphids.pop()
+                    let killed = self.field[index].aphids.pop();
+                    self.feed_ladybug(id);
+                    killed
                 } else {
                     None
                 }
             }
+        }
+    }
+
+    /// Gives a ladybug the life it gains from eating an aphid, capped at its starting life.
+    ///
+    /// Without this a kill only removes the aphid, so ladybugs live off the same plant food as
+    /// their prey and gain nothing from hunting. A ladybug already above the cap, such as one
+    /// placed with more life, keeps what it has rather than being cut down by a meal.
+    fn feed_ladybug(&mut self, id: usize) {
+        let gain = self.ladybug_params.prey_life_gain;
+        if let Some(Some(Creature::Ladybug(ladybug))) = self.creatures.get_mut(id) {
+            let fed = ladybug.life.saturating_add(gain).min(LADYBUG_START_LIFE);
+            ladybug.life = ladybug.life.max(fed);
         }
     }
 
@@ -1120,6 +1147,11 @@ pub enum InvalidConfig {
         /// The value found in the file.
         value: f64,
     },
+    /// The ladybug prey life gain lies outside `0..=15`, the most life a ladybug can have.
+    PreyLifeGain {
+        /// The value found in the file.
+        value: i64,
+    },
 }
 
 impl fmt::Display for InvalidConfig {
@@ -1130,6 +1162,10 @@ impl fmt::Display for InvalidConfig {
             Self::Probability { label, value } => {
                 write!(f, "{label} must be between 0 and 1, not {value}")
             }
+            Self::PreyLifeGain { value } => write!(
+                f,
+                "ladybug prey life gain must be a whole number from 0 to {LADYBUG_START_LIFE}, not {value}"
+            ),
         }
     }
 }
@@ -1282,7 +1318,7 @@ pub fn parse_simulation_config(
 
     let mut notices = Vec::new();
     for ConfigCoordinates { x, y } in config.board.aphids {
-        if board.add_aphid(x, y, 10).is_none() {
+        if board.add_aphid(x, y, APHID_START_LIFE).is_none() {
             notices.push(ConfigNotice::OutsideBoard {
                 kind: CreatureSnapshotKind::Aphid,
                 x,
@@ -1292,7 +1328,10 @@ pub fn parse_simulation_config(
     }
 
     for ConfigCoordinates { x, y } in config.board.ladybugs {
-        if board.add_ladybug(x, y, 15, random).is_none() {
+        if board
+            .add_ladybug(x, y, LADYBUG_START_LIFE, random)
+            .is_none()
+        {
             notices.push(ConfigNotice::OutsideBoard {
                 kind: CreatureSnapshotKind::Ladybug,
                 x,
@@ -1382,6 +1421,12 @@ pub fn format_simulation_config(board: &Board) -> String {
         &mut contents,
         "procreation_probability = {}",
         ladybug_params.prob_procreate
+    )
+    .expect("write to string");
+    writeln!(
+        &mut contents,
+        "prey_life_gain = {}",
+        ladybug_params.prey_life_gain
     )
     .expect("write to string");
     writeln!(&mut contents).expect("write to string");
@@ -1532,6 +1577,11 @@ impl LadybugConfig {
                 self.procreation_probability,
                 "ladybug procreation probability",
             )?,
+            prey_life_gain: self
+                .prey_life_gain
+                .map(validate_prey_life_gain)
+                .transpose()?
+                .unwrap_or(DEFAULT_PREY_LIFE_GAIN),
         })
     }
 }
@@ -1625,6 +1675,17 @@ fn validate_probability(value: f64, label: &'static str) -> Result<f64, InvalidC
     }
 }
 
+/// Validates a prey life gain is in `0..=LADYBUG_START_LIFE`.
+///
+/// A gain above the cap would behave exactly like the cap, so it is refused as a likely typo
+/// rather than accepted with no effect.
+fn validate_prey_life_gain(value: i64) -> Result<i32, InvalidConfig> {
+    match i32::try_from(value) {
+        Ok(gain) if (0..=LADYBUG_START_LIFE).contains(&gain) => Ok(gain),
+        _ => Err(InvalidConfig::PreyLifeGain { value }),
+    }
+}
+
 /// Removes an occupant by its cached slot and returns the ID moved into that slot, if any.
 #[inline]
 fn swap_remove_occupant(
@@ -1650,6 +1711,167 @@ mod tests {
 
     fn creature_cell_slot(board: &Board, id: usize) -> usize {
         board.cell_slots[id]
+    }
+
+    /// Returns a living creature's remaining life.
+    fn creature_life(board: &Board, id: usize) -> i32 {
+        match board.creatures[id].as_ref().expect("creature is alive") {
+            Creature::Aphid(aphid) => aphid.life,
+            Creature::Ladybug(ladybug) => ladybug.life,
+        }
+    }
+
+    impl Board {
+        /// Recounts everything the board caches and panics at the first mismatch.
+        ///
+        /// Cell occupant lists, per-ID cell slots, the active list, and the summary are kept in
+        /// step by hand through swap-removes. A slip in one of them would surface in seeded runs
+        /// only as an unexplained output change, so tests compare them with a recount instead.
+        fn check_invariants(&self) {
+            assert_eq!(
+                self.field.len(),
+                self.rows * self.cols,
+                "one location per cell"
+            );
+            assert_eq!(
+                self.cell_slots.len(),
+                self.creatures.len(),
+                "one cell slot per ID"
+            );
+            assert_eq!(
+                self.death_marks.len(),
+                self.creatures.len(),
+                "one death mark per ID"
+            );
+
+            let mut listed = 0;
+            let mut food = 0;
+            for (index, location) in self.field.iter().enumerate() {
+                let cell = Coordinates {
+                    x: index / self.cols,
+                    y: index % self.cols,
+                };
+                assert!(
+                    (0..=MAX_CELL_FOOD).contains(&location.food),
+                    "food {} in {cell:?}",
+                    location.food
+                );
+                food += location.food;
+
+                for (kind, occupants) in [
+                    (CreatureKind::Aphid, &location.aphids),
+                    (CreatureKind::Ladybug, &location.ladybugs),
+                ] {
+                    for (slot, id) in occupants.iter().copied().enumerate() {
+                        // A creature listed twice would need two slots, so this also rules out
+                        // duplicates.
+                        assert_eq!(
+                            self.creature_kind_location(id),
+                            Some((kind, cell)),
+                            "creature {id} is listed in {cell:?}"
+                        );
+                        assert_eq!(self.cell_slots[id], slot, "cell slot of creature {id}");
+                        listed += 1;
+                    }
+                }
+            }
+
+            // IDs are handed out in creation order, so the living IDs in ascending order are
+            // exactly what the active list must hold.
+            let living: Vec<usize> = (0..self.creatures.len())
+                .filter(|id| self.creatures[*id].is_some())
+                .collect();
+            assert_eq!(listed, living.len(), "every living creature is in one cell");
+            assert_eq!(self.active_creatures, living, "active creatures");
+
+            let aphids = living
+                .iter()
+                .filter(|id| self.creature_kind(**id) == Some(CreatureKind::Aphid))
+                .count();
+            assert_eq!(
+                self.summary,
+                BoardSummary {
+                    aphids,
+                    ladybugs: living.len() - aphids,
+                    food,
+                },
+                "cached summary"
+            );
+            for id in living {
+                assert!(
+                    creature_life(self, id) >= 1,
+                    "creature {id} is alive at zero life"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn board_bookkeeping_holds_across_random_runs_and_edits() {
+        for seed in 0..200 {
+            let mut random = Random::with_seed(seed);
+            // The test's own choices come from a second generator, so the simulation draws only
+            // what it would draw in a real run.
+            let mut choices = Random::with_seed(seed + 1_000_000);
+            // One-row and one-column boards take the clamping path in `in_boundaries`.
+            let rows = choices.int_inclusive(1, 6) as usize;
+            let cols = choices.int_inclusive(1, 6) as usize;
+            let mut board = Board::with_field(rows, cols, &mut random);
+            board.set_aphid_params(AphidParams {
+                prob_move: choices.probability(),
+                prob_kill: choices.probability(),
+                prob_accomplice: choices.probability(),
+                prob_procreate: choices.probability(),
+            });
+            board.set_ladybug_params(LadybugParams {
+                prob_move: choices.probability(),
+                prob_kill: choices.probability(),
+                prob_direction: choices.probability(),
+                prob_procreate: choices.probability(),
+                prey_life_gain: choices.int_inclusive(0, LADYBUG_START_LIFE),
+            });
+            board.set_food_params(FoodParams {
+                prob_regenerate: choices.probability(),
+            });
+
+            for turn in 0..60 {
+                // Edits land before most turns, and several at once before the first, the way
+                // the GUI's edit tools change a board between turns.
+                let edits = if turn == 0 {
+                    12
+                } else {
+                    choices.int_inclusive(0, 2)
+                };
+                for _ in 0..edits {
+                    let x = choices.int_inclusive(0, rows as i32 - 1) as usize;
+                    let y = choices.int_inclusive(0, cols as i32 - 1) as usize;
+                    let life = choices.int_inclusive(1, LADYBUG_START_LIFE);
+                    match choices.int_inclusive(0, 3) {
+                        0 => assert!(board.add_aphid(x, y, life).is_some()),
+                        1 => assert!(board.add_ladybug(x, y, life, &mut random).is_some()),
+                        2 => _ = board.remove_aphid_at(x, y),
+                        _ => _ = board.remove_ladybug_at(x, y),
+                    }
+                    board.check_invariants();
+                }
+
+                let before = board.summary();
+                let stats = board.refresh(&mut random);
+                board.check_invariants();
+                assert_eq!(stats.summary, board.summary(), "seed {seed} turn {turn}");
+                assert_eq!(
+                    before.aphids + before.ladybugs + stats.births,
+                    stats.summary.aphids + stats.summary.ladybugs + stats.deaths,
+                    "births and deaths account for the change, seed {seed} turn {turn}"
+                );
+
+                // Aphids can double every turn when food runs high, and a few thousand
+                // creatures are enough to exercise every path.
+                if stats.summary.aphids + stats.summary.ladybugs > 3_000 {
+                    break;
+                }
+            }
+        }
     }
 
     #[test]
@@ -1774,6 +1996,7 @@ move_probability = 0.4
 kill_probability = 0.8
 direction_change_probability = 0.7
 procreation_probability = 0.1
+prey_life_gain = 6
 
 [food]
 regeneration_probability = 0.9
@@ -1782,6 +2005,7 @@ regeneration_probability = 0.9
         )
         .unwrap()
         .board;
+        assert_eq!(board.ladybug_params.prey_life_gain, 6);
 
         let contents = format_simulation_config(&board);
         let mut round_trip_random = Random::with_seed(1);
@@ -2062,6 +2286,92 @@ extra = true
     }
 
     #[test]
+    fn ladybug_gains_life_from_an_eaten_aphid_up_to_its_starting_life() {
+        let mut board = board_with_field(1, 1);
+        let mut random = Random::with_seed(2);
+        let ladybug = board.add_ladybug(0, 0, 5, &mut random).unwrap();
+        board.ladybug_params.prob_kill = 1.0;
+        board.ladybug_params.prey_life_gain = 4;
+
+        board.add_aphid(0, 0, 10).unwrap();
+        board.creature_combat(ladybug, &mut random).unwrap();
+        assert_eq!(creature_life(&board, ladybug), 9);
+
+        board.add_aphid(0, 0, 10).unwrap();
+        board.creatures[ladybug] = board.creatures[ladybug]
+            .take()
+            .map(|creature| match creature {
+                Creature::Ladybug(ladybug) => Creature::Ladybug(Ladybug {
+                    life: LADYBUG_START_LIFE - 1,
+                    ..ladybug
+                }),
+                aphid => aphid,
+            });
+        board.creature_combat(ladybug, &mut random).unwrap();
+        assert_eq!(creature_life(&board, ladybug), LADYBUG_START_LIFE);
+    }
+
+    #[test]
+    fn a_meal_in_combat_saves_a_ladybug_from_starving_the_same_turn() {
+        // Combat runs before starvation, so the life gained from a kill already counts when the
+        // ladybug finds no food later in the turn. With no gain the same ladybug starves.
+        for (gain, survives) in [(3, true), (0, false)] {
+            let mut board = board_with_field(1, 1);
+            board.set_cell_food(Coordinates { x: 0, y: 0 }, 0);
+            let mut random = Random::with_seed(5);
+            let ladybug = board.add_ladybug(0, 0, 1, &mut random).unwrap();
+            board.add_aphid(0, 0, 10).unwrap();
+            board.aphid_params = AphidParams {
+                prob_move: 0.0,
+                prob_kill: 0.0,
+                prob_accomplice: 0.0,
+                prob_procreate: 0.0,
+            };
+            board.ladybug_params = LadybugParams {
+                prob_move: 0.0,
+                prob_kill: 1.0,
+                prob_direction: 0.0,
+                prob_procreate: 0.0,
+                prey_life_gain: gain,
+            };
+            board.food_params.prob_regenerate = 0.0;
+
+            let stats = board.refresh(&mut random);
+
+            assert_eq!(stats.summary.aphids, 0, "gain {gain}");
+            assert_eq!(stats.summary.ladybugs, usize::from(survives), "gain {gain}");
+            if survives {
+                // One life short of 1 + 3, for the turn without food.
+                assert_eq!(creature_life(&board, ladybug), 3);
+            }
+        }
+    }
+
+    #[test]
+    fn eating_never_lowers_a_ladybug_above_its_starting_life() {
+        let mut board = board_with_field(1, 1);
+        let mut random = Random::with_seed(2);
+        let ladybug = board.add_ladybug(0, 0, 40, &mut random).unwrap();
+        board.add_aphid(0, 0, 10).unwrap();
+        board.ladybug_params.prob_kill = 1.0;
+
+        board.creature_combat(ladybug, &mut random).unwrap();
+        assert_eq!(creature_life(&board, ladybug), 40);
+    }
+
+    #[test]
+    fn a_missed_attack_gives_no_life() {
+        let mut board = board_with_field(1, 1);
+        let mut random = Random::with_seed(2);
+        let ladybug = board.add_ladybug(0, 0, 5, &mut random).unwrap();
+        board.add_aphid(0, 0, 10).unwrap();
+        board.ladybug_params.prob_kill = 0.0;
+
+        assert_eq!(board.creature_combat(ladybug, &mut random), None);
+        assert_eq!(creature_life(&board, ladybug), 5);
+    }
+
+    #[test]
     fn lone_aphid_does_not_get_accomplice_bonus() {
         let mut board = board_with_field(1, 1);
         let aphid = board.add_aphid(0, 0, 10).unwrap();
@@ -2100,6 +2410,7 @@ extra = true
             prob_kill: 1.0,
             prob_direction: 0.0,
             prob_procreate: 0.0,
+            prey_life_gain: 0,
         };
 
         let stats = board.refresh(&mut random);
@@ -2197,6 +2508,55 @@ extra = true
                 .field
                 .iter()
                 .all(|location| location.food == 1 && location.food <= MAX_CELL_FOOD)
+        );
+    }
+
+    #[test]
+    fn prey_life_gain_defaults_when_omitted_and_is_validated() {
+        let ladybug_section = |gain: &str| {
+            format!(
+                r#"
+[board]
+rows = 2
+columns = 2
+aphids = []
+ladybugs = []
+
+[ladybug]
+move_probability = 0.7
+kill_probability = 0.2
+direction_change_probability = 0.4
+procreation_probability = 0.2
+{gain}
+"#
+            )
+        };
+        let mut random = Random::with_seed(1);
+
+        // Configs saved before the rule existed have no `prey_life_gain` and must still load.
+        let board = parse_simulation_config(&ladybug_section(""), &mut random)
+            .unwrap()
+            .board;
+        assert_eq!(board.ladybug_params.prey_life_gain, DEFAULT_PREY_LIFE_GAIN);
+
+        for valid in [0, LADYBUG_START_LIFE] {
+            let contents = ladybug_section(&format!("prey_life_gain = {valid}"));
+            let board = parse_simulation_config(&contents, &mut random)
+                .unwrap()
+                .board;
+            assert_eq!(board.ladybug_params.prey_life_gain, valid);
+        }
+
+        for invalid in [-1, 16, i64::from(i32::MAX) + 1] {
+            let contents = ladybug_section(&format!("prey_life_gain = {invalid}"));
+            assert!(matches!(
+                parse_simulation_config(&contents, &mut random),
+                Err(InvalidConfig::PreyLifeGain { value }) if value == invalid
+            ));
+        }
+
+        assert!(
+            parse_simulation_config(&ladybug_section("prey_life_gain = 2.5"), &mut random).is_err()
         );
     }
 }

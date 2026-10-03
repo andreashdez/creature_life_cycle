@@ -15,9 +15,16 @@ cargo clean                 # remove build artifacts
 
 | Location | Covers |
 |----------|--------|
-| `src/lib.rs`, `tests` module | Deterministic randomness, TOML parsing, probability validation, edge movement, combat, procreation, starvation, phased turn order |
+| `src/lib.rs`, `tests` module | Deterministic randomness, TOML parsing, probability validation, edge movement, combat and feeding, procreation, starvation, phased turn order, board bookkeeping |
 | `src/main.rs` | CLI argument parsing |
 | `tests/seeded_e2e_snapshots.rs` | End-to-end runs against a fixed config and seed |
+
+The bookkeeping test runs 200 seeded boards of random size and parameters for
+up to 60 turns, adding and removing creatures between turns. After every edit
+and every turn it recounts the cell occupant lists, cell slots, active list,
+and cached totals, and checks that births and deaths account for the change in
+population. A slip in the swap-remove bookkeeping fails here with the creature
+and cell named, instead of surfacing as an unexplained snapshot change.
 
 The end-to-end test builds a throwaway `XDG_CONFIG_HOME` under `target/` and
 seeds it from `simulation.example.toml`, so it never touches your real

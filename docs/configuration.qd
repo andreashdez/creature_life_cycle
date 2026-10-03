@@ -52,6 +52,7 @@ move_probability = 0.7
 kill_probability = 0.2
 direction_change_probability = 0.4
 procreation_probability = 0.2
+prey_life_gain = 3
 
 [food]
 regeneration_probability = 0.1
@@ -89,6 +90,11 @@ starts with a random food value from `0` through `9`.
 | `kill_probability` | `0.2` | Chance of killing an aphid in the same cell |
 | `direction_change_probability` | `0.4` | Chance of picking a new preferred direction set |
 | `procreation_probability` | `0.2` | Chance of producing a child when sharing a cell |
+| `prey_life_gain` | `3` | Life regained for each aphid killed, up to the starting `15` |
+
+`prey_life_gain` is optional even when the rest of `[ladybug]` is given, so a
+file written before it existed still loads. Setting it to `0` gives the rules
+from before ladybugs fed on aphids, and the same seed then gives the same run.
 
 ## `[food]`
 
@@ -102,8 +108,10 @@ Food is capped at `9` per cell and never drops below `0`.
 
 - `rows` and `columns` must both be greater than zero.
 - All probability values must be from `0.0` through `1.0`.
+- `prey_life_gain` must be a whole number from `0` through `15`. A larger gain
+  would behave exactly like `15`, so it is refused as a likely mistake.
 - The `[aphid]`, `[ladybug]`, and `[food]` sections are optional. An omitted
-  section falls back to its default probabilities.
+  section falls back to its default values.
 - Creature positions outside the board are skipped with a warning.
 
 > Warning: An invalid file is not repaired automatically. The CLI refuses to

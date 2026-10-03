@@ -58,7 +58,9 @@ defaults and the status line reports it until the next message replaces it.
 ### Parameters
 
 Parameters are grouped by Aphids, Ladybugs, and Environment. Each one has a
-slider, an editable percentage, and a short explanation.
+slider, an editable percentage, and a short explanation. The ladybug prey life
+gain is not a probability and has no control here. Set it in the
+[config file](configuration.qd); Save setup keeps whatever value was loaded.
 
 - .keybinding {Enter} or leaving the field applies a value from 0 to 100.
 - Invalid input restores the previous value and reports an error.

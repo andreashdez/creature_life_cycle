@@ -69,6 +69,17 @@ dangerous to a lone ladybug, while a single aphid rarely wins.
 A ladybug can kill one aphid in its cell using the configured ladybug kill
 probability, with no crowd bonus.
 
+A ladybug that kills an aphid eats it and regains life:
+
+$ life \leftarrow \max(life,\; \min(15,\; life + gain_{prey})) $
+
+The gain is `prey_life_gain`, `3` by default. The cap is the `15` life a
+starting ladybug has, so a ladybug in a swarm of aphids cannot store up food
+for later. A ladybug that already has more than `15`, such as one placed with
+more life, keeps it. Combat comes before starvation, so a ladybug at `1` life
+on an empty cell survives the turn if it eats first. Aphids gain nothing from
+killing a ladybug.
+
 Killed creatures are removed after the combat phase, so they cannot procreate
 or starve later in the same turn.
 
