@@ -11,7 +11,7 @@ default = ["gui"]
 gui = ["dep:bevy"]
 
 [dependencies]
-bevy = { version = "0.19", optional = true, default-features = false, features = [
+bevy = { version = "0.20", optional = true, default-features = false, features = [
     "2d",
     "ui",
     "mouse",
