@@ -106,38 +106,37 @@ pub fn param_row(index: usize, value: f64) -> impl Scene {
             margin: UiRect::bottom(px(18)), flex_shrink: 0.0,
         }
         Children [
-            ({ui_text(PARAM_LABELS[index], 14.0)} ParamCaption({index})),
-            (
-                Node { column_gap: px(8), align_items: AlignItems::Center }
+            @ui_text(PARAM_LABELS[index], 14.0) ParamCaption({index})
+            --
+            Node { column_gap: px(8), align_items: AlignItems::Center }
+            Children [
+                @FeathersSlider { @min: 0.0, @max: 100.0 }
+                SliderValue({(value * 100.0) as f32})
+                Node { flex_grow: 1.0, flex_basis: px(0), min_width: px(0) }
+                SliderPrecision(1) ProbSlider({index}) on(on_prob_changed)
+                --
+                @FeathersTextInputContainer
+                // Feathers pads only the right edge and reserves a left
+                // border for the number input's coloured sigil. Nothing
+                // paints that border here, and the background is drawn
+                // inside it with the corner radii shrunk by its width,
+                // so the digits sat on the edge and the left corners
+                // came out square. Drop it and pad both sides evenly.
+                Node {
+                    width: px(68), min_width: px(68), max_width: px(68),
+                    flex_grow: 0.0, flex_shrink: 0.0,
+                    border: UiRect::ZERO, padding: UiRect::horizontal(px(8)),
+                }
                 Children [
-                    (
-                        @FeathersSlider { @min: 0.0, @max: 100.0, @value: {(value * 100.0) as f32} }
-                        Node { flex_grow: 1.0, flex_basis: px(0), min_width: px(0) }
-                        SliderPrecision(1) ProbSlider({index}) on(on_prob_changed)
-                    ),
-                    (
-                        @FeathersTextInputContainer
-                        // Feathers pads only the right edge and reserves a left
-                        // border for the number input's coloured sigil. Nothing
-                        // paints that border here, and the background is drawn
-                        // inside it with the corner radii shrunk by its width,
-                        // so the digits sat on the edge and the left corners
-                        // came out square. Drop it and pad both sides evenly.
-                        Node {
-                            width: px(68), min_width: px(68), max_width: px(68),
-                            flex_grow: 0.0, flex_shrink: 0.0,
-                            border: UiRect::ZERO, padding: UiRect::horizontal(px(8)),
-                        }
-                        Children [(
-                            @FeathersTextInput { @max_characters: {Some(12)} }
-                            ProbField({index})
-                            EditableTextFilter::new(|c| c.is_ascii_digit() || c == '.')
-                        )]
-                    ),
-                    label_small("%"),
+                    @FeathersTextInput { @max_characters: {Some(12)} }
+                    ProbField({index})
+                    EditableTextFilter::new(|c| c.is_ascii_digit() || c == '.')
                 ]
-            ),
-            label_small(PARAM_HELP[index]),
+                --
+                @label_small("%")
+            ]
+            --
+            @label_small(PARAM_HELP[index])
         ]
     }
 }
@@ -146,14 +145,13 @@ pub fn param_group(title: &'static str, start: usize, end: usize) -> impl Scene 
     bsn! {
         Node { margin: UiRect::vertical(px(10)), align_items: AlignItems::Center, justify_content: JustifyContent::SpaceBetween }
         Children [
-            ui_text(title, 16.0),
-            (
-                @FeathersButton { @variant: ButtonVariant::Plain }
-                on(move |_: On<Activate>, mut resets: MessageWriter<ParameterReset>| {
-                    resets.write(ParameterReset(start, end));
-                })
-                Children [(Text("Restore defaults") ThemedText)]
-            ),
+            @ui_text(title, 16.0)
+            --
+            @FeathersButton { @variant: ButtonVariant::Plain }
+            on(move |_: On<Activate>, mut resets: MessageWriter<ParameterReset>| {
+                resets.write(ParameterReset(start, end));
+            })
+            Children [Text("Restore defaults") ThemedText]
         ]
     }
 }

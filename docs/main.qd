@@ -69,7 +69,7 @@ the simulation reproducible for tests, benchmarks, and bug reports.
 |---|---|
 | Language | Rust, edition 2024 |
 | Binaries | `creature_life_cycle` (CLI), `gui` (Bevy) |
-| GUI engine | Bevy 0.19 with `bevy_feathers` widgets |
+| GUI engine | Bevy 0.20 with `bevy_feathers` widgets |
 | Configuration | TOML at `~/.config/creature_life_cycle/simulation.toml` |
 | Repository | [andreashdez/creature_life_cycle](https://github.com/andreashdez/creature_life_cycle) |
 

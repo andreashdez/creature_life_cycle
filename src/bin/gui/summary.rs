@@ -45,19 +45,21 @@ fn population_card(
         }
         BackgroundColor(TOOLTIP_BG)
         Children [
-            {artwork.map(|image| bsn! {
+            {artwork.map(|image| bsn_list! {
                 Node { width: px(32), height: px(32), flex_shrink: 0.0 }
                 ImageNode { image: {image} }
-            })},
-            (
-                Node { flex_direction: FlexDirection::Column, row_gap: px(2), min_width: px(0) }
-                Children [
-                    label_small(caption),
-                    ({ui_text("0", 24.0)} HudText({index})),
-                ]
-            ),
-            (Node { flex_grow: 1.0 }),
-            ({ui_text("0", 12.0)} HudText({index + 6}) TextColor(INK_SECONDARY)),
+            })}
+            --
+            Node { flex_direction: FlexDirection::Column, row_gap: px(2), min_width: px(0) }
+            Children [
+                @label_small(caption)
+                --
+                @ui_text("0", 24.0) HudText({index})
+            ]
+            --
+            Node { flex_grow: 1.0 }
+            --
+            @ui_text("0", 12.0) HudText({index + 6}) TextColor(INK_SECONDARY)
         ]
     }
 }
@@ -77,42 +79,48 @@ pub fn spawn_summary(
         }
         ThemeBackgroundColor(tokens::WINDOW_BG)
         Children [
-            ui_text("Aphids & Ladybugs", 21.0),
-            population_card("Aphids", 0, Some(assets.aphid.clone())),
-            population_card("Ladybugs", 1, Some(assets.ladybug.clone())),
-            population_card("Food available", 2, Some(food_icon)),
-            (
-                Node { column_gap: px(8), align_items: AlignItems::Center }
-                Children [
-                    (
-                        @FeathersButton { @variant: ButtonVariant::Primary }
-                        Node { flex_grow: 1.0, min_width: px(72) }
-                        on(|_: On<Activate>, mut actions: MessageWriter<RunAction>| { actions.write(RunAction::TogglePlay); })
-                        Children [(Text("Pause") ThemedText PlayLabel)]
-                    ),
-                    run_button("Step", RunAction::Step),
-                    run_button("Reset", RunAction::Reset),
-                ]
-            ),
-            (
-                Node { column_gap: px(8), align_items: AlignItems::Center }
-                Children [
-                    run_button("−", RunAction::Slower),
-                    (Node { flex_grow: 1.0, justify_content: JustifyContent::Center }
-                        Children [({ui_text("", 14.0)} SpeedLabel)]),
-                    run_button("+", RunAction::Faster),
-                ]
-            ),
-            ({ui_text("", 14.0)} PlaybackStatus),
-            run_button("Fit board", RunAction::Fit),
-            ({ui_text("", 14.0)} StatusLabel),
-            (Node { flex_grow: 1.0 }),
-            (
-                @FeathersButton
-                PropertiesToggle
-                on(toggle_properties)
-                Children [(Text("Show properties") ThemedText PropertiesToggleLabel)]
-            ),
+            @ui_text("Aphids & Ladybugs", 21.0)
+            --
+            @population_card("Aphids", 0, Some(assets.aphid.clone()))
+            --
+            @population_card("Ladybugs", 1, Some(assets.ladybug.clone()))
+            --
+            @population_card("Food available", 2, Some(food_icon))
+            --
+            Node { column_gap: px(8), align_items: AlignItems::Center }
+            Children [
+                @FeathersButton { @variant: ButtonVariant::Primary }
+                Node { flex_grow: 1.0, min_width: px(72) }
+                on(|_: On<Activate>, mut actions: MessageWriter<RunAction>| { actions.write(RunAction::TogglePlay); })
+                Children [Text("Pause") ThemedText PlayLabel]
+                --
+                @run_button("Step", RunAction::Step)
+                --
+                @run_button("Reset", RunAction::Reset)
+            ]
+            --
+            Node { column_gap: px(8), align_items: AlignItems::Center }
+            Children [
+                @run_button("−", RunAction::Slower)
+                --
+                Node { flex_grow: 1.0, justify_content: JustifyContent::Center }
+                Children [@ui_text("", 14.0) SpeedLabel]
+                --
+                @run_button("+", RunAction::Faster)
+            ]
+            --
+            @ui_text("", 14.0) PlaybackStatus
+            --
+            @run_button("Fit board", RunAction::Fit)
+            --
+            @ui_text("", 14.0) StatusLabel
+            --
+            Node { flex_grow: 1.0 }
+            --
+            @FeathersButton
+            PropertiesToggle
+            on(toggle_properties)
+            Children [Text("Show properties") ThemedText PropertiesToggleLabel]
         ]
     }).insert(UiTargetCamera(camera));
 }

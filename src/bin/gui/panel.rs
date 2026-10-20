@@ -112,8 +112,9 @@ fn stat_row(caption: &'static str, index: usize) -> impl Scene {
     bsn! {
         Node { justify_content: JustifyContent::SpaceBetween, align_items: AlignItems::Center }
         Children [
-            label(caption),
-            ({ui_text("0", 18.0)} HudText({index})),
+            @label(caption)
+            --
+            @ui_text("0", 18.0) HudText({index})
         ]
     }
 }
@@ -121,7 +122,7 @@ fn stat_row(caption: &'static str, index: usize) -> impl Scene {
 fn section_title(title: &'static str) -> impl Scene {
     bsn! {
         Node { margin: UiRect::new(px(0), px(0), px(8), px(6)) }
-        Children [ui_text(title, 16.0)]
+        Children [@ui_text(title, 16.0)]
     }
 }
 
@@ -134,7 +135,7 @@ fn tab_button(caption: &'static str, tab: PanelTab) -> impl Scene {
             active.0 = tab;
             panel.open = true;
         })
-        Children [(Text(caption) ThemedText)]
+        Children [Text(caption) ThemedText]
     }
 }
 
@@ -167,7 +168,7 @@ fn section_toggle(section: PanelSection) -> impl Scene {
                 PanelSection::Help => sections.help = !sections.help,
             }
         })
-        Children [({ui_text("", 16.0)} SectionLabel({section}))]
+        Children [@ui_text("", 16.0) SectionLabel({section})]
     }
 }
 
@@ -255,20 +256,17 @@ fn food_scale() -> impl Scene {
             margin: UiRect::vertical(px(6)),
         }
         Children [
-            label_small("food in each cell"),
-            (
-                // A 2px gap keeps neighbouring steps readable as steps.
-                Node { height: px(10), column_gap: px(2) }
-                Children [
-                    food_swatch(0), food_swatch(1), food_swatch(2), food_swatch(3),
-                    food_swatch(4), food_swatch(5), food_swatch(6), food_swatch(7),
-                    food_swatch(8), food_swatch(9),
-                ]
-            ),
-            (
-                Node { justify_content: JustifyContent::SpaceBetween }
-                Children [ label_small("0 empty"), label_small("9 abundant") ]
-            ),
+            @label_small("food in each cell")
+            --
+            // A 2px gap keeps neighbouring steps readable as steps.
+            Node { height: px(10), column_gap: px(2) }
+            Children [
+                @food_swatch(0) -- @food_swatch(1) -- @food_swatch(2) -- @food_swatch(3) -- @food_swatch(4)
+                -- @food_swatch(5) -- @food_swatch(6) -- @food_swatch(7) -- @food_swatch(8) -- @food_swatch(9)
+            ]
+            --
+            Node { justify_content: JustifyContent::SpaceBetween }
+            Children [@label_small("0 empty") -- @label_small("9 abundant")]
         ]
     }
 }
@@ -282,7 +280,7 @@ fn board_view_button(caption: &'static str, view: BoardView) -> impl Scene {
             *current = view;
             overlay.bypass_change_detection().selected_view = false;
         })
-        Children [(Text(caption) ThemedText)]
+        Children [Text(caption) ThemedText]
     }
 }
 
@@ -325,35 +323,31 @@ pub fn spawn_panel(
             }
             PropertiesRoot
             ThemeBackgroundColor(tokens::WINDOW_BG)
+            Children [
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: px(16), right: px(16), top: px(20),
+                    flex_direction: FlexDirection::Column, row_gap: px(6),
+                }
                 Children [
-                (
-                    Node {
-                        position_type: PositionType::Absolute,
-                        left: px(16), right: px(16), top: px(20),
-                        flex_direction: FlexDirection::Column, row_gap: px(6),
-                    }
+                    Node { justify_content: JustifyContent::SpaceBetween, align_items: AlignItems::Center }
                     Children [
-                        (
-                            Node { justify_content: JustifyContent::SpaceBetween, align_items: AlignItems::Center }
-                            Children [
-                                ui_text("Properties", 18.0),
-                                (
-                                    @FeathersButton { @variant: ButtonVariant::Plain }
-                                    on(toggle_properties)
-                                    Children [(Text("Hide") ThemedText)]
-                                ),
-                            ]
-                        ),
-                        (
-                            Node { column_gap: px(4), margin: UiRect::top(px(14)) }
-                            Children [
-                                tab_button("Overview", PanelTab::Overview),
-                                tab_button("Parameters", PanelTab::Parameters),
-                                tab_button("Edit", PanelTab::Edit),
-                            ]
-                        ),
+                        @ui_text("Properties", 18.0)
+                        --
+                        @FeathersButton { @variant: ButtonVariant::Plain }
+                        on(toggle_properties)
+                        Children [Text("Hide") ThemedText]
                     ]
-                ),
+                    --
+                    Node { column_gap: px(4), margin: UiRect::top(px(14)) }
+                    Children [
+                        @tab_button("Overview", PanelTab::Overview)
+                        --
+                        @tab_button("Parameters", PanelTab::Parameters)
+                        --
+                        @tab_button("Edit", PanelTab::Edit)
+                    ]
+                ]
             ]
         })
         .insert(UiTargetCamera(ui_camera))
@@ -367,117 +361,143 @@ pub fn spawn_panel(
         }
         PanelRoot ScrollPosition
         Children [
-            (
-                Node { flex_direction: FlexDirection::Column, row_gap: px(8), flex_shrink: 0.0 }
-                TabPage({PanelTab::Overview})
+            Node { flex_direction: FlexDirection::Column, row_gap: px(8), flex_shrink: 0.0 }
+            TabPage({PanelTab::Overview})
+            Children [
+                @section_title("Latest activity")
+                --
+                @stat_row("Births", 3)
+                --
+                @stat_row("Deaths", 4)
+                --
+                @section_title("Board view")
+                --
+                Node { column_gap: px(6) }
+                Children [@board_view_button("Population", BoardView::Population) -- @board_view_button("Food", BoardView::Food)]
+                --
+                @label_small("Aphids: green circles · Ladybugs: red diamonds at distant zoom.")
+                --
+                Node { flex_direction: FlexDirection::Column, row_gap: px(6) }
+                FoodControls
                 Children [
-                    section_title("Latest activity"),
-                    stat_row("Births", 3),
-                    stat_row("Deaths", 4),
-                    section_title("Board view"),
-                    (
-                        Node { column_gap: px(6) }
-                        Children [board_view_button("Population", BoardView::Population), board_view_button("Food", BoardView::Food)]
-                    ),
-                    label_small("Aphids: green circles · Ladybugs: red diamonds at distant zoom."),
-                    (
-                        Node { flex_direction: FlexDirection::Column, row_gap: px(6) }
-                        FoodControls
-                        Children [
-                    (
-                        @FeathersCheckbox { @caption: bsn! { Text("Show food details (F)") ThemedText } }
-                        FoodOverlayToggle
-                        on(|change: On<ValueChange<bool>>, mut overlay: ResMut<FoodOverlay>, mut view: ResMut<BoardView>| { set_food_details(change.value, &mut overlay, &mut view); })
-                    ),
-                    food_scale(),
-                        ]
-                    ),
-                    section_toggle(PanelSection::Setup),
-                    (
-                        Node { display: Display::None, flex_direction: FlexDirection::Column, row_gap: px(8), flex_shrink: 0.0 }
-                        SectionBody({PanelSection::Setup})
-                        Children [
-                            stat_row("Run seed", 5),
-                            (
-                                Node { margin: UiRect::vertical(px(4)) }
-                                Children [
-                                    (
-                                        @FeathersTextInputContainer
-                                        Node { border: UiRect::ZERO, padding: UiRect::horizontal(px(8)) }
-                                        Children [(@FeathersTextInput { @max_characters: {Some(SEED_DIGITS)} } SeedField)]
-                                    ),
-                                ]
-                            ),
-                            (
-                                @FeathersButton
-                                on(|_: On<Activate>, mut requests: MessageWriter<Reseed>| { requests.write(Reseed); })
-                                Children [(Text("Restart with this seed") ThemedText)]
-                            ),
-                            label_small("Digits only. Enter, or the button, restarts the run from this seed."),
-                            label("Reset restores the last saved setup, or the board loaded at launch, using the current parameters and seed."),
-                            run_button("Save setup (S)", RunAction::Save),
-                            label_small(save_destination()),
-                            label_small("Food and creature life values are not saved; they are regenerated on load."),
-                        ]
-                    ),
-                    section_toggle(PanelSection::Help),
-                    (
-                        Node { display: Display::None, flex_direction: FlexDirection::Column, row_gap: px(10), flex_shrink: 0.0 }
-                        SectionBody({PanelSection::Help})
-                        Children [
-                            label("Drag to pan · Scroll to zoom"),
-                            label("Home · Fit the whole board"),
-                            label("Space · Play / pause\nN · Advance one turn\n[ / ] · Change speed\nR · Reset to saved setup"),
-                            label("A / L · Place a creature\nX · Erase a cell\nE · Toggle editing\nZ · Undo an edit\nS · Save setup"),
-                            label_small("When a control has focus, Space activates it. Escape returns to playback shortcuts."),
-                        ]
-                    ),
+                    @FeathersCheckbox { @caption: bsn! { Text("Show food details (F)") ThemedText } }
+                    FoodOverlayToggle
+                    on(|change: On<ValueChange<bool>>, mut overlay: ResMut<FoodOverlay>, mut view: ResMut<BoardView>| { set_food_details(change.value, &mut overlay, &mut view); })
+                    --
+                    @food_scale()
                 ]
-            ),
-            (
-                Node { display: Display::None, flex_direction: FlexDirection::Column, flex_shrink: 0.0 }
-                TabPage({PanelTab::Parameters})
+                --
+                @section_toggle(PanelSection::Setup)
+                --
+                Node { display: Display::None, flex_direction: FlexDirection::Column, row_gap: px(8), flex_shrink: 0.0 }
+                SectionBody({PanelSection::Setup})
                 Children [
-                    label("Probabilities · apply to future turns"),
-                    label_small("Type a percentage, then Enter or leave the field. • marks a change from the saved setup."),
-                    param_group("Aphids", 0, 4),
-                    param_row(0, params.get(0)), param_row(1, params.get(1)),
-                    param_row(2, params.get(2)), param_row(3, params.get(3)),
-                    param_group("Ladybugs", 4, 8),
-                    param_row(4, params.get(4)), param_row(5, params.get(5)),
-                    param_row(6, params.get(6)), param_row(7, params.get(7)),
-                    param_group("Environment", 8, 9),
-                    param_row(8, params.get(8)),
-                    label_small("Focus a slider and use arrow keys for precise changes."),
+                    @stat_row("Run seed", 5)
+                    --
+                    Node { margin: UiRect::vertical(px(4)) }
+                    Children [
+                        @FeathersTextInputContainer
+                        Node { border: UiRect::ZERO, padding: UiRect::horizontal(px(8)) }
+                        Children [@FeathersTextInput { @max_characters: {Some(SEED_DIGITS)} } SeedField]
+                    ]
+                    --
+                    @FeathersButton
+                    on(|_: On<Activate>, mut requests: MessageWriter<Reseed>| { requests.write(Reseed); })
+                    Children [Text("Restart with this seed") ThemedText]
+                    --
+                    @label_small("Digits only. Enter, or the button, restarts the run from this seed.")
+                    --
+                    @label("Reset restores the last saved setup, or the board loaded at launch, using the current parameters and seed.")
+                    --
+                    @run_button("Save setup (S)", RunAction::Save)
+                    --
+                    @label_small(save_destination())
+                    --
+                    @label_small("Food and creature life values are not saved; they are regenerated on load.")
                 ]
-            ),
-            (
-                Node { display: Display::None, flex_direction: FlexDirection::Column, row_gap: px(12), flex_shrink: 0.0 }
-                TabPage({PanelTab::Edit})
+                --
+                @section_toggle(PanelSection::Help)
+                --
+                Node { display: Display::None, flex_direction: FlexDirection::Column, row_gap: px(10), flex_shrink: 0.0 }
+                SectionBody({PanelSection::Help})
                 Children [
-                    section_title("Shape the ecosystem"),
-                    ({ui_text("Choose a tool to start editing", 14.0)} EditStatus),
-                    (
-                        Node { column_gap: px(6) }
-                        Children [
-                            edit_tool_button("Aphid", "A", EditTool::Aphid, Some(assets.aphid.clone())),
-                            edit_tool_button("Ladybug", "L", EditTool::Ladybug, Some(assets.ladybug.clone())),
-                            edit_tool_button("Erase", "X", EditTool::Erase, None),
-                        ]
-                    ),
-                    label("Click to place. Right click removes one of the selected species."),
-                    label("Erase clears all creatures in a cell; food stays in place."),
-                    (
-                        @FeathersButton
-                        UndoButton
-                        on(|_: On<Activate>, mut actions: MessageWriter<RunAction>| { actions.write(RunAction::Undo); })
-                        Children [(Text("Undo edit (Z)") ThemedText)]
-                    ),
-                    label_small("Edits restart the turn count and chart. Undo restores the previous board and history, up to 20 edits."),
-                    run_button("Done · return to paused view", RunAction::FinishEditing),
-                    label_small("Play resumes the simulation. Advancing a turn clears edit undo."),
+                    @label("Drag to pan · Scroll to zoom")
+                    --
+                    @label("Home · Fit the whole board")
+                    --
+                    @label("Space · Play / pause\nN · Advance one turn\n[ / ] · Change speed\nR · Reset to saved setup")
+                    --
+                    @label("A / L · Place a creature\nX · Erase a cell\nE · Toggle editing\nZ · Undo an edit\nS · Save setup")
+                    --
+                    @label_small("When a control has focus, Space activates it. Escape returns to playback shortcuts.")
                 ]
-            ),
+            ]
+            --
+            Node { display: Display::None, flex_direction: FlexDirection::Column, flex_shrink: 0.0 }
+            TabPage({PanelTab::Parameters})
+            Children [
+                @label("Probabilities · apply to future turns")
+                --
+                @label_small("Type a percentage, then Enter or leave the field. • marks a change from the saved setup.")
+                --
+                @param_group("Aphids", 0, 4)
+                --
+                @param_row(0, params.get(0))
+                --
+                @param_row(1, params.get(1))
+                --
+                @param_row(2, params.get(2))
+                --
+                @param_row(3, params.get(3))
+                --
+                @param_group("Ladybugs", 4, 8)
+                --
+                @param_row(4, params.get(4))
+                --
+                @param_row(5, params.get(5))
+                --
+                @param_row(6, params.get(6))
+                --
+                @param_row(7, params.get(7))
+                --
+                @param_group("Environment", 8, 9)
+                --
+                @param_row(8, params.get(8))
+                --
+                @label_small("Focus a slider and use arrow keys for precise changes.")
+            ]
+            --
+            Node { display: Display::None, flex_direction: FlexDirection::Column, row_gap: px(12), flex_shrink: 0.0 }
+            TabPage({PanelTab::Edit})
+            Children [
+                @section_title("Shape the ecosystem")
+                --
+                @ui_text("Choose a tool to start editing", 14.0) EditStatus
+                --
+                Node { column_gap: px(6) }
+                Children [
+                    @edit_tool_button("Aphid", "A", EditTool::Aphid, Some(assets.aphid.clone()))
+                    --
+                    @edit_tool_button("Ladybug", "L", EditTool::Ladybug, Some(assets.ladybug.clone()))
+                    --
+                    @edit_tool_button("Erase", "X", EditTool::Erase, None)
+                ]
+                --
+                @label("Click to place. Right click removes one of the selected species.")
+                --
+                @label("Erase clears all creatures in a cell; food stays in place.")
+                --
+                @FeathersButton
+                UndoButton
+                on(|_: On<Activate>, mut actions: MessageWriter<RunAction>| { actions.write(RunAction::Undo); })
+                Children [Text("Undo edit (Z)") ThemedText]
+                --
+                @label_small("Edits restart the turn count and chart. Undo restores the previous board and history, up to 20 edits.")
+                --
+                @run_button("Done · return to paused view", RunAction::FinishEditing)
+                --
+                @label_small("Play resumes the simulation. Advancing a turn clears edit undo.")
+            ]
         ]
     }).id();
     commands.entity(root).add_child(scroll);

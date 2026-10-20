@@ -26,7 +26,7 @@ pub fn run_button(caption: &'static str, action: RunAction) -> impl Scene {
     bsn! {
         @FeathersButton
         on(move |_: On<Activate>, mut actions: MessageWriter<RunAction>| { actions.write(action); })
-        Children [(Text(caption) ThemedText)]
+        Children [Text(caption) ThemedText]
     }
 }
 

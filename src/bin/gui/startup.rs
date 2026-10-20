@@ -23,11 +23,12 @@ use crate::simulation::{
 };
 use crate::summary::spawn_summary;
 use bevy::asset::load_embedded_asset;
-use bevy::camera::ScalingMode;
 use bevy::camera::visibility::RenderLayers;
+use bevy::camera::{CameraOutputMode, MsaaWriteback, ScalingMode};
 use bevy::feathers::constants::fonts;
 use bevy::image::{ImageLoaderSettings, ImageSampler};
 use bevy::prelude::*;
+use bevy::render::render_resource::BlendState;
 use creature_life_cycle::{Board, Random, load_configured_board};
 
 pub fn setup(
@@ -109,12 +110,23 @@ pub fn setup(
     // whole panel right by the viewport offset.
     // `RenderLayers` keeps this camera from drawing the board a second time.
     // Nothing in the world is on layer 1, so it renders only its UI.
+    // All three cameras share one main texture, and each clear covers all of
+    // it, not just the camera's viewport. Copying it out whole would paint the
+    // chart's clear colour over the board, so this camera clears to
+    // transparent and blends its premultiplied UI over the window. MSAA
+    // writeback has to be off: in Bevy 0.20 it loads the chart camera's pixels
+    // into a full-window camera in place of its clear.
     let ui_camera = commands
         .spawn((
             Camera2d,
             Camera {
                 order: 2,
-                clear_color: ClearColorConfig::None,
+                clear_color: ClearColorConfig::Custom(Color::NONE),
+                output_mode: CameraOutputMode::Write {
+                    blend_state: Some(BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                    clear_color: ClearColorConfig::None,
+                },
+                msaa_writeback: MsaaWriteback::Off,
                 ..default()
             },
             RenderLayers::layer(1),

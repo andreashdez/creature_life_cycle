@@ -114,7 +114,7 @@ is a real loss of explicit test coverage in exchange for not owning the code.
 
 **Current implementation:** one entity per cell using a shared quad and ten
 shared `CellMaterial` assets (food levels 0–9). The embedded
-`assets/shaders/board_cell.wgsl` draws an antialiased rounded square with a
+`assets/shaders/board_cell.wesl` draws an antialiased rounded square with a
 12% corner radius and a subtle outside border. The fill and rim colours
 match Macroquad's food palette; gutters are 5% of the cell width. The border
 uses the same signed distance as the fill, so its corners follow the fill

@@ -78,7 +78,7 @@ pub fn cell_to_world(row: usize, col: usize) -> Vec2 {
 
 /// Bundle board art and shaders so standalone launches find their assets.
 pub fn board_render_assets(app: &mut App) {
-    embedded_asset!(app, "../../../assets/shaders/board_cell.wgsl");
+    embedded_asset!(app, "../../../assets/shaders/board_cell.wesl");
     embedded_asset!(app, "../../../assets/sprites/aphid.png");
     embedded_asset!(app, "../../../assets/sprites/ladybug.png");
     embedded_asset!(app, "../../../assets/sprites/leaf.png");
@@ -97,7 +97,7 @@ pub struct CellMaterial {
 impl Material2d for CellMaterial {
     fn fragment_shader() -> ShaderRef {
         bevy::asset::AssetPath::from_path_buf(bevy::asset::embedded_path!(
-            "../../../assets/shaders/board_cell.wgsl"
+            "../../../assets/shaders/board_cell.wesl"
         ))
         .with_source("embedded")
         .into()

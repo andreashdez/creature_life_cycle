@@ -1,14 +1,12 @@
-#import bevy_sprite::mesh2d_vertex_output::VertexOutput
-#ifdef TONEMAP_IN_SHADER
-#import bevy_sprite::mesh2d_view_bindings::view
-#import bevy_core_pipeline::tonemapping
-#endif
-#ifdef SRGB_OUTPUT
-#import bevy_render::color_operations::linear_to_srgb
-#endif
-#ifdef OKLAB_OUTPUT
-#import bevy_render::color_operations::linear_rgb_to_oklab
-#endif
+import bevy_sprite_render::mesh2d::vertex_output::VertexOutput;
+@if(TONEMAP_IN_SHADER)
+import bevy_sprite_render::mesh2d::view_bindings::view;
+@if(TONEMAP_IN_SHADER)
+import bevy_core_pipeline::tonemapping;
+@if(SRGB_OUTPUT)
+import bevy_render::color_operations::linear_to_srgb;
+@if(OKLAB_OUTPUT)
+import bevy_render::color_operations::linear_rgb_to_oklab;
 
 struct CellMaterial {
     fill: vec4<f32>,
@@ -17,7 +15,7 @@ struct CellMaterial {
     shape: vec4<f32>,
 };
 
-@group(#{MATERIAL_BIND_GROUP}) @binding(0) var<uniform> cell: CellMaterial;
+@group(constants::MATERIAL_BIND_GROUP) @binding(0) var<uniform> cell: CellMaterial;
 
 // Signed distance to the fill boundary in world units. Both edges of the
 // border use this SAME distance: offsetting it expands the radius as well as
@@ -48,14 +46,11 @@ fn fragment(mesh: VertexOutput) -> @location(0) vec4<f32> {
     let colour = (cell.fill.rgb * fill_coverage + rim_colour * rim_coverage)
         / max(outer_coverage, 0.00001);
     var output = vec4(colour, cell.fill.a * outer_coverage);
-#ifdef TONEMAP_IN_SHADER
+    @if(TONEMAP_IN_SHADER)
     output = tonemapping::tone_mapping(output, view.color_grading);
-#endif
-#ifdef SRGB_OUTPUT
+    @if(SRGB_OUTPUT)
     output = vec4(linear_to_srgb(output.rgb), output.a);
-#endif
-#ifdef OKLAB_OUTPUT
+    @if(OKLAB_OUTPUT)
     output = vec4(linear_rgb_to_oklab(output.rgb), output.a);
-#endif
     return output;
 }

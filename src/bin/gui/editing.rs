@@ -114,16 +114,19 @@ pub fn edit_tool_button(
         EditToolButton({tool})
         on(move |_: On<Activate>, mut edit: ResMut<EditMode>| { edit.select(tool); })
         Children [
-            {artwork.map(|image| bsn! {
+            {artwork.map(|image| bsn_list! {
                 Node { width: px(36), height: px(36), flex_shrink: 0.0 }
                 ImageNode { image: {image} }
-            })},
-            {eraser.then(|| bsn! {
+            })}
+            --
+            {eraser.then(|| bsn_list! {
                 Node { height: px(36), align_items: AlignItems::Center }
-                Children [ui_text("×", 30.0)]
-            })},
-            (Text(caption) ThemedText),
-            label_small(shortcut),
+                Children [@ui_text("×", 30.0)]
+            })}
+            --
+            Text(caption) ThemedText
+            --
+            @label_small(shortcut)
         ]
     }
 }

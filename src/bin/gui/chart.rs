@@ -540,29 +540,26 @@ pub fn spawn_chart_overlay(commands: &mut Commands, ui_camera: Entity, font: Han
     let controls = commands.spawn_scene(bsn! {
         Node { position_type: PositionType::Absolute, right: px(16), top: px(8), column_gap: px(6), align_items: AlignItems::Center }
         Children [
-            label_small("Height"),
-            (
-                @FeathersButton
-                ChartControlButton({ChartAction::Smaller})
-                on(|_: On<Activate>, mut panel: ResMut<ChartPanel>, windows: Query<&Window>| {
-                    if let Ok(window) = windows.single() { panel.apply(ChartAction::Smaller, window.height()); }
-                })
-                Children [(Text("−") ThemedText)]
-            ),
-            (
-                @FeathersButton
-                ChartControlButton({ChartAction::Larger})
-                on(|_: On<Activate>, mut panel: ResMut<ChartPanel>, windows: Query<&Window>| {
-                    if let Ok(window) = windows.single() { panel.apply(ChartAction::Larger, window.height()); }
-                })
-                Children [(Text("+") ThemedText)]
-            ),
-            (
-                @FeathersButton
-                ChartControlButton({ChartAction::Toggle})
-                on(|_: On<Activate>, mut panel: ResMut<ChartPanel>| { panel.apply(ChartAction::Toggle, 0.0); })
-                Children [(Text("Hide chart") ThemedText ChartToggleText)]
-            ),
+            @label_small("Height")
+            --
+            @FeathersButton
+            ChartControlButton({ChartAction::Smaller})
+            on(|_: On<Activate>, mut panel: ResMut<ChartPanel>, windows: Query<&Window>| {
+                if let Ok(window) = windows.single() { panel.apply(ChartAction::Smaller, window.height()); }
+            })
+            Children [Text("−") ThemedText]
+            --
+            @FeathersButton
+            ChartControlButton({ChartAction::Larger})
+            on(|_: On<Activate>, mut panel: ResMut<ChartPanel>, windows: Query<&Window>| {
+                if let Ok(window) = windows.single() { panel.apply(ChartAction::Larger, window.height()); }
+            })
+            Children [Text("+") ThemedText]
+            --
+            @FeathersButton
+            ChartControlButton({ChartAction::Toggle})
+            on(|_: On<Activate>, mut panel: ResMut<ChartPanel>| { panel.apply(ChartAction::Toggle, 0.0); })
+            Children [Text("Hide chart") ThemedText ChartToggleText]
         ]
     }).id();
     commands.entity(root).add_child(controls);
