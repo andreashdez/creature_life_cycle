@@ -7,9 +7,12 @@ use crate::editing::EditMode;
 use crate::layout::SUMMARY_WIDTH;
 use crate::panel::{PropertiesToggle, PropertiesToggleLabel, toggle_properties};
 use crate::run_control::{RunAction, StatusLine};
-use crate::simulation::{Playing, Seed, Stats, StepTimer};
+use crate::simulation::{Playing, STEP_SECONDS, Seed, Stats, StepTimer};
 use crate::widgets::{run_button, set_text, ui_text};
-use bevy::feathers::controls::{ButtonVariant, FeathersButton};
+use bevy::feathers::controls::{
+    ButtonVariant, FeathersButton, FeathersMenu, FeathersMenuButton, FeathersMenuItem,
+    FeathersMenuPopup,
+};
 use bevy::feathers::display::label_small;
 use bevy::feathers::theme::{ThemeBackgroundColor, ThemedText};
 use bevy::feathers::tokens;
@@ -27,6 +30,71 @@ pub struct PlaybackStatus;
 
 #[derive(Component, Clone, Default, FromTemplate)]
 pub struct SpeedLabel;
+
+/// Seconds per turn, ordered slowest to fastest, including the launch default.
+pub const SPEED_PRESETS: [f32; 8] = [4.0, 2.0, 1.0, 0.5, STEP_SECONDS, 0.2, 0.1, 0.05];
+
+#[derive(Component, Clone, Default, FromTemplate)]
+pub struct SpeedMenuButton;
+
+#[derive(Component, Clone, Default, FromTemplate)]
+pub struct SpeedMenuPopup;
+
+/// Each native menu item sends its interval through the playback message path.
+#[derive(Component, Clone, Default, FromTemplate)]
+pub struct SpeedPreset(pub f32);
+
+#[derive(Component, Clone, Default, FromTemplate)]
+pub struct SpeedOptionLabel(pub f32);
+
+/// A native popup supplies keyboard navigation, dismissal, and focus restoration.
+pub fn speed_menu() -> impl Scene {
+    bsn! {
+        @FeathersMenu
+        Node { width: percent(100), flex_shrink: 0.0 }
+        Children [
+            @FeathersMenuButton {
+                @caption: bsn! { Text("") ThemedText SpeedLabel },
+            }
+            Node { width: percent(100) }
+            SpeedMenuButton
+            --
+            @FeathersMenuPopup
+            Node { min_width: percent(100) }
+            SpeedMenuPopup
+            Children [
+                {SPEED_PRESETS.into_iter().map(|seconds| bsn! {
+                    @FeathersMenuItem
+                    SpeedPreset(seconds)
+                    on(move |_: On<Activate>, mut actions: MessageWriter<RunAction>| {
+                        actions.write(RunAction::SetSpeed(seconds));
+                    })
+                    Children [Text("") ThemedText SpeedOptionLabel(seconds)]
+                }).collect::<Vec<_>>()}
+            ]
+        ]
+    }
+}
+
+/// Mark an exact preset match; shortcut speeds between presets keep their own
+/// readout without falsely selecting the nearest menu entry.
+pub fn sync_speed_menu(timer: Res<StepTimer>, mut labels: Query<(&SpeedOptionLabel, &mut Text)>) {
+    for (preset, mut text) in &mut labels {
+        let selected = timer.0.duration() == std::time::Duration::from_secs_f32(preset.0);
+        let mark = if selected { "• " } else { "" };
+        let default_label = if preset.0 == STEP_SECONDS {
+            " (default)"
+        } else {
+            ""
+        };
+        let rate = format!("{:.2}", 1.0 / preset.0);
+        let rate = rate.trim_end_matches('0').trim_end_matches('.');
+        let next = format!("{mark}{rate} turns/s{default_label}");
+        if text.0 != next {
+            text.0 = next;
+        }
+    }
+}
 
 #[derive(Component, Clone, Default, FromTemplate)]
 pub struct StatusLabel;
@@ -99,15 +167,7 @@ pub fn spawn_summary(
                 @run_button("Reset", RunAction::Reset)
             ]
             --
-            Node { column_gap: px(8), align_items: AlignItems::Center }
-            Children [
-                @run_button("−", RunAction::Slower)
-                --
-                Node { flex_grow: 1.0, justify_content: JustifyContent::Center }
-                Children [@ui_text("", 14.0) SpeedLabel]
-                --
-                @run_button("+", RunAction::Faster)
-            ]
+            @speed_menu()
             --
             @ui_text("", 14.0) PlaybackStatus
             --
@@ -182,7 +242,10 @@ pub fn update_hud(
         } else if status {
             format!("{state}  ·  Turn {}", stats.turn)
         } else if speed {
-            format!("{:.2} turns/s", 1.0 / timer.0.duration().as_secs_f32())
+            format!(
+                "Speed: {:.2} turns/s",
+                1.0 / timer.0.duration().as_secs_f32()
+            )
         } else {
             continue;
         };

@@ -148,7 +148,7 @@ and after and report the difference.
   builds work without an asset directory.
 
 **Checking the GUI without a human.** Set `CLC_SCREENSHOT` to have the app run
-fast turns, drive a slider, the food toggle, edit tools, and the chart
+fast turns, edit a percentage field, the food toggle, edit tools, and the chart
 crosshair through the real input paths, save a PNG, and exit:
 
 ```sh

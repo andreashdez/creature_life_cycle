@@ -3,24 +3,31 @@
 //! exits, so the GUI can be checked without a human watching it.
 
 use crate::board::{BoardView, CELL, FoodOverlay, GAP, cell_to_world};
-use crate::chart::{ChartAction, ChartControlButton};
+use crate::chart::{ChartAction, ChartControlButton, ChartHover};
 use crate::creatures::{BADGE_SLOTS, badge_text_raster, badges_legible, creature_world};
 use crate::editing::{CellEdit, EditAction, EditMode, EditTool, EditToolButton};
-use crate::history::History;
+use crate::history::{
+    ClearHistoryPin, EventList, EventListBody, EventRow, History, HistorySelection,
+};
 use crate::layout::BoardCamera;
 use crate::panel::{
     FoodOverlayToggle, PanelRoot, PanelSection, PanelTab, PropertiesToggle, SectionToggle,
     TabButton, ViewButton, scrolled_offset,
 };
-use crate::params::{Params, ProbSlider};
+use crate::params::{Params, ProbField, ProbStep};
 use crate::run_control::RunAction;
-use crate::simulation::{BoardRes, Playing, Stats};
+use crate::simulation::{BoardRes, Playing, Stats, StepTimer};
+use crate::summary::{SpeedMenuButton, SpeedMenuPopup, SpeedPreset};
 use bevy::feathers::controls::ButtonVariant;
+use bevy::input::ButtonState;
+use bevy::input::keyboard::{Key, KeyboardInput};
 use bevy::input::mouse::MouseScrollUnit;
+use bevy::input_focus::{FocusCause, FocusedInput, InputFocus};
 use bevy::prelude::*;
 use bevy::render::view::window::screenshot::{Screenshot, save_to_disk};
+use bevy::text::EditableText;
 use bevy::ui::Checked;
-use bevy::ui_widgets::{Activate, ValueChange};
+use bevy::ui_widgets::{Activate, SetSelected, ValueChange};
 use creature_life_cycle::Coordinates;
 
 /// The screenshot probe can also verify the smallest supported window.
@@ -45,13 +52,15 @@ pub struct ScreenshotProbe {
 const PROBE_CELL: (usize, usize) = (2, 3);
 
 pub type ProbeWidgets<'w, 's> = (
-    Query<'w, 's, (Entity, &'static ProbSlider)>,
     Query<'w, 's, (Entity, Has<Checked>), With<FoodOverlayToggle>>,
     Query<'w, 's, (Entity, &'static EditToolButton, &'static ButtonVariant)>,
     Query<'w, 's, (Entity, &'static SectionToggle)>,
     Query<'w, 's, (Entity, &'static ViewButton)>,
     Query<'w, 's, (Entity, &'static ChartControlButton)>,
     Query<'w, 's, Entity, With<PropertiesToggle>>,
+    Query<'w, 's, Entity, With<SpeedMenuButton>>,
+    Query<'w, 's, &'static Visibility, With<SpeedMenuPopup>>,
+    Query<'w, 's, (Entity, &'static SpeedPreset)>,
 );
 
 pub type ProbeState<'w> = (
@@ -62,7 +71,47 @@ pub type ProbeState<'w> = (
     Res<'w, EditMode>,
     Res<'w, Stats>,
     Res<'w, Playing>,
+    Res<'w, StepTimer>,
 );
+
+/// Extra event-list state used to verify pinning and nested wheel routing.
+pub type ProbeHistory<'w, 's> = (
+    Query<'w, 's, (Entity, &'static EventRow)>,
+    Query<'w, 's, Entity, With<EventList>>,
+    Query<'w, 's, Entity, With<ClearHistoryPin>>,
+    Query<'w, 's, (Entity, &'static ScrollPosition), (With<EventListBody>, Without<PanelRoot>)>,
+    Res<'w, HistorySelection>,
+    Res<'w, ChartHover>,
+);
+
+/// Send the same bubbling wheel event that picking dispatches, so the inner
+/// list must consume it before the outer properties scroll area sees it.
+fn probe_list_scroll(entity: Entity) -> bevy::picking::events::PointerScroll {
+    use bevy::picking::{
+        backend::HitData,
+        events::Pointer,
+        pointer::{Location, PointerId},
+    };
+    bevy::picking::events::PointerScroll {
+        entity,
+        pointer: Pointer::new(
+            PointerId::Mouse,
+            Location {
+                target: bevy::camera::NormalizedRenderTarget::Window(
+                    bevy::window::WindowRef::Entity(Entity::PLACEHOLDER)
+                        .normalize(None)
+                        .unwrap(),
+                ),
+                position: Vec2::ZERO,
+            },
+        ),
+        unit: MouseScrollUnit::Line,
+        x: 0.0,
+        y: -100.0,
+        hit: HitData::new(Entity::PLACEHOLDER, 0.0, None, None),
+        phase: bevy::input::touch::TouchPhase::Moved,
+    }
+}
 
 #[expect(
     clippy::too_many_arguments,
@@ -70,20 +119,34 @@ pub type ProbeState<'w> = (
 )]
 pub fn screenshot_probe(
     mut commands: Commands,
-    time: Res<Time>,
-    probe: Option<ResMut<ScreenshotProbe>>,
+    (time, probe): (Res<Time>, Option<ResMut<ScreenshotProbe>>),
     mut board_cameras: Query<
         (&Camera, &GlobalTransform, &mut Projection, &mut Transform),
         With<BoardCamera>,
     >,
-    (sliders, food_toggles, tool_buttons, sections, views, chart_controls, properties_toggles): ProbeWidgets,
-    (params, board, history, overlay, edit, stats, playing): ProbeState,
+    (
+        food_toggles,
+        tool_buttons,
+        sections,
+        views,
+        chart_controls,
+        properties_toggles,
+        speed_buttons,
+        speed_popups,
+        speed_items,
+    ): ProbeWidgets,
+    (params, board, history, overlay, edit, stats, playing, step_timer): ProbeState,
     mut panel: Query<(&mut ScrollPosition, &ComputedNode), With<PanelRoot>>,
     tabs: Query<(Entity, &TabButton)>,
     mut edits: MessageWriter<CellEdit>,
     mut exit: MessageWriter<AppExit>,
     mut windows: Query<&mut Window>,
     mut actions: MessageWriter<RunAction>,
+    mut focus: ResMut<InputFocus>,
+    fields: Query<(Entity, &ProbField, &Children)>,
+    mut texts: Query<&mut EditableText>,
+    steps: Query<(Entity, &ProbStep)>,
+    (event_rows, event_lists, clear_pins, event_bodies, selection, chart_hover): ProbeHistory,
 ) {
     let Some(mut probe) = probe else {
         return;
@@ -116,7 +179,7 @@ pub fn screenshot_probe(
                 let (width, height) = review_window_size();
                 window.resolution.set(width as f32, height as f32);
             }
-            if let Some((entity, _)) = sliders.iter().find(|(_, slider)| slider.0 == 0) {
+            if let Some((entity, _, _)) = fields.iter().find(|(_, field, _)| field.0 == 0) {
                 info!(
                     "before ValueChange: params[0]={:.3} board aphid prob_move={:.3}",
                     params.get(0),
@@ -124,7 +187,7 @@ pub fn screenshot_probe(
                 );
                 commands.trigger(ValueChange {
                     source: entity,
-                    value: 88.0f32,
+                    value: 88.0f64,
                     is_final: true,
                 });
             }
@@ -242,18 +305,54 @@ pub fn screenshot_probe(
             probe.timer = Timer::from_seconds(1.5, TimerMode::Once);
         }
         2 => {
-            if let Some((entity, _)) = tabs.iter().find(|(_, tab)| tab.0 == PanelTab::Parameters) {
-                commands.trigger(Activate { entity });
+            if let Some((entity, _)) = tabs.iter().find(|(_, tab)| tab.0 == PanelTab::Edit) {
+                focus.set(entity, FocusCause::Navigated);
+                commands.trigger(FocusedInput::new(
+                    entity,
+                    KeyboardInput {
+                        key_code: KeyCode::ArrowLeft,
+                        logical_key: Key::ArrowLeft,
+                        state: ButtonState::Pressed,
+                        text: None,
+                        repeat: false,
+                        window: Entity::PLACEHOLDER,
+                    },
+                    Entity::PLACEHOLDER,
+                ));
+            }
+            if let Some((_, _, children)) = fields.iter().find(|(_, field, _)| field.0 == 0) {
+                for child in children.iter() {
+                    if let Ok(mut text) = texts.get_mut(child) {
+                        text.editor.set_text("12.3456789");
+                        commands.trigger(FocusedInput::new(
+                            child,
+                            KeyboardInput {
+                                key_code: KeyCode::Enter,
+                                logical_key: Key::Enter,
+                                state: ButtonState::Pressed,
+                                text: None,
+                                repeat: false,
+                                window: Entity::PLACEHOLDER,
+                            },
+                            Entity::PLACEHOLDER,
+                        ));
+                    }
+                }
             }
             probe.timer = Timer::from_seconds(0.5, TimerMode::Once);
         }
         3 => {
+            assert!((params.get(0) - 0.123456789).abs() < 1e-12);
+            assert!((board.0.aphid_params().prob_move - 0.123456789).abs() < 1e-12);
             commands
                 .spawn(Screenshot::primary_window())
                 .observe(save_to_disk(probe.path.replace(".png", "-parameters.png")));
             probe.timer = Timer::from_seconds(1.0, TimerMode::Once);
         }
         4 => {
+            if let Some((entity, _)) = steps.iter().find(|(_, step)| step.0 == 0 && step.1 > 0.0) {
+                commands.trigger(Activate { entity });
+            }
             if let Ok((mut position, computed)) = panel.single_mut() {
                 let content = computed.content_size() * computed.inverse_scale_factor();
                 let visible = computed.size() * computed.inverse_scale_factor();
@@ -267,6 +366,7 @@ pub fn screenshot_probe(
             probe.timer = Timer::from_seconds(0.5, TimerMode::Once);
         }
         5 => {
+            assert!((params.get(0) - 0.124).abs() < 1e-12);
             commands
                 .spawn(Screenshot::primary_window())
                 .observe(save_to_disk(probe.path.replace(".png", "-scrolled.png")));
@@ -274,7 +374,19 @@ pub fn screenshot_probe(
         }
         6 => {
             if let Some((entity, _)) = tabs.iter().find(|(_, tab)| tab.0 == PanelTab::Edit) {
-                commands.trigger(Activate { entity });
+                focus.set(entity, FocusCause::Navigated);
+                commands.trigger(FocusedInput::new(
+                    entity,
+                    KeyboardInput {
+                        key_code: KeyCode::Enter,
+                        logical_key: Key::Enter,
+                        state: ButtonState::Pressed,
+                        text: None,
+                        repeat: false,
+                        window: Entity::PLACEHOLDER,
+                    },
+                    Entity::PLACEHOLDER,
+                ));
             }
             probe.timer = Timer::from_seconds(0.5, TimerMode::Once);
         }
@@ -319,7 +431,19 @@ pub fn screenshot_probe(
         }
         12 => {
             if let Some((entity, _)) = tabs.iter().find(|(_, tab)| tab.0 == PanelTab::Overview) {
-                commands.trigger(Activate { entity });
+                focus.set(entity, FocusCause::Navigated);
+                commands.trigger(FocusedInput::new(
+                    entity,
+                    KeyboardInput {
+                        key_code: KeyCode::Home,
+                        logical_key: Key::Home,
+                        state: ButtonState::Pressed,
+                        text: None,
+                        repeat: false,
+                        window: Entity::PLACEHOLDER,
+                    },
+                    Entity::PLACEHOLDER,
+                ));
             }
             for (entity, section) in &sections {
                 if matches!(section.0, PanelSection::Setup) {
@@ -412,10 +536,10 @@ pub fn screenshot_probe(
             probe.timer = Timer::from_seconds(1.0, TimerMode::Once);
         }
         21 => {
-            if let Some((entity, _)) = sliders.iter().find(|(_, slider)| slider.0 == 0) {
+            if let Some((entity, _, _)) = fields.iter().find(|(_, field, _)| field.0 == 0) {
                 commands.trigger(ValueChange {
                     source: entity,
-                    value: 25.0f32,
+                    value: 25.0f64,
                     is_final: true,
                 });
             }
@@ -445,7 +569,19 @@ pub fn screenshot_probe(
         }
         24 | 26 => {
             for entity in &properties_toggles {
-                commands.trigger(Activate { entity });
+                focus.set(entity, FocusCause::Navigated);
+                commands.trigger(FocusedInput::new(
+                    entity,
+                    KeyboardInput {
+                        key_code: KeyCode::Enter,
+                        logical_key: Key::Enter,
+                        state: ButtonState::Pressed,
+                        text: None,
+                        repeat: false,
+                        window: Entity::PLACEHOLDER,
+                    },
+                    Entity::PLACEHOLDER,
+                ));
             }
             probe.timer = Timer::from_seconds(0.5, TimerMode::Once);
         }
@@ -458,6 +594,139 @@ pub fn screenshot_probe(
             commands
                 .spawn(Screenshot::primary_window())
                 .observe(save_to_disk(probe.path.replace(".png", suffix)));
+            probe.timer = Timer::from_seconds(1.0, TimerMode::Once);
+        }
+        28 | 29 => {
+            // Enough rows to exercise scrolling in both window sizes.
+            actions.write(RunAction::Step);
+            if let Some((source, _, _)) = fields.iter().find(|(_, field, _)| field.0 == 0) {
+                commands.trigger(ValueChange {
+                    source,
+                    value: if probe.stage == 28 { 30.0f64 } else { 35.0f64 },
+                    is_final: true,
+                });
+            }
+            probe.timer = Timer::from_seconds(0.5, TimerMode::Once);
+        }
+        30 => {
+            commands.remove_resource::<ProbeHover>();
+            if let (Ok(list), Some((row, _))) = (
+                event_lists.single(),
+                event_rows.iter().find(|(_, row)| row.0.turn == 12),
+            ) {
+                focus.set(list, FocusCause::Navigated);
+                commands.trigger(SetSelected { entity: list, row });
+            }
+            probe.timer = Timer::from_seconds(0.5, TimerMode::Once);
+        }
+        31 => {
+            assert_eq!(selection.0, Some(12));
+            assert_eq!(
+                chart_hover.0,
+                history.0.iter().position(|point| point.turn == 12)
+            );
+            commands
+                .spawn(Screenshot::primary_window())
+                .observe(save_to_disk(
+                    probe.path.replace(".png", "-event-selected.png"),
+                ));
+            probe.timer = Timer::from_seconds(1.0, TimerMode::Once);
+        }
+        32 => {
+            if let Ok((body, _)) = event_bodies.single() {
+                commands.trigger(probe_list_scroll(body));
+            }
+            probe.timer = Timer::from_seconds(0.5, TimerMode::Once);
+        }
+        33 => {
+            assert!(
+                event_bodies.single().unwrap().1.y > 0.0,
+                "the event list must scroll"
+            );
+            assert_eq!(
+                panel.single().unwrap().0.y,
+                0.0,
+                "the outer panel must not also scroll"
+            );
+            commands
+                .spawn(Screenshot::primary_window())
+                .observe(save_to_disk(
+                    probe.path.replace(".png", "-event-scrolled.png"),
+                ));
+            probe.timer = Timer::from_seconds(1.0, TimerMode::Once);
+        }
+        34 => {
+            if let Ok(entity) = clear_pins.single() {
+                commands.trigger(Activate { entity });
+            }
+            probe.timer = Timer::from_seconds(0.5, TimerMode::Once);
+        }
+        35 => {
+            assert_eq!(selection.0, None);
+            commands
+                .spawn(Screenshot::primary_window())
+                .observe(save_to_disk(
+                    probe.path.replace(".png", "-event-cleared.png"),
+                ));
+            probe.timer = Timer::from_seconds(1.0, TimerMode::Once);
+        }
+        36 => {
+            commands.trigger(Activate {
+                entity: speed_buttons.single().unwrap(),
+            });
+            probe.timer = Timer::from_seconds(0.5, TimerMode::Once);
+        }
+        37 => {
+            assert_eq!(*speed_popups.single().unwrap(), Visibility::Visible);
+            commands
+                .spawn(Screenshot::primary_window())
+                .observe(save_to_disk(probe.path.replace(".png", "-speed-menu.png")));
+            probe.timer = Timer::from_seconds(1.0, TimerMode::Once);
+        }
+        38 | 39 => {
+            // Navigate and commit through the same focused keyboard events as a user.
+            let entity = focus.get().unwrap();
+            let (key_code, logical_key) = if probe.stage == 38 {
+                (KeyCode::End, Key::End)
+            } else {
+                assert_eq!(speed_items.get(entity).unwrap().1.0, 0.05);
+                (KeyCode::Enter, Key::Enter)
+            };
+            commands.trigger(FocusedInput::new(
+                entity,
+                KeyboardInput {
+                    key_code,
+                    logical_key,
+                    state: ButtonState::Pressed,
+                    text: None,
+                    repeat: false,
+                    window: Entity::PLACEHOLDER,
+                },
+                Entity::PLACEHOLDER,
+            ));
+            probe.timer = Timer::from_seconds(0.5, TimerMode::Once);
+        }
+        40 => {
+            assert_eq!(step_timer.0.duration().as_secs_f32(), 0.05);
+            assert!(!playing.0, "selecting a speed must keep the run paused");
+            assert_eq!(*speed_popups.single().unwrap(), Visibility::Hidden);
+            assert_eq!(focus.get(), Some(speed_buttons.single().unwrap()));
+            actions.write(RunAction::Slower);
+            probe.timer = Timer::from_seconds(0.5, TimerMode::Once);
+        }
+        41 => {
+            assert_eq!(step_timer.0.duration().as_secs_f32(), 0.1);
+            commands.trigger(Activate {
+                entity: speed_buttons.single().unwrap(),
+            });
+            probe.timer = Timer::from_seconds(0.5, TimerMode::Once);
+        }
+        42 => {
+            commands
+                .spawn(Screenshot::primary_window())
+                .observe(save_to_disk(
+                    probe.path.replace(".png", "-speed-selected.png"),
+                ));
             probe.timer = Timer::from_seconds(1.0, TimerMode::Once);
         }
         _ => {

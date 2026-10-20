@@ -2,8 +2,10 @@
 //! scrolling, and the overview tab's board view and food controls.
 
 use crate::board::{BoardView, FoodOverlay, food_colour, set_food_details};
+use crate::chart::INK_PRIMARY;
 use crate::creatures::CreatureAssets;
 use crate::editing::{EditStatus, EditTool, UndoButton, edit_tool_button};
+use crate::history::event_list;
 use crate::layout::{PANEL_HEADER, PANEL_WIDTH};
 use crate::params::{Params, param_group, param_row};
 use crate::run_control::{Reseed, RunAction, SEED_DIGITS, SeedField};
@@ -14,13 +16,16 @@ use bevy::feathers::controls::{
     FeathersTextInputContainer,
 };
 use bevy::feathers::display::{label, label_small};
+use bevy::feathers::focus::FocusIndicator;
 use bevy::feathers::theme::{ThemeBackgroundColor, ThemedText};
 use bevy::feathers::tokens;
-use bevy::input::mouse::{AccumulatedMouseScroll, MouseScrollUnit};
+use bevy::input::mouse::MouseScrollUnit;
 use bevy::input_focus::InputFocus;
 use bevy::prelude::*;
 use bevy::ui::Checked;
-use bevy::ui_widgets::{Activate, ValueChange};
+use bevy::ui_widgets::{
+    Activate, ScrollArea, SelectedTab, Tab, TabActivation, TabList, ValueChange,
+};
 
 #[derive(Component, Clone, Default, FromTemplate)]
 pub struct ViewButton(pub BoardView);
@@ -102,6 +107,10 @@ pub struct PropertiesToggle;
 #[derive(Component, Clone, FromTemplate)]
 pub struct TabPage(pub PanelTab);
 
+/// Identifies the controlled tab list so edit shortcuts can select it too.
+#[derive(Component, Clone, Default, FromTemplate)]
+pub struct PropertiesTabs;
+
 #[derive(Component, Clone, FromTemplate)]
 pub struct TabButton(pub PanelTab);
 
@@ -126,16 +135,37 @@ fn section_title(title: &'static str) -> impl Scene {
     }
 }
 
-fn tab_button(caption: &'static str, tab: PanelTab) -> impl Scene {
+/// Use headless tabs rather than buttons so keyboard and accessibility behavior
+/// comes from the tab list. The underline distinguishes selection from focus.
+pub fn tab_button(caption: &'static str, tab: PanelTab) -> impl Scene {
     bsn! {
-        @FeathersButton
-        Node { flex_grow: 1.0 }
-        TabButton({tab})
-        on(move |_: On<Activate>, mut active: ResMut<ActiveTab>, mut panel: ResMut<PropertiesPanel>| {
-            active.0 = tab;
-            panel.open = true;
-        })
-        Children [Text(caption) ThemedText]
+        Node {
+            flex_grow: 1.0, justify_content: JustifyContent::Center,
+            padding: UiRect::axes(px(4), px(8)),
+            border: UiRect::bottom(px(2)),
+        }
+        Tab TabButton({tab}) FocusIndicator
+        BorderColor::all(Color::NONE)
+        Children [@ui_text(caption, 14.0)]
+    }
+}
+
+/// Apply native pointer and keyboard selection requests to the same state used
+/// by edit shortcuts; `sync_sidebar` reflects it back into `SelectedTab`.
+pub fn select_properties_tab(
+    change: On<ValueChange<Option<Entity>>>,
+    lists: Query<(), With<PropertiesTabs>>,
+    tabs: Query<(&TabButton, &ChildOf)>,
+    mut active: ResMut<ActiveTab>,
+    mut panel: ResMut<PropertiesPanel>,
+) {
+    if lists.contains(change.source)
+        && let Some(entity) = change.value
+        && let Ok((tab, parent)) = tabs.get(entity)
+        && parent.parent() == change.source
+    {
+        active.0 = tab.0;
+        panel.open = true;
     }
 }
 
@@ -340,6 +370,8 @@ pub fn spawn_panel(
                     ]
                     --
                     Node { column_gap: px(4), margin: UiRect::top(px(14)) }
+                    TabList { activation: TabActivation::Automatic }
+                    PropertiesTabs on(select_properties_tab)
                     Children [
                         @tab_button("Overview", PanelTab::Overview)
                         --
@@ -359,7 +391,7 @@ pub fn spawn_panel(
             left: px(16), right: px(28), top: px(PANEL_HEADER), bottom: px(16),
             flex_direction: FlexDirection::Column, overflow: Overflow::scroll_y(),
         }
-        PanelRoot ScrollPosition
+        PanelRoot ScrollArea
         Children [
             Node { flex_direction: FlexDirection::Column, row_gap: px(8), flex_shrink: 0.0 }
             TabPage({PanelTab::Overview})
@@ -369,6 +401,8 @@ pub fn spawn_panel(
                 @stat_row("Births", 3)
                 --
                 @stat_row("Deaths", 4)
+                --
+                @event_list()
                 --
                 @section_title("Board view")
                 --
@@ -438,7 +472,7 @@ pub fn spawn_panel(
             Children [
                 @label("Probabilities · apply to future turns")
                 --
-                @label_small("Type a percentage, then Enter or leave the field. • marks a change from the saved setup.")
+                @label_small("Drag a value or use − / +. Click to type; Enter or leaving applies it. • marks a change from the saved setup.")
                 --
                 @param_group("Aphids", 0, 4)
                 --
@@ -464,7 +498,7 @@ pub fn spawn_panel(
                 --
                 @param_row(8, params.get(8))
                 --
-                @label_small("Focus a slider and use arrow keys for precise changes.")
+                @label_small("Type a percentage, drag to adjust, or use − / + for 0.1% steps.")
             ]
             --
             Node { display: Display::None, flex_direction: FlexDirection::Column, row_gap: px(12), flex_shrink: 0.0 }
@@ -530,10 +564,13 @@ pub fn sync_scrollbar_visibility(
     }
 }
 
+/// Keep page visibility, underline, and native tab selection in agreement,
+/// including when a global edit shortcut opens a different page.
 pub fn sync_sidebar(
     active: Res<ActiveTab>,
     mut pages: Query<(&TabPage, &mut Node)>,
-    mut tabs: Query<(&TabButton, &mut ButtonVariant)>,
+    mut tabs: Query<(Entity, &TabButton, &mut BorderColor)>,
+    mut lists: Query<&mut SelectedTab, With<PropertiesTabs>>,
     mut scroll: Query<&mut ScrollPosition, With<PanelRoot>>,
 ) {
     if !active.is_changed() {
@@ -546,12 +583,22 @@ pub fn sync_sidebar(
             Display::None
         };
     }
-    for (tab, mut variant) in &mut tabs {
-        *variant = if tab.0 == active.0 {
-            ButtonVariant::Primary
+    let mut selected = None;
+    for (entity, tab, mut border) in &mut tabs {
+        let is_selected = tab.0 == active.0;
+        // Reuse the primary ink, whose contrast is checked against WINDOW_BG,
+        // so selection stays visible without changing the caption's contrast.
+        *border = BorderColor::all(if is_selected {
+            INK_PRIMARY
         } else {
-            ButtonVariant::Normal
-        };
+            Color::NONE
+        });
+        if is_selected {
+            selected = Some(entity);
+        }
+    }
+    for mut selection in &mut lists {
+        selection.set_if_neq(SelectedTab(selected));
     }
     for mut position in &mut scroll {
         position.y = 0.0;
@@ -564,32 +611,6 @@ fn set_checked(commands: &mut Commands, entity: Entity, checked: bool) {
     } else {
         commands.entity(entity).remove::<Checked>();
     }
-}
-
-/// Wheel scrolling for the panel. `bevy_ui` 0.19 has no built-in wheel handling,
-/// so `Overflow::scroll_y` alone clips the panel without ever scrolling it.
-pub fn scroll_panel(
-    windows: Query<&Window>,
-    scroll: Res<AccumulatedMouseScroll>,
-    properties: Res<PropertiesPanel>,
-    mut panel: Query<(&mut ScrollPosition, &ComputedNode), With<PanelRoot>>,
-) {
-    if !properties.open || scroll.delta.y == 0.0 {
-        return;
-    }
-    let (Ok(window), Ok((mut position, computed))) = (windows.single(), panel.single_mut()) else {
-        return;
-    };
-    if !window
-        .cursor_position()
-        .is_some_and(|cursor| cursor.x >= window.width() - PANEL_WIDTH && cursor.y >= PANEL_HEADER)
-    {
-        return;
-    }
-
-    let max_offset =
-        ((computed.content_size() - computed.size()) * computed.inverse_scale_factor()).y;
-    position.y = scrolled_offset(position.y, scroll.delta.y, scroll.unit, max_offset);
 }
 
 /// The panel's scroll offset after one wheel movement. Wheel up (positive delta)

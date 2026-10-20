@@ -28,7 +28,7 @@ and a Bevy-powered visual explorer with live parameter controls.
         [Read the guide](cli.qd)
 
     .box {Graphical interface} type:{tip}
-        Toolbar, parameter sliders, population chart, board editing, shortcuts.
+        Toolbar, parameter fields, population chart, board editing, shortcuts.
 
         [Read the guide](gui.qd)
 

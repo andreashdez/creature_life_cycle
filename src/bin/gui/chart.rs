@@ -2,7 +2,7 @@
 //! lines for the marks, a `bevy_ui` overlay for the text, and the palette
 //! both are checked against.
 
-use crate::history::{History, HistoryEvent};
+use crate::history::{History, HistoryEvent, HistorySelection};
 use crate::layout::SUMMARY_WIDTH;
 use crate::panel::PropertiesPanel;
 use crate::probe::ProbeHover;
@@ -127,7 +127,7 @@ pub struct ChartControlButton(pub ChartAction);
 #[derive(Component)]
 pub struct ChartEmpty;
 
-/// History index under the crosshair, if the pointer is over the plot.
+/// Resolved history index for the pinned event, or the pointer over the plot.
 #[derive(Resource, Default, PartialEq)]
 pub struct ChartHover(pub Option<usize>);
 
@@ -204,12 +204,16 @@ pub fn sync_chart_panel(
     size: Res<ChartSize>,
     panel: Res<ChartPanel>,
     properties: Res<PropertiesPanel>,
-    history: Res<History>,
+    (history, selection): (Res<History>, Res<HistorySelection>),
     mut nodes: ChartNodes,
     mut labels: Query<&mut Text, With<ChartToggleText>>,
     mut backgrounds: Query<&mut BackgroundColor, With<ChartRoot>>,
 ) {
-    if !(size.is_changed() || panel.is_changed() || properties.is_changed() || history.is_changed())
+    if !(size.is_changed()
+        || panel.is_changed()
+        || properties.is_changed()
+        || history.is_changed()
+        || selection.is_changed())
     {
         return;
     }
@@ -226,7 +230,7 @@ pub fn sync_chart_panel(
             };
         }
         if empty {
-            node.display = if !panel.collapsed && history.0.len() < 2 {
+            node.display = if !panel.collapsed && history.0.len() < 2 && selection.0.is_none() {
                 Display::Flex
             } else {
                 Display::None
@@ -594,6 +598,7 @@ pub fn chart_hover(
     windows: Query<&Window>,
     history: Res<History>,
     size: Res<ChartSize>,
+    selection: Res<HistorySelection>,
     probe: Option<Res<ProbeHover>>,
     mut hover: ResMut<ChartHover>,
 ) {
@@ -603,7 +608,12 @@ pub fn chart_hover(
     let len = history.0.len();
     let plot = plot_rect(size.0, size.1);
 
-    let next = if size.1 <= CHART_COLLAPSED_HEIGHT || len < 2 {
+    let pinned = selection.index(&history);
+    let next = if size.1 <= CHART_COLLAPSED_HEIGHT || len == 0 {
+        None
+    } else if pinned.is_some() {
+        pinned
+    } else if len < 2 {
         None
     } else {
         match probe {
@@ -640,7 +650,7 @@ pub fn draw_chart_marks(
     mut dots: Query<(&EndDot, &mut Transform, &mut Visibility)>,
 ) {
     let width = size.0;
-    if size.1 <= CHART_COLLAPSED_HEIGHT || history.0.len() < 2 {
+    if size.1 <= CHART_COLLAPSED_HEIGHT || (history.0.len() < 2 && hover.0.is_none()) {
         for (_, _, mut visibility) in &mut dots {
             *visibility = Visibility::Hidden;
         }
@@ -797,9 +807,11 @@ pub fn update_chart_labels(
     history: Res<History>,
     size: Res<ChartSize>,
     hover: Res<ChartHover>,
+    selection: Res<HistorySelection>,
     mut labels: Query<(&ChartLabel, &mut Node, Option<&mut Text>)>,
 ) {
-    if !(history.is_changed() || size.is_changed() || hover.is_changed()) {
+    if !(history.is_changed() || size.is_changed() || hover.is_changed() || selection.is_changed())
+    {
         return;
     }
     let width = size.0;
@@ -874,7 +886,18 @@ pub fn update_chart_labels(
             }
             ChartLabel::TooltipTurn => {
                 if let Some((_, point)) = hovered {
-                    set_text(text, format!("turn {}", point.turn));
+                    set_text(
+                        text,
+                        format!(
+                            "turn {}{}",
+                            point.turn,
+                            if selection.0 == Some(point.turn) {
+                                " · pinned"
+                            } else {
+                                ""
+                            }
+                        ),
+                    );
                 }
             }
             ChartLabel::TooltipValue(index) => {
@@ -884,7 +907,7 @@ pub fn update_chart_labels(
             }
         }
 
-        show &= size.1 > CHART_COLLAPSED_HEIGHT && history.0.len() > 1;
+        show &= size.1 > CHART_COLLAPSED_HEIGHT && (history.0.len() > 1 || hover.0.is_some());
         let display = if show { Display::Flex } else { Display::None };
         if node.display != display {
             node.display = display;

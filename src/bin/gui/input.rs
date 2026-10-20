@@ -11,6 +11,7 @@ use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll};
 use bevy::input_focus::InputFocus;
 use bevy::prelude::*;
 use bevy::text::EditableText;
+use bevy::ui_widgets::{ListBox, MenuFocusState, MenuItem, Tab};
 
 /// How far the pointer may move between press and release and still count as a
 /// click (an edit) rather than a drag (a pan), in logical pixels.
@@ -31,18 +32,27 @@ impl BoardPointer {
     }
 }
 
+/// Widgets whose Home/End navigation must take precedence over board shortcuts.
+pub type NavigationWidgets<'w, 's> =
+    Query<'w, 's, (), Or<(With<Tab>, With<ListBox>, With<MenuItem>)>>;
+
 pub fn keyboard_controls(
-    keys: Res<ButtonInput<KeyCode>>,
-    mut focus: ResMut<InputFocus>,
+    (keys, mut focus): (Res<ButtonInput<KeyCode>>, ResMut<InputFocus>),
     mut actions: MessageWriter<RunAction>,
     (mut overlay, mut view): (ResMut<FoodOverlay>, ResMut<BoardView>),
     mut edit: ResMut<EditMode>,
     (mut active, mut properties): (ResMut<ActiveTab>, ResMut<PropertiesPanel>),
     text_fields: Query<(), With<EditableText>>,
+    (navigation_widgets, menus): (NavigationWidgets, Query<&MenuFocusState>),
 ) {
     // Focused Feathers widgets own their keyboard input, including Space. Do
     // not toggle playback a second time when Space activates a focused button.
     if keys.just_pressed(KeyCode::Escape) {
+        // Feathers handles Escape first and returns focus to the menu button.
+        // Its open state settles in PostUpdate; keep that restored focus here.
+        if menus.iter().any(|state| *state != MenuFocusState::Closed) {
+            return;
+        }
         focus.clear();
     }
     // A focused text field owns every key, not just Space: typing a seed must
@@ -64,7 +74,14 @@ pub fn keyboard_controls(
         (KeyCode::KeyS, RunAction::Save),
         (KeyCode::KeyZ, RunAction::Undo),
     ] {
-        if keys.just_pressed(key) && !(key == KeyCode::Space && focus.get().is_some()) {
+        // Home belongs to native navigation widgets; it must not also fit the board.
+        let navigation_owns_home = key == KeyCode::Home
+            && focus
+                .get()
+                .is_some_and(|entity| navigation_widgets.contains(entity));
+        if keys.just_pressed(key)
+            && !(navigation_owns_home || key == KeyCode::Space && focus.get().is_some())
+        {
             actions.write(action);
         }
     }
@@ -116,7 +133,7 @@ pub fn camera_controls(
     };
 
     // Scrolling the panel or the chart must not zoom the board, and dragging a
-    // slider must not pan it, so both only act when they start over the board.
+    // percentage field must not pan it, so both only act when they start over the board.
     let cursor = window.cursor_position();
     let over_board = !chart_panel.dragging
         && cursor.is_some_and(|cursor| {

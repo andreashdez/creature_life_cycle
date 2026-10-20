@@ -43,11 +43,12 @@ use crate::editing::{
     BoardEditGizmos, CellEdit, EditHistory, EditMode, apply_cell_edits, board_edit_input,
     exclusive_play_and_edit, sync_edit_controls, update_edit_palette, update_edit_preview,
 };
+use crate::history::{HistorySelection, pin_history_event, sync_event_list};
 use crate::hover::{Hovered, draw_hover, hovered_cell, update_cell_popup};
 use crate::input::{BoardPointer, camera_controls, keyboard_controls};
 use crate::layout::layout_viewports;
 use crate::panel::{
-    ActiveTab, PanelSections, PropertiesPanel, scroll_panel, sync_board_view, sync_food_checkbox,
+    ActiveTab, PanelSections, PropertiesPanel, sync_board_view, sync_food_checkbox,
     sync_panel_sections, sync_properties_panel, sync_scrollbar_visibility, sync_sidebar,
 };
 use crate::params::{
@@ -62,7 +63,7 @@ use crate::simulation::{
     DEFAULT_SEED, Playing, Revision, STEP_SECONDS, Seed, Stats, StepTimer, step_simulation,
 };
 use crate::startup::setup;
-use crate::summary::{update_hud, update_status_text};
+use crate::summary::{sync_speed_menu, update_hud, update_status_text};
 use bevy::camera::visibility::RenderLayers;
 use bevy::feathers::FeathersPlugins;
 use bevy::feathers::dark_theme::create_dark_theme;
@@ -119,6 +120,8 @@ fn main() {
         )
         .init_resource::<ChartSize>()
         .init_resource::<ChartHover>()
+        .init_resource::<HistorySelection>()
+        .add_observer(pin_history_event)
         .init_resource::<ChartPanel>()
         .insert_resource(ClearColor(Color::srgb(0.086, 0.106, 0.102)))
         .init_resource::<Hovered>()
@@ -177,14 +180,12 @@ fn main() {
                     (sync_sidebar, sync_properties_panel).chain(),
                     chart_resize_input.run_if(not(resource_exists::<ScreenshotProbe>)),
                     layout_viewports,
-                    scroll_panel.run_if(not(resource_exists::<ScreenshotProbe>)),
                     camera_controls.run_if(not(resource_exists::<ScreenshotProbe>)),
                     hovered_cell,
                     board_edit_input.run_if(not(resource_exists::<ScreenshotProbe>)),
                     apply_cell_edits,
                     exclusive_play_and_edit,
                     sync_edit_controls,
-                    chart_hover,
                     commit_parameter_fields,
                     apply_params,
                     // After the edits and parameters have landed, so a save
@@ -198,6 +199,10 @@ fn main() {
                 // Rendering, from the state settled above. Split in two because a
                 // system tuple holds at most 20 entries.
                 (
+                    // Pins and crosshair indices must follow this frame's turn,
+                    // including history expiry, reset, edits, and Undo.
+                    sync_event_list,
+                    chart_hover,
                     recolor_cells,
                     rebuild_food_overlay,
                     sync_food_checkbox,
@@ -219,6 +224,7 @@ fn main() {
                 )
                     .chain(),
                 (
+                    sync_speed_menu,
                     sync_parameter_widgets,
                     sync_board_view,
                     update_board_detail,

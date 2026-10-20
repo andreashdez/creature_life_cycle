@@ -5,7 +5,7 @@ use crate::editing::{
     CellEdit, EDIT_APHID_LIFE, EDIT_LADYBUG_LIFE, EDIT_UNDO_LIMIT, EditAction, EditHistory,
     EditSnapshot, EditTool,
 };
-use crate::history::History;
+use crate::history::{History, HistorySelection};
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use creature_life_cycle::{Board, Random, TurnStats};
@@ -80,6 +80,7 @@ pub struct Simulation<'w> {
     pub stats: ResMut<'w, Stats>,
     pub revision: ResMut<'w, Revision>,
     pub history: ResMut<'w, History>,
+    pub history_selection: ResMut<'w, HistorySelection>,
     pub playing: ResMut<'w, Playing>,
     pub edits: ResMut<'w, EditHistory>,
 }
@@ -141,6 +142,7 @@ impl Simulation<'_> {
         self.rng.0 = snapshot.random;
         *self.stats = snapshot.stats;
         *self.history = snapshot.history;
+        self.history_selection.0 = None;
         self.playing.0 = false;
         self.revision.0 += 1;
         true
@@ -162,6 +164,7 @@ impl Simulation<'_> {
             deltas: [0; 3],
         };
         self.playing.0 = false;
+        self.history_selection.0 = None;
         self.history.0.clear();
         self.history.1.clear();
         self.history.record(0, summary.aphids, summary.ladybugs);

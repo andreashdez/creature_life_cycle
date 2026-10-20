@@ -13,12 +13,428 @@ use crate::panel::*;
 use crate::params::*;
 use crate::run_control::*;
 use crate::simulation::*;
+use crate::summary::*;
 use bevy::ecs::system::RunSystemOnce;
+use bevy::feathers::controls::NumberInputValue;
 use bevy::input::mouse::MouseScrollUnit;
 use bevy::input_focus::InputFocus;
 use bevy::prelude::*;
 use bevy::text::EditableText;
 use creature_life_cycle::{Coordinates, CreatureSnapshot, CreatureSnapshotKind, Random};
+
+/// Speed changes restart the interval without advancing, resuming, or resetting
+/// the simulation, and shortcuts retain their existing bounds.
+#[test]
+fn speed_selection_preserves_playback_and_shortcut_limits() {
+    let mut world = world_mid_run();
+    for playing in [true, false] {
+        world.resource_mut::<Playing>().0 = playing;
+        for seconds in SPEED_PRESETS {
+            world
+                .resource_mut::<StepTimer>()
+                .0
+                .tick(std::time::Duration::from_millis(10));
+            run_action(&mut world, RunAction::SetSpeed(seconds));
+            assert_eq!(
+                world.resource::<StepTimer>().0.duration().as_secs_f32(),
+                seconds
+            );
+            assert_eq!(world.resource::<StepTimer>().0.elapsed_secs(), 0.0);
+            assert_eq!(world.resource::<Playing>().0, playing);
+            assert_eq!(world.resource::<Stats>().turn, 12);
+            assert_eq!(world.resource::<History>().0.len(), 12);
+            assert_eq!(world.resource::<Revision>().0, 0);
+        }
+    }
+    run_action(&mut world, RunAction::Faster);
+    assert_eq!(
+        world.resource::<StepTimer>().0.duration().as_secs_f32(),
+        0.05
+    );
+    for _ in 0..10 {
+        run_action(&mut world, RunAction::Slower);
+    }
+    assert_eq!(
+        world.resource::<StepTimer>().0.duration().as_secs_f32(),
+        4.0
+    );
+    run_action(&mut world, RunAction::SetSpeed(STEP_SECONDS));
+    run_action(&mut world, RunAction::Faster);
+    assert_eq!(
+        world.resource::<StepTimer>().0.duration().as_secs_f32(),
+        STEP_SECONDS / 2.0
+    );
+    for invalid in [f32::NAN, f32::INFINITY, 0.0, -1.0] {
+        run_action(&mut world, RunAction::SetSpeed(invalid));
+        assert_eq!(
+            world.resource::<StepTimer>().0.duration().as_secs_f32(),
+            STEP_SECONDS / 2.0
+        );
+    }
+}
+
+/// Exercise the real popup hierarchy and native keyboard observers, including
+/// dismissal and the distinction between focused and currently selected speeds.
+#[test]
+fn speed_menu_navigates_selects_and_restores_focus() {
+    use bevy::feathers::theme::UiTheme;
+    use bevy::input::ButtonState;
+    use bevy::input::keyboard::{Key, KeyboardInput};
+    use bevy::input_focus::{FocusCause, FocusedInput, InputFocusVisible};
+    use bevy::ui_widgets::{Activate, MenuPlugin};
+
+    let mut app = App::new();
+    app.add_plugins((
+        bevy::app::TaskPoolPlugin::default(),
+        AssetPlugin::default(),
+        bevy::scene::ScenePlugin,
+        MenuPlugin,
+    ))
+    .init_asset::<Image>()
+    .init_asset::<bevy::text::Font>()
+    .init_resource::<UiTheme>()
+    .init_resource::<InputFocus>()
+    .init_resource::<InputFocusVisible>()
+    .add_message::<RunAction>()
+    .insert_resource(StepTimer(Timer::from_seconds(
+        STEP_SECONDS,
+        TimerMode::Repeating,
+    )));
+    let world = app.world_mut();
+    world.spawn_scene(speed_menu()).unwrap();
+    world.flush();
+    let window = world.spawn(Window::default()).id();
+    // The headless fixture supplies the visibility propagation normally done by rendering.
+    for mut visibility in world.query::<&mut InheritedVisibility>().iter_mut(world) {
+        *visibility = InheritedVisibility::VISIBLE;
+    }
+    let button = world
+        .query_filtered::<Entity, With<SpeedMenuButton>>()
+        .single(world)
+        .unwrap();
+    let popup = world
+        .query_filtered::<Entity, With<SpeedMenuPopup>>()
+        .single(world)
+        .unwrap();
+    let items: Vec<_> = world.get::<Children>(popup).unwrap().iter().collect();
+    assert_eq!(items.len(), SPEED_PRESETS.len());
+    world.run_system_once(sync_speed_menu).unwrap();
+    let marked: Vec<_> = world
+        .query::<(&SpeedOptionLabel, &Text)>()
+        .iter(world)
+        .filter(|(_, text)| text.0.starts_with('•'))
+        .map(|(option, _)| option.0)
+        .collect();
+    assert_eq!(marked, vec![STEP_SECONDS]);
+    world
+        .resource_mut::<InputFocus>()
+        .set(button, FocusCause::Navigated);
+    world.trigger(Activate { entity: button });
+    world.flush();
+    app.update();
+    assert_eq!(
+        app.world().get::<Visibility>(popup),
+        Some(&Visibility::Visible)
+    );
+    assert_eq!(app.world().resource::<InputFocus>().get(), Some(items[0]));
+
+    let key = |world: &mut World, code, logical_key| {
+        let entity = world.resource::<InputFocus>().get().unwrap();
+        world.trigger(FocusedInput::new(
+            entity,
+            KeyboardInput {
+                key_code: code,
+                logical_key,
+                state: ButtonState::Pressed,
+                text: None,
+                repeat: false,
+                window,
+            },
+            window,
+        ));
+        world.flush();
+    };
+    for (code, logical, index) in [
+        (KeyCode::End, Key::End, 7),
+        (KeyCode::Home, Key::Home, 0),
+        (KeyCode::ArrowDown, Key::ArrowDown, 1),
+    ] {
+        key(app.world_mut(), code, logical);
+        assert_eq!(
+            app.world().resource::<InputFocus>().get(),
+            Some(items[index])
+        );
+    }
+    key(app.world_mut(), KeyCode::Enter, Key::Enter);
+    assert_eq!(
+        app.world().get::<Visibility>(popup),
+        Some(&Visibility::Hidden)
+    );
+    assert_eq!(app.world().resource::<InputFocus>().get(), Some(button));
+    let actions: Vec<_> = app
+        .world_mut()
+        .resource_mut::<Messages<RunAction>>()
+        .drain()
+        .collect();
+    assert!(matches!(actions.as_slice(), [RunAction::SetSpeed(2.0)]));
+    app.update();
+    key(app.world_mut(), KeyCode::ArrowDown, Key::ArrowDown);
+    app.update();
+    key(app.world_mut(), KeyCode::Escape, Key::Escape);
+    assert_eq!(
+        app.world().get::<Visibility>(popup),
+        Some(&Visibility::Hidden)
+    );
+    assert_eq!(app.world().resource::<InputFocus>().get(), Some(button));
+    assert!(app.world().resource::<Messages<RunAction>>().is_empty());
+    app.update();
+    app.world_mut().trigger(Activate { entity: button });
+    app.update();
+    app.world_mut().resource_mut::<InputFocus>().clear();
+    app.update();
+    assert_eq!(
+        app.world().get::<Visibility>(popup),
+        Some(&Visibility::Hidden)
+    );
+
+    // Shortcuts can produce intermediate speeds; don't mark an unrelated preset.
+    let world = app.world_mut();
+    world
+        .resource_mut::<StepTimer>()
+        .0
+        .set_duration(std::time::Duration::from_secs_f32(0.225));
+    world.run_system_once(sync_speed_menu).unwrap();
+    assert!(
+        world
+            .query_filtered::<&Text, With<SpeedOptionLabel>>()
+            .iter(world)
+            .all(|text| !text.0.starts_with('•'))
+    );
+}
+
+/// Rows must distinguish repeated parameter names and retain exact before/after values.
+#[test]
+fn event_details_name_species_and_include_rules_and_extinctions() {
+    let mut event = HistoryEvent {
+        turn: 42,
+        ..default()
+    };
+    event.changes[0] = Some((0.7, 0.123456789));
+    event.changes[4] = Some((0.5, 0.6));
+    event.extinctions = [true, true];
+    assert_eq!(
+        event.details(),
+        "Turn 42\nAphid movement: 70% → 12.3456789%\nLadybug movement: 50% → 60%\nAphids became extinct\nLadybugs became extinct"
+    );
+}
+
+/// The real Feathers list must keep its rows and keyboard target stable as
+/// history advances, update coalesced events, and clear stale selections.
+#[test]
+fn event_list_selects_updates_and_expires_without_losing_row_identity() {
+    use bevy::feathers::theme::UiTheme;
+    use bevy::input::ButtonState;
+    use bevy::input::keyboard::{Key, KeyboardInput};
+    use bevy::input_focus::{FocusCause, FocusGained, FocusedInput, InputFocusVisible};
+    use bevy::ui::Selected;
+    use bevy::ui_widgets::{Activate, ActiveDescendant, ListBoxPlugin};
+
+    let mut app = App::new();
+    app.add_plugins((
+        bevy::app::TaskPoolPlugin::default(),
+        AssetPlugin::default(),
+        bevy::scene::ScenePlugin,
+        ListBoxPlugin,
+    ))
+    .init_asset::<Image>()
+    .init_asset::<bevy::text::Font>()
+    .init_resource::<UiTheme>()
+    .init_resource::<InputFocus>()
+    .init_resource::<InputFocusVisible>()
+    .init_resource::<History>()
+    .init_resource::<HistorySelection>()
+    .init_resource::<ChartPanel>()
+    .add_observer(pin_history_event);
+    let world = app.world_mut();
+    world.spawn_scene(event_list()).unwrap();
+    world.flush();
+    let sync = world.register_system(sync_event_list);
+    world.run_system(sync).unwrap();
+    let list = world
+        .query_filtered::<Entity, With<EventList>>()
+        .single(world)
+        .unwrap();
+    let body = world
+        .query_filtered::<Entity, With<EventListBody>>()
+        .single(world)
+        .unwrap();
+    assert_eq!(world.get::<Node>(list).unwrap().display, Display::None);
+    {
+        let mut history = world.resource_mut::<History>();
+        for turn in 0..HISTORY_LIMIT {
+            history.record(turn, turn, 3);
+        }
+        history.event(0).changes[3] = Some((0.2, 0.35));
+        history.event(100).extinctions[1] = true;
+    }
+    world.run_system(sync).unwrap();
+    let rows: Vec<_> = world.get::<Children>(body).unwrap().iter().collect();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(world.get::<EventRow>(rows[0]).unwrap().0.turn, 100);
+    assert_eq!(world.get::<EventRow>(rows[1]).unwrap().0.turn, 0);
+
+    world
+        .resource_mut::<InputFocus>()
+        .set(list, FocusCause::Navigated);
+    world.trigger(FocusGained {
+        entity: list,
+        cause: FocusCause::Navigated,
+    });
+    world.flush();
+    for (code, logical) in [(KeyCode::End, Key::End), (KeyCode::Enter, Key::Enter)] {
+        world.trigger(FocusedInput::new(
+            list,
+            KeyboardInput {
+                key_code: code,
+                logical_key: logical,
+                state: ButtonState::Pressed,
+                text: None,
+                repeat: false,
+                window: Entity::PLACEHOLDER,
+            },
+            Entity::PLACEHOLDER,
+        ));
+        world.flush();
+    }
+    world.run_system(sync).unwrap();
+    assert_eq!(world.resource::<HistorySelection>().0, Some(0));
+    assert!(world.entity(rows[1]).contains::<Selected>());
+    assert!(!world.entity(rows[0]).contains::<Selected>());
+    // Reselecting an already-selected row reopens a collapsed chart.
+    world.resource_mut::<ChartPanel>().collapsed = true;
+    world.trigger(FocusedInput::new(
+        list,
+        KeyboardInput {
+            key_code: KeyCode::Enter,
+            logical_key: Key::Enter,
+            state: ButtonState::Pressed,
+            text: None,
+            repeat: false,
+            window: Entity::PLACEHOLDER,
+        },
+        Entity::PLACEHOLDER,
+    ));
+    world.flush();
+    assert!(!world.resource::<ChartPanel>().collapsed);
+
+    world.resource_mut::<History>().1[0].changes[3] = Some((0.2, 0.45));
+    world.run_system(sync).unwrap();
+    assert_eq!(
+        world
+            .get::<Children>(body)
+            .unwrap()
+            .iter()
+            .collect::<Vec<_>>(),
+        rows
+    );
+    let text = world
+        .get::<Children>(rows[1])
+        .unwrap()
+        .iter()
+        .find_map(|child| world.get::<Text>(child))
+        .unwrap();
+    assert!(text.0.contains("20% → 45%"));
+    assert_eq!(
+        world.get::<ActiveDescendant>(list).unwrap().0,
+        Some(rows[1])
+    );
+
+    // Expiry removes the selected oldest turn and repairs the keyboard target.
+    world.resource_mut::<History>().record(HISTORY_LIMIT, 2, 3);
+    world.run_system(sync).unwrap();
+    assert_eq!(world.resource::<HistorySelection>().0, None);
+    assert!(world.get_entity(rows[1]).is_err());
+    assert_eq!(
+        world.get::<ActiveDescendant>(list).unwrap().0,
+        Some(rows[0])
+    );
+    // Clear pin returns to hover, including when activated from the real button.
+    world.trigger(bevy::ui_widgets::SetSelected {
+        entity: list,
+        row: rows[0],
+    });
+    world.flush();
+    world.run_system(sync).unwrap();
+    let clear = world
+        .query_filtered::<Entity, With<ClearHistoryPin>>()
+        .single(world)
+        .unwrap();
+    world.trigger(Activate { entity: clear });
+    world.flush();
+    world.run_system(sync).unwrap();
+    assert_eq!(world.resource::<HistorySelection>().0, None);
+    assert!(!world.entity(rows[0]).contains::<Selected>());
+    // Removing the last event restores the empty state rather than stale text.
+    world.resource_mut::<History>().1.clear();
+    world.run_system(sync).unwrap();
+    assert_eq!(world.get::<Node>(list).unwrap().display, Display::None);
+}
+
+/// A pin follows its turn as the rolling deque shifts and also works at turn zero.
+#[test]
+fn pinned_chart_readout_follows_turns_and_clears_when_the_event_disappears() {
+    let mut world = World::new();
+    world.spawn(Window::default());
+    world.insert_resource(ChartSize(600.0, 260.0));
+    world.init_resource::<ChartHover>();
+    world.init_resource::<History>();
+    world.insert_resource(HistorySelection(Some(0)));
+    world.resource_mut::<History>().record(0, 5, 2);
+    world.resource_mut::<History>().event(0).changes[0] = Some((0.7, 0.8));
+    world.run_system_once(chart_hover).unwrap();
+    assert_eq!(world.resource::<ChartHover>().0, Some(0));
+    let label = world
+        .spawn((ChartLabel::TooltipTurn, Node::default(), Text::default()))
+        .id();
+    world.run_system_once(update_chart_labels).unwrap();
+    assert_eq!(world.get::<Text>(label).unwrap().0, "turn 0 · pinned");
+    assert_eq!(world.get::<Node>(label).unwrap().display, Display::Flex);
+    {
+        let mut history = world.resource_mut::<History>();
+        for turn in 1..HISTORY_LIMIT {
+            history.record(turn, turn, 2);
+        }
+        history.event(100).extinctions[1] = true;
+    }
+    world.resource_mut::<HistorySelection>().0 = Some(100);
+    world.run_system_once(chart_hover).unwrap();
+    assert_eq!(world.resource::<ChartHover>().0, Some(100));
+    world.resource_mut::<History>().record(HISTORY_LIMIT, 0, 0);
+    world.run_system_once(chart_hover).unwrap();
+    assert_eq!(world.resource::<ChartHover>().0, Some(99));
+    world.resource_mut::<History>().1.clear();
+    world.run_system_once(sync_event_list).unwrap();
+    world.run_system_once(chart_hover).unwrap();
+    assert_eq!(world.resource::<HistorySelection>().0, None);
+    assert_eq!(world.resource::<ChartHover>().0, None);
+}
+
+/// Restored history is selectable again, but Undo must not resurrect an old pin.
+#[test]
+fn reset_edit_and_undo_clear_event_pins() {
+    let mut world = world_mid_run();
+    world.resource_mut::<History>().event(11).changes[0] = Some((0.7, 0.8));
+    world.resource_mut::<HistorySelection>().0 = Some(11);
+    edit(&mut world, 1, 1, EditTool::Aphid, EditAction::Add);
+    assert_eq!(world.resource::<HistorySelection>().0, None);
+    world.resource_mut::<HistorySelection>().0 = Some(0);
+    run_action(&mut world, RunAction::Undo);
+    assert_eq!(world.resource::<HistorySelection>().0, None);
+    assert_eq!(world.resource::<History>().1[0].turn, 11);
+    world.resource_mut::<HistorySelection>().0 = Some(11);
+    run_action(&mut world, RunAction::Reset);
+    assert_eq!(world.resource::<HistorySelection>().0, None);
+}
 
 #[test]
 fn percentages_validate_bounds_and_format_readably() {
@@ -39,7 +455,11 @@ fn percentage_fields_commit_on_enter_or_blur_and_reject_invalid_drafts() {
     world.init_resource::<InputFocus>();
     world.init_resource::<ButtonInput<KeyCode>>();
     world.init_resource::<Messages<ParameterReset>>();
-    let field = world.spawn((ProbField(0), EditableText::default())).id();
+    let initial = world.resource::<Params>().get(0) * 100.0;
+    let root = world
+        .spawn((ProbField(0), NumberInputValue::F64(initial)))
+        .id();
+    let field = world.spawn((ChildOf(root), EditableText::default())).id();
     let system = world.register_system(commit_parameter_fields);
     world
         .resource_mut::<InputFocus>()
@@ -94,7 +514,11 @@ fn restoring_a_parameter_group_wins_over_its_pending_draft() {
     world.init_resource::<InputFocus>();
     world.init_resource::<ButtonInput<KeyCode>>();
     world.init_resource::<Messages<ParameterReset>>();
-    let field = world.spawn((ProbField(0), EditableText::default())).id();
+    let initial = world.resource::<Params>().get(0) * 100.0;
+    let root = world
+        .spawn((ProbField(0), NumberInputValue::F64(initial)))
+        .id();
+    let field = world.spawn((ChildOf(root), EditableText::default())).id();
     let system = world.register_system(commit_parameter_fields);
     world.resource_mut::<Params>().set(4, 0.33);
     world
@@ -116,6 +540,318 @@ fn restoring_a_parameter_group_wins_over_its_pending_draft() {
         );
     }
     assert_eq!(world.resource::<Params>().get(4), 0.33);
+}
+
+/// Exercise the actual number scene, including its native Enter and blur
+/// observers, rather than only the app's validation helper.
+#[test]
+fn native_percentage_input_preserves_precision_and_rejects_invalid_values() {
+    use bevy::feathers::controls::UnitsRegistry;
+    use bevy::feathers::theme::UiTheme;
+    use bevy::input::ButtonState;
+    use bevy::input::keyboard::{Key, KeyboardInput};
+    use bevy::input_focus::{FocusLost, FocusedInput};
+    use bevy::ui_widgets::ValueChange;
+
+    let mut app = App::new();
+    app.add_plugins((
+        bevy::app::TaskPoolPlugin::default(),
+        AssetPlugin::default(),
+        bevy::scene::ScenePlugin,
+    ))
+    .init_asset::<Image>()
+    .init_asset::<bevy::text::Font>();
+    let world = app.world_mut();
+    world.init_resource::<Params>();
+    world.init_resource::<StatusLine>();
+    world.init_resource::<InputFocus>();
+    world.init_resource::<UiTheme>();
+    world.init_resource::<UnitsRegistry>();
+    world.init_resource::<ButtonInput<KeyCode>>();
+    world.init_resource::<Messages<ParameterReset>>();
+    world.insert_resource(SavedParams(*world.resource::<Params>()));
+    let initial = 0.123456789012345;
+    world.resource_mut::<Params>().set(0, initial);
+    world.spawn_scene(param_row(0, initial)).unwrap();
+    let root = world
+        .query_filtered::<Entity, With<ProbField>>()
+        .single(world)
+        .unwrap();
+    let text = world
+        .query::<(Entity, &ChildOf, &EditableText)>()
+        .iter(world)
+        .find(|(_, parent, _)| parent.parent() == root)
+        .unwrap()
+        .0;
+    let commit = world.register_system(commit_parameter_fields);
+    world
+        .resource_mut::<InputFocus>()
+        .set(text, bevy::input_focus::FocusCause::Navigated);
+    world.run_system(commit).unwrap();
+
+    for (draft, expected) in [
+        (percentage_text(initial), initial),
+        ("12.3456789".into(), 0.123456789),
+        ("101".into(), 0.123456789),
+        ("NaN".into(), 0.123456789),
+        ("invalid".into(), 0.123456789),
+        ("".into(), 0.123456789),
+        ("0".into(), 0.0),
+        ("100".into(), 1.0),
+    ] {
+        world
+            .get_mut::<EditableText>(text)
+            .unwrap()
+            .editor
+            .set_text(&draft);
+        world.trigger(FocusedInput::new(
+            text,
+            KeyboardInput {
+                key_code: KeyCode::Enter,
+                logical_key: Key::Enter,
+                state: ButtonState::Pressed,
+                text: None,
+                repeat: false,
+                window: Entity::PLACEHOLDER,
+            },
+            Entity::PLACEHOLDER,
+        ));
+        // Native observers enqueue commands; the real input schedule flushes
+        // them before the app's Update systems commit or reset a draft.
+        world.flush();
+        world
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::Enter);
+        world.run_system(commit).unwrap();
+        world.resource_mut::<ButtonInput<KeyCode>>().reset_all();
+        world.run_system_once(sync_parameter_widgets).unwrap();
+        assert_eq!(world.resource::<Params>().get(0), expected, "{draft}");
+        assert_eq!(
+            *world.get::<NumberInputValue>(root).unwrap(),
+            NumberInputValue::F64(expected * 100.0)
+        );
+        assert_eq!(
+            world.get::<EditableText>(text).unwrap().value().to_string(),
+            percentage_text(expected)
+        );
+    }
+    // Dragging emits intermediate f64 values; the field and model must follow them.
+    world.trigger(ValueChange {
+        source: root,
+        value: 44.4_f64,
+        is_final: false,
+    });
+    world.run_system_once(sync_parameter_widgets).unwrap();
+    assert_eq!(world.resource::<Params>().get(0), 44.4 / 100.0);
+    assert_eq!(
+        *world.get::<NumberInputValue>(root).unwrap(),
+        NumberInputValue::F64(44.4)
+    );
+
+    // A real step-button activation followed by blur must retain the step.
+    let plus = world
+        .query::<(Entity, &ProbStep)>()
+        .iter(world)
+        .find(|(_, step)| step.0 == 0 && step.1 > 0.0)
+        .unwrap()
+        .0;
+    world.trigger(bevy::ui_widgets::Activate { entity: plus });
+    world.flush();
+    world.resource_mut::<InputFocus>().clear();
+    world.run_system(commit).unwrap();
+    world.trigger(FocusLost { entity: text });
+    world.flush();
+    assert_eq!(world.resource::<Params>().get(0), 0.445);
+
+    world
+        .get_mut::<EditableText>(text)
+        .unwrap()
+        .editor
+        .set_text("25");
+    world.resource_mut::<InputFocus>().clear();
+    world.write_message(ParameterReset(0, 4));
+    world.run_system(commit).unwrap();
+    world.trigger(FocusLost { entity: text });
+    world.flush();
+    assert_eq!(world.resource::<Params>().get(0), Params::default().get(0));
+}
+
+/// A small app runs the native tab observers and derived accessibility state.
+#[test]
+fn properties_tabs_navigate_and_follow_edit_shortcuts() {
+    use bevy::input::ButtonState;
+    use bevy::input::keyboard::{Key, KeyboardInput};
+    use bevy::input_focus::tab_navigation::TabIndex;
+    use bevy::input_focus::{FocusCause, FocusedInput, InputFocusVisible};
+    use bevy::ui::Selected;
+    use bevy::ui_widgets::{SelectedTab, Tab, TabActivation, TabList, TabPlugin};
+
+    let mut app = App::new();
+    app.add_plugins(TabPlugin)
+        .init_resource::<InputFocus>()
+        .init_resource::<InputFocusVisible>()
+        .init_resource::<ActiveTab>()
+        .init_resource::<PropertiesPanel>()
+        .add_systems(Update, sync_sidebar);
+    let world = app.world_mut();
+    let window = world.spawn_empty().id();
+    let list = world
+        .spawn((
+            PropertiesTabs,
+            TabList {
+                activation: TabActivation::Automatic,
+                ..default()
+            },
+        ))
+        .observe(select_properties_tab)
+        .id();
+    let tabs: Vec<_> = [PanelTab::Overview, PanelTab::Parameters, PanelTab::Edit]
+        .into_iter()
+        .map(|tab| {
+            world
+                .spawn((Tab, TabButton(tab), BorderColor::default(), ChildOf(list)))
+                .id()
+        })
+        .collect();
+    let pages: Vec<_> = [PanelTab::Overview, PanelTab::Parameters, PanelTab::Edit]
+        .into_iter()
+        .map(|tab| world.spawn((TabPage(tab), Node::default())).id())
+        .collect();
+    let scroll = world.spawn((PanelRoot, ScrollPosition::default())).id();
+    world
+        .resource_mut::<InputFocus>()
+        .set(tabs[0], FocusCause::Navigated);
+    app.update();
+    assert_eq!(
+        app.world().get::<SelectedTab>(list).unwrap().0,
+        Some(tabs[0])
+    );
+
+    for (code, key, expected) in [
+        (KeyCode::ArrowRight, Key::ArrowRight, 1),
+        (KeyCode::End, Key::End, 2),
+        (KeyCode::Home, Key::Home, 0),
+        (KeyCode::ArrowLeft, Key::ArrowLeft, 2),
+    ] {
+        let world = app.world_mut();
+        world.get_mut::<ScrollPosition>(scroll).unwrap().y = 50.0;
+        let focused = world.resource::<InputFocus>().get().unwrap();
+        world.trigger(FocusedInput::new(
+            focused,
+            KeyboardInput {
+                key_code: code,
+                logical_key: key,
+                state: ButtonState::Pressed,
+                text: None,
+                repeat: false,
+                window,
+            },
+            window,
+        ));
+        app.update();
+        let world = app.world();
+        assert_eq!(world.resource::<InputFocus>().get(), Some(tabs[expected]));
+        assert_eq!(
+            world.get::<SelectedTab>(list).unwrap().0,
+            Some(tabs[expected])
+        );
+        assert_eq!(world.get::<ScrollPosition>(scroll).unwrap().y, 0.0);
+        for (index, tab) in tabs.iter().enumerate() {
+            assert_eq!(world.entity(*tab).contains::<Selected>(), index == expected);
+            assert_eq!(
+                world.get::<TabIndex>(*tab).unwrap().0,
+                if index == expected { 0 } else { -1 }
+            );
+            assert_eq!(
+                world.get::<Node>(pages[index]).unwrap().display,
+                if index == expected {
+                    Display::Flex
+                } else {
+                    Display::None
+                }
+            );
+        }
+    }
+    // Global edit shortcuts write ActiveTab and clear focus. The native strip
+    // must reflect that state when it becomes visible again.
+    app.world_mut().resource_mut::<InputFocus>().clear();
+    app.world_mut().resource_mut::<ActiveTab>().0 = PanelTab::Parameters;
+    app.update();
+    assert_eq!(
+        app.world().get::<SelectedTab>(list).unwrap().0,
+        Some(tabs[1])
+    );
+    assert_eq!(app.world().get::<TabIndex>(tabs[1]).unwrap().0, 0);
+}
+
+/// Home and Space in native navigation widgets must not also control the board.
+#[test]
+fn focused_properties_navigation_owns_home_and_space() {
+    let mut world = world_mid_run();
+    world.init_resource::<InputFocus>();
+    world.init_resource::<FoodOverlay>();
+    world.init_resource::<BoardView>();
+    world.init_resource::<ActiveTab>();
+    world.init_resource::<PropertiesPanel>();
+    let tab = world.spawn(bevy::ui_widgets::Tab).id();
+    world
+        .resource_mut::<InputFocus>()
+        .set(tab, bevy::input_focus::FocusCause::Navigated);
+    let mut keys = ButtonInput::<KeyCode>::default();
+    keys.press(KeyCode::Home);
+    keys.press(KeyCode::Space);
+    world.insert_resource(keys);
+    world.run_system_once(keyboard_controls).unwrap();
+    assert!(world.resource::<Messages<RunAction>>().is_empty());
+    let list = world.spawn(bevy::ui_widgets::ListBox).id();
+    world
+        .resource_mut::<InputFocus>()
+        .set(list, bevy::input_focus::FocusCause::Navigated);
+    world.run_system_once(keyboard_controls).unwrap();
+    assert!(world.resource::<Messages<RunAction>>().is_empty());
+    let item = world.spawn(bevy::ui_widgets::MenuItem).id();
+    world
+        .resource_mut::<InputFocus>()
+        .set(item, bevy::input_focus::FocusCause::Navigated);
+    world.run_system_once(keyboard_controls).unwrap();
+    assert!(world.resource::<Messages<RunAction>>().is_empty());
+
+    // Native Escape restores the trigger before our shortcut system runs.
+    world.spawn(bevy::ui_widgets::MenuFocusState::Open);
+    let button = world.spawn(bevy::ui_widgets::MenuButton).id();
+    world
+        .resource_mut::<InputFocus>()
+        .set(button, bevy::input_focus::FocusCause::Navigated);
+    world.resource_mut::<ButtonInput<KeyCode>>().reset_all();
+    world
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .press(KeyCode::Escape);
+    world.run_system_once(keyboard_controls).unwrap();
+    assert_eq!(world.resource::<InputFocus>().get(), Some(button));
+}
+
+/// Explicit row text must stay legible in every native selection/hover state.
+#[test]
+fn event_row_text_meets_contrast_on_native_list_surfaces() {
+    use bevy::feathers::{
+        dark_theme::create_dark_theme,
+        theme::{SurfaceLevel, UiTheme},
+        tokens,
+    };
+    let theme = UiTheme(create_dark_theme());
+    let luminance = |color: Color| {
+        let linear = color.to_linear();
+        0.2126 * linear.red + 0.7152 * linear.green + 0.0722 * linear.blue
+    };
+    let ink = luminance(INK_PRIMARY);
+    for token in [
+        tokens::LISTROW_BG,
+        tokens::LISTROW_BG_HOVER,
+        tokens::LISTROW_BG_SELECTED,
+    ] {
+        let surface = luminance(theme.context_color(&token, SurfaceLevel::Base));
+        assert!((ink.max(surface) + 0.05) / (ink.min(surface) + 0.05) >= 4.5);
+    }
 }
 
 #[test]
@@ -335,6 +1071,7 @@ fn world_mid_run() -> World {
         history.record(turn, 5, 5);
     }
     let mut world = World::new();
+    world.init_resource::<HistorySelection>();
     world.insert_resource(StartingSetup(
         creature_life_cycle::format_simulation_config(&board),
     ));
@@ -503,7 +1240,7 @@ fn saving_writes_the_edited_board_and_makes_it_what_reset_restores() {
     assert!(status.success, "{}", status.message);
     assert_eq!(status.remaining, STATUS_SECONDS);
 
-    // The slider values reach the file even though `apply_params` never ran.
+    // The parameter values reach the file even though `apply_params` never ran.
     let saved = std::fs::read_to_string(
         config_home
             .join("creature_life_cycle")

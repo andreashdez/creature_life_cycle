@@ -122,16 +122,29 @@ one turn. Reset pauses and restores the last saved setup, or the board loaded at
 the current seed and probabilities. The sidebar's status line reports the outcome
 of the most recent save or seed change for a few seconds.
 
+The **Speed** dropdown offers 0.25, 0.5, 1, 2, 5, 10, and 20 turns/s, plus the
+launch default of about 2.22 turns/s. A bullet marks the current preset.
+Selecting a speed keeps playback running or paused as it was. The `[` / `]`
+shortcuts still halve or double the rate within 0.25–20 turns/s; the dropdown
+shows the resulting rate even between presets. Focus the dropdown and press
+Down to open it, use Up/Down or Home/End to navigate, and Enter or Space to
+select. Escape dismisses the menu and returns focus to its button.
+
 Use **Show properties** at the bottom left to open the right sidebar with
 **Overview**, **Parameters**, and **Edit** tabs. **Hide properties** (or **Hide**
 in the right sidebar) closes it. The board stays centered in the available space,
 with population history below it. Edit shortcuts open the properties sidebar.
+Tab enters the tab strip; Left/Right switch pages, and Home/End select the first
+or last page. Tab leaves the strip for the page controls. An underline marks the
+selected page, and a focus outline shows keyboard focus.
 
-Parameters are grouped by Aphids, Ladybugs, and Environment. Each parameter has a slider, an
+Parameters are grouped by Aphids, Ladybugs, and Environment. Each parameter has an
 editable percentage, and a short explanation. The ladybug prey life gain is not a probability and
 has no control here; it is set in the config file, and Save setup keeps it. Enter or leaving the field applies
 a value from 0 to 100; invalid input restores the previous value and reports an
-error. Sliders also support arrow-key adjustment. A bullet marks values changed
+error. The percentage fields also support horizontal dragging and − / +
+buttons in 0.1 percentage-point steps. Dragging and stepping use one decimal place; typed
+values retain finer precision. A bullet marks values changed
 from the saved setup, and each group has **Restore defaults** for the built-in
 values. A successful Save setup updates the saved-value baseline. The settings area scrolls
 with the wheel or its scrollbar, while the tabs and left sidebar stay visible.
@@ -194,6 +207,18 @@ mark a species becoming extinct on that turn. Hover to read population counts
 and event summaries. Changes to the same parameter between turns share one event;
 reverting them removes that change. Events expire with the rolling history and
 are restored along with history by edit Undo.
+
+Overview's **Events** list shows the newest turns first, with each changed
+parameter's before/after percentages and any extinctions. Select a row to pin
+the chart's crosshair and population readout at that turn, even while playback
+continues. Selecting a row opens a collapsed chart; it does not rewind or pause
+the simulation. **Clear pin** returns to hover inspection. Pins clear when their
+event expires or is reverted, and on Reset, a board edit, or Undo. An event at
+turn zero can be inspected before the first simulation step.
+
+The event list scrolls independently of the properties panel. Tab focuses it;
+Up/Down navigate rows, Home/End move to the first/last row, and Enter or Space
+pins the active row. These navigation keys do not also control the board.
 
 Use **Hide chart** / **Show chart** to give the board more room, the **Height − / +**
 buttons for smaller or larger charts, or drag the chart's top edge. Resizing keeps

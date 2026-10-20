@@ -50,6 +50,8 @@ pub enum RunAction {
     Reset,
     Slower,
     Faster,
+    /// Sets the seconds per turn without changing playback or advancing the board.
+    SetSpeed(f32),
     Fit,
     Save,
     Undo,
@@ -125,16 +127,19 @@ pub fn apply_run_actions(
                 timer.0.reset();
                 edit.enabled = false;
             }
-            RunAction::Slower | RunAction::Faster => {
-                let factor = if matches!(action, RunAction::Faster) {
-                    0.5
-                } else {
-                    2.0
+            RunAction::Slower | RunAction::Faster | RunAction::SetSpeed(_) => {
+                let seconds = match action {
+                    RunAction::SetSpeed(seconds) => *seconds,
+                    RunAction::Faster => timer.0.duration().as_secs_f32() * 0.5,
+                    _ => timer.0.duration().as_secs_f32() * 2.0,
                 };
-                let seconds = (timer.0.duration().as_secs_f32() * factor).clamp(0.05, 4.0);
+                // A malformed request must not panic Duration or stop the run.
+                if !seconds.is_finite() || seconds <= 0.0 {
+                    continue;
+                }
                 timer
                     .0
-                    .set_duration(std::time::Duration::from_secs_f32(seconds));
+                    .set_duration(std::time::Duration::from_secs_f32(seconds.clamp(0.05, 4.0)));
                 timer.0.reset();
             }
             // `save_setup` reads the same stream and owns this one, which keeps
@@ -233,7 +238,7 @@ pub fn save_setup(
         return;
     }
 
-    // The file records the parameters the board holds, so push the sliders'
+    // The file records the parameters the board holds, so push the controls'
     // current values in rather than depending on where this system is ordered
     // against `apply_params`.
     board.0.set_aphid_params(params.aphid);
