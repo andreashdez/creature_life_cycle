@@ -49,7 +49,7 @@ use crate::input::{BoardPointer, camera_controls, keyboard_controls};
 use crate::layout::layout_viewports;
 use crate::panel::{
     ActiveTab, PanelSections, PropertiesPanel, sync_board_view, sync_food_checkbox,
-    sync_panel_sections, sync_properties_panel, sync_scrollbar_visibility, sync_sidebar,
+    sync_panel_sections, sync_properties_panel, sync_sidebar,
 };
 use crate::params::{
     ParameterReset, apply_params, commit_parameter_fields, sync_parameter_widgets,
@@ -217,7 +217,6 @@ fn main() {
                     update_hud,
                     update_status_text,
                     update_cell_popup,
-                    sync_scrollbar_visibility,
                     sync_panel_sections,
                     update_edit_palette,
                     update_edit_preview,

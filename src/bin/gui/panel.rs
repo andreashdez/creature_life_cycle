@@ -12,8 +12,8 @@ use crate::run_control::{Reseed, RunAction, SEED_DIGITS, SeedField};
 use crate::summary::HudText;
 use crate::widgets::{run_button, ui_text};
 use bevy::feathers::controls::{
-    ButtonVariant, FeathersButton, FeathersCheckbox, FeathersScrollbar, FeathersTextInput,
-    FeathersTextInputContainer,
+    ButtonVariant, FeathersButton, FeathersCheckbox, FeathersDisclosureToggle, FeathersScrollbar,
+    FeathersTextInput, FeathersTextInputContainer,
 };
 use bevy::feathers::display::{label, label_small};
 use bevy::feathers::focus::FocusIndicator;
@@ -21,11 +21,15 @@ use bevy::feathers::theme::{ThemeBackgroundColor, ThemedText};
 use bevy::feathers::tokens;
 use bevy::input::mouse::MouseScrollUnit;
 use bevy::input_focus::InputFocus;
+use bevy::picking::cursor::EntityCursor;
+use bevy::picking::events::PointerClick;
+use bevy::picking::pointer::PointerButton;
 use bevy::prelude::*;
 use bevy::ui::Checked;
 use bevy::ui_widgets::{
-    Activate, ScrollArea, SelectedTab, Tab, TabActivation, TabList, ValueChange,
+    Activate, ScrollArea, SelectedTab, Tab, TabActivation, TabList, ToggleChecked, ValueChange,
 };
+use bevy::window::SystemCursorIcon;
 
 #[derive(Component, Clone, Default, FromTemplate)]
 pub struct ViewButton(pub BoardView);
@@ -33,7 +37,7 @@ pub struct ViewButton(pub BoardView);
 #[derive(Component, Clone, Default, FromTemplate)]
 pub struct FoodControls;
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
 pub enum PanelSection {
     #[default]
     Setup,
@@ -57,9 +61,6 @@ impl PanelSections {
 
 #[derive(Component, Clone, Default, FromTemplate)]
 pub struct SectionBody(pub PanelSection);
-
-#[derive(Component, Clone, Default, FromTemplate)]
-pub struct SectionLabel(pub PanelSection);
 
 #[derive(Component, Clone, Default, FromTemplate)]
 pub struct SectionToggle(pub PanelSection);
@@ -113,9 +114,6 @@ pub struct PropertiesTabs;
 
 #[derive(Component, Clone, FromTemplate)]
 pub struct TabButton(pub PanelTab);
-
-#[derive(Component, Clone, Default, FromTemplate)]
-pub struct PanelScrollbar;
 
 fn stat_row(caption: &'static str, index: usize) -> impl Scene {
     bsn! {
@@ -187,25 +185,55 @@ fn save_destination() -> String {
     format!("Writes to {shown}")
 }
 
-fn section_toggle(section: PanelSection) -> impl Scene {
-    bsn! {
-        @FeathersButton { @variant: ButtonVariant::Plain }
-        SectionToggle({section})
-        Node { margin: UiRect::top(px(16)), justify_content: JustifyContent::SpaceBetween }
-        on(move |_: On<Activate>, mut sections: ResMut<PanelSections>| {
-            match section {
-                PanelSection::Setup => sections.setup = !sections.setup,
-                PanelSection::Help => sections.help = !sections.help,
-            }
-        })
-        Children [@ui_text("", 16.0) SectionLabel({section})]
+impl PanelSection {
+    fn caption(self) -> &'static str {
+        match self {
+            PanelSection::Setup => "Run setup",
+            PanelSection::Help => "Controls & shortcuts",
+        }
     }
 }
 
+/// A native disclosure toggle carries the open state as `Checked`, so focus,
+/// Space/Enter, and assistive technology all see it. The toggle itself is only
+/// a 12px chevron; clicking the caption row toggles it through the same
+/// `ToggleChecked` path, keeping the whole row a target as the old button was.
+fn section_toggle(section: PanelSection) -> impl Scene {
+    bsn! {
+        Node {
+            margin: UiRect::top(px(16)), padding: UiRect::vertical(px(4)),
+            column_gap: px(8), align_items: AlignItems::Center,
+        }
+        EntityCursor::System(SystemCursorIcon::Pointer)
+        on(move |click: On<PointerClick>, toggles: Query<(Entity, &SectionToggle)>, mut commands: Commands| {
+            for (entity, toggle) in &toggles {
+                if toggle.0 == section && click.button == PointerButton::Primary {
+                    commands.trigger(ToggleChecked { entity });
+                }
+            }
+        })
+        Children [
+            @FeathersDisclosureToggle
+            SectionToggle({section})
+            on(move |change: On<ValueChange<bool>>, mut sections: ResMut<PanelSections>| {
+                match section {
+                    PanelSection::Setup => sections.setup = change.value,
+                    PanelSection::Help => sections.help = change.value,
+                }
+            })
+            --
+            @ui_text(section.caption(), 16.0)
+        ]
+    }
+}
+
+/// Shows open section bodies and mirrors `PanelSections` onto the toggles, so
+/// the chevron follows state changed from anywhere, not only its own clicks.
 pub fn sync_panel_sections(
+    mut commands: Commands,
     sections: Res<PanelSections>,
     mut bodies: Query<(&SectionBody, &mut Node)>,
-    mut labels: Query<(&SectionLabel, &mut Text)>,
+    toggles: Query<(Entity, &SectionToggle)>,
 ) {
     if !sections.is_changed() {
         return;
@@ -217,19 +245,8 @@ pub fn sync_panel_sections(
             Display::None
         };
     }
-    for (label, mut text) in &mut labels {
-        let caption = match label.0 {
-            PanelSection::Setup => "Run setup",
-            PanelSection::Help => "Controls & shortcuts",
-        };
-        text.0 = format!(
-            "{}  {caption}",
-            if sections.is_open(label.0) {
-                "−"
-            } else {
-                "+"
-            }
-        );
+    for (entity, toggle) in &toggles {
+        set_checked(&mut commands, entity, sections.is_open(toggle.0));
     }
 }
 
@@ -537,8 +554,8 @@ pub fn spawn_panel(
     commands.entity(root).add_child(scroll);
     let scrollbar = commands
         .spawn_scene(bsn! {
+            // Feathers hides the scrollbar itself while the content fits.
             @FeathersScrollbar { @target: {scroll} }
-            PanelScrollbar
             Node {
                 position_type: PositionType::Absolute,
                 right: px(8), top: px(PANEL_HEADER), bottom: px(16), width: px(8),
@@ -546,22 +563,6 @@ pub fn spawn_panel(
         })
         .id();
     commands.entity(root).add_child(scrollbar);
-}
-
-pub fn sync_scrollbar_visibility(
-    panel: Query<&ComputedNode, With<PanelRoot>>,
-    mut scrollbar: Query<&mut Visibility, With<PanelScrollbar>>,
-) {
-    if let Ok(node) = panel.single() {
-        let visible = if node.content_size().y > node.size().y + 1.0 {
-            Visibility::Inherited
-        } else {
-            Visibility::Hidden
-        };
-        for mut visibility in &mut scrollbar {
-            visibility.set_if_neq(visible);
-        }
-    }
 }
 
 /// Keep page visibility, underline, and native tab selection in agreement,

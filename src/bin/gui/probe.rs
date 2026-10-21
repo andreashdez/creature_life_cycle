@@ -27,7 +27,7 @@ use bevy::prelude::*;
 use bevy::render::view::window::screenshot::{Screenshot, save_to_disk};
 use bevy::text::EditableText;
 use bevy::ui::Checked;
-use bevy::ui_widgets::{Activate, SetSelected, ValueChange};
+use bevy::ui_widgets::{Activate, SetSelected, ToggleChecked, ValueChange};
 use creature_life_cycle::Coordinates;
 
 /// The screenshot probe can also verify the smallest supported window.
@@ -447,7 +447,7 @@ pub fn screenshot_probe(
             }
             for (entity, section) in &sections {
                 if matches!(section.0, PanelSection::Setup) {
-                    commands.trigger(Activate { entity });
+                    commands.trigger(ToggleChecked { entity });
                 }
             }
             if let Ok((_, _, mut projection, _)) = board_cameras.single_mut()
@@ -487,7 +487,7 @@ pub fn screenshot_probe(
             }
             for (entity, section) in &sections {
                 if matches!(section.0, PanelSection::Setup) {
-                    commands.trigger(Activate { entity });
+                    commands.trigger(ToggleChecked { entity });
                 }
             }
             if let Ok((mut position, _)) = panel.single_mut() {
