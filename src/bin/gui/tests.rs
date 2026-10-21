@@ -854,6 +854,33 @@ fn event_row_text_meets_contrast_on_native_list_surfaces() {
     }
 }
 
+/// The chart's surface and gray steps are copied from feathers as sRGB bytes,
+/// and every contrast figure in `chart.rs` is measured against them. Fail on a
+/// feathers upgrade that moves the theme instead of letting the copies drift.
+#[test]
+fn chart_palette_matches_feathers_theme() {
+    use bevy::feathers::{dark_theme::create_dark_theme, palette, theme::UiTheme, tokens};
+    let theme = UiTheme(create_dark_theme());
+    let bytes = |color: Color| color.to_srgba().to_u8_array();
+    for (name, copy, source) in [
+        (
+            "CHART_SURFACE",
+            CHART_SURFACE,
+            theme.color(&tokens::WINDOW_BG),
+        ),
+        ("TOOLTIP_BG", TOOLTIP_BG, palette::GRAY_1),
+        ("GRIDLINE", GRIDLINE, palette::GRAY_2),
+        ("BASELINE", BASELINE, palette::GRAY_3),
+    ] {
+        let (copy, source) = (bytes(copy), bytes(source));
+        // Allow one step per channel for rounding out of OKLCH.
+        assert!(
+            copy.iter().zip(source).all(|(a, b)| a.abs_diff(b) <= 1),
+            "{name} is {copy:?} but feathers now uses {source:?}"
+        );
+    }
+}
+
 #[test]
 fn chart_events_coalesce_rule_changes_and_disappear_when_reverted() {
     let mut world = world_mid_run();
