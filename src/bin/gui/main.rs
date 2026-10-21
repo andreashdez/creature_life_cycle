@@ -52,7 +52,7 @@ use crate::panel::{
     sync_panel_sections, sync_properties_panel, sync_sidebar,
 };
 use crate::params::{
-    ParameterReset, apply_params, commit_parameter_fields, sync_parameter_widgets,
+    ParameterReset, apply_params, percent_units, reset_parameters, sync_parameter_widgets,
 };
 use crate::probe::{ScreenshotProbe, review_window_size, screenshot_probe};
 use crate::run_control::{
@@ -92,6 +92,7 @@ fn main() {
         .add_plugins(board_render_assets)
         .add_plugins(Material2dPlugin::<CellMaterial>::default())
         .add_plugins(FeathersPlugins)
+        .add_plugins(percent_units)
         .insert_resource(UiTheme(create_dark_theme()))
         // Gridlines and series need different widths, and gizmo width is set per
         // group, so they are two groups. Both live on the chart's render layer.
@@ -186,7 +187,7 @@ fn main() {
                     apply_cell_edits,
                     exclusive_play_and_edit,
                     sync_edit_controls,
-                    commit_parameter_fields,
+                    reset_parameters,
                     apply_params,
                     // After the edits and parameters have landed, so a save
                     // writes the board as it is on screen, and before the next

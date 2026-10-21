@@ -95,8 +95,10 @@ editable percentage and a short explanation. The ladybug prey life
 gain is not a probability and has no control here. Set it in the
 [config file](configuration.qd); Save setup keeps whatever value was loaded.
 
-- .keybinding {Enter} or leaving the field applies a value from 0 to 100.
-- Invalid input restores the previous value and reports an error.
+- .keybinding {Enter} or leaving the field applies the value. Each field
+  shows a % suffix; typing it is optional.
+- Values outside 0 to 100 are clamped to the nearest end, so 150 becomes 100.
+  Text that is not a number is replaced by the previous value.
 - Drag a percentage horizontally to adjust it with one decimal place, or use
   its − / + buttons for 0.1 percentage-point steps.
 - Typed values retain finer precision; focusing a field does not round it.

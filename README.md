@@ -141,8 +141,9 @@ selected page, and a focus outline shows keyboard focus.
 Parameters are grouped by Aphids, Ladybugs, and Environment. Each parameter has an
 editable percentage, and a short explanation. The ladybug prey life gain is not a probability and
 has no control here; it is set in the config file, and Save setup keeps it. Enter or leaving the field applies
-a value from 0 to 100; invalid input restores the previous value and reports an
-error. The percentage fields also support horizontal dragging and − / +
+the value. Values outside 0 to 100 are clamped to the nearest end, and text
+that is not a number is replaced by the previous value. Each field shows a %
+suffix; typing it is optional. The percentage fields also support horizontal dragging and − / +
 buttons in 0.1 percentage-point steps. Dragging and stepping use one decimal place; typed
 values retain finer precision. A bullet marks values changed
 from the saved setup, and each group has **Restore defaults** for the built-in

@@ -373,120 +373,37 @@ fn reset_edit_and_undo_clear_event_pins() {
 }
 
 #[test]
-fn percentages_validate_bounds_and_format_readably() {
-    assert_eq!(parse_percentage("12.5"), Some(0.125));
-    assert_eq!(parse_percentage(" 100 "), Some(1.0));
-    assert_eq!(parse_percentage("0"), Some(0.0));
-    for invalid in ["", ".", "-1", "100.1", "NaN", "inf", "70%"] {
-        assert_eq!(parse_percentage(invalid), None, "{invalid}");
+fn percent_units_parse_with_or_without_suffix() {
+    use bevy::feathers::controls::{NumberFormat, UnitsFormat};
+    for (draft, expected) in [("12.5", 12.5), ("12.5%", 12.5), (" 100 % ", 100.0)] {
+        assert_eq!(
+            Percent.parse(draft.into(), NumberFormat::F64),
+            Ok(NumberInputValue::F64(expected)),
+            "{draft}"
+        );
     }
+    for invalid in ["", ".", "%", "NaN", "inf", "12 kg"] {
+        assert!(
+            Percent.parse(invalid.into(), NumberFormat::F64).is_err(),
+            "{invalid}"
+        );
+    }
+    assert_eq!(Percent.format(NumberInputValue::F64(12.5), false), "12.5%");
     assert_eq!(percentage_text(0.7), "70");
     assert_eq!(percentage_text(0.125), "12.5");
     assert_eq!(percentage_text(0.0), "0");
 }
 
-#[test]
-fn percentage_fields_commit_on_enter_or_blur_and_reject_invalid_drafts() {
-    let mut world = world_mid_run();
-    world.init_resource::<InputFocus>();
-    world.init_resource::<ButtonInput<KeyCode>>();
-    world.init_resource::<Messages<ParameterReset>>();
-    let initial = world.resource::<Params>().get(0) * 100.0;
-    let root = world
-        .spawn((ProbField(0), NumberInputValue::F64(initial)))
-        .id();
-    let field = world.spawn((ChildOf(root), EditableText::default())).id();
-    let system = world.register_system(commit_parameter_fields);
-    world
-        .resource_mut::<InputFocus>()
-        .set(field, bevy::input_focus::FocusCause::Navigated);
-    world.run_system(system).unwrap();
-    world
-        .get_mut::<EditableText>(field)
-        .unwrap()
-        .editor
-        .set_text("12.5");
-    world
-        .resource_mut::<ButtonInput<KeyCode>>()
-        .press(KeyCode::Enter);
-    world.run_system(system).unwrap();
-    assert_eq!(world.resource::<Params>().get(0), 0.125);
-    world.resource_mut::<ButtonInput<KeyCode>>().clear();
-    world
-        .get_mut::<EditableText>(field)
-        .unwrap()
-        .editor
-        .set_text("101");
-    world.resource_mut::<InputFocus>().clear();
-    world.run_system(system).unwrap();
-    assert_eq!(world.resource::<Params>().get(0), 0.125);
-    assert_eq!(
-        world
-            .get::<EditableText>(field)
-            .unwrap()
-            .value()
-            .to_string(),
-        "12.5"
-    );
-    assert!(!world.resource::<StatusLine>().success);
-
-    world
-        .resource_mut::<InputFocus>()
-        .set(field, bevy::input_focus::FocusCause::Navigated);
-    world.run_system(system).unwrap();
-    world
-        .get_mut::<EditableText>(field)
-        .unwrap()
-        .editor
-        .set_text("34");
-    world.resource_mut::<InputFocus>().clear();
-    world.run_system(system).unwrap();
-    assert_eq!(world.resource::<Params>().get(0), 0.34);
-}
-
-#[test]
-fn restoring_a_parameter_group_wins_over_its_pending_draft() {
-    let mut world = world_mid_run();
-    world.init_resource::<InputFocus>();
-    world.init_resource::<ButtonInput<KeyCode>>();
-    world.init_resource::<Messages<ParameterReset>>();
-    let initial = world.resource::<Params>().get(0) * 100.0;
-    let root = world
-        .spawn((ProbField(0), NumberInputValue::F64(initial)))
-        .id();
-    let field = world.spawn((ChildOf(root), EditableText::default())).id();
-    let system = world.register_system(commit_parameter_fields);
-    world.resource_mut::<Params>().set(4, 0.33);
-    world
-        .resource_mut::<InputFocus>()
-        .set(field, bevy::input_focus::FocusCause::Navigated);
-    world.run_system(system).unwrap();
-    world
-        .get_mut::<EditableText>(field)
-        .unwrap()
-        .editor
-        .set_text("25");
-    world.resource_mut::<InputFocus>().clear();
-    world.write_message(ParameterReset(0, 4));
-    world.run_system(system).unwrap();
-    for index in 0..4 {
-        assert_eq!(
-            world.resource::<Params>().get(index),
-            Params::default().get(index)
-        );
-    }
-    assert_eq!(world.resource::<Params>().get(4), 0.33);
-}
-
 /// Exercise the actual number scene, including its native Enter and blur
-/// observers, rather than only the app's validation helper.
+/// observers, rather than only the app's helpers.
 #[test]
-fn native_percentage_input_preserves_precision_and_rejects_invalid_values() {
+fn native_percentage_input_clamps_and_restores_unparsable_drafts() {
     use bevy::feathers::controls::UnitsRegistry;
     use bevy::feathers::theme::UiTheme;
     use bevy::input::ButtonState;
     use bevy::input::keyboard::{Key, KeyboardInput};
     use bevy::input_focus::{FocusLost, FocusedInput};
+    use bevy::text::TextEdit;
     use bevy::ui_widgets::ValueChange;
 
     let mut app = App::new();
@@ -503,7 +420,10 @@ fn native_percentage_input_preserves_precision_and_rejects_invalid_values() {
     world.init_resource::<InputFocus>();
     world.init_resource::<UiTheme>();
     world.init_resource::<UnitsRegistry>();
-    world.init_resource::<ButtonInput<KeyCode>>();
+    world.resource_mut::<UnitsRegistry>().insert(&Percent);
+    // `FocusedInput` bubbles through `WindowTraversal`, which queries `Window`;
+    // without the component registered, Enter never reaches the field root.
+    world.register_component::<Window>();
     world.init_resource::<Messages<ParameterReset>>();
     world.insert_resource(SavedParams(*world.resource::<Params>()));
     let initial = 0.123456789012345;
@@ -519,20 +439,31 @@ fn native_percentage_input_preserves_precision_and_rejects_invalid_values() {
         .find(|(_, parent, _)| parent.parent() == root)
         .unwrap()
         .0;
-    let commit = world.register_system(commit_parameter_fields);
-    world
-        .resource_mut::<InputFocus>()
-        .set(text, bevy::input_focus::FocusCause::Navigated);
-    world.run_system(commit).unwrap();
+    // Feathers redraws a field by queueing select-all and insert; Bevy's text
+    // systems apply that next frame. Apply it here so the test sees the text.
+    let settle = |world: &mut World| {
+        let mut editable = world.get_mut::<EditableText>(text).unwrap();
+        if let Some(TextEdit::Insert(shown)) = editable.pending_edits.last().cloned() {
+            editable.editor.set_text(&shown);
+        }
+        editable.pending_edits.clear();
+    };
+    settle(world);
+    let shown = |expected: f64| format!("{}%", percentage_text(expected));
+    assert_eq!(
+        world.get::<EditableText>(text).unwrap().value().to_string(),
+        shown(initial)
+    );
 
     for (draft, expected) in [
-        (percentage_text(initial), initial),
+        (shown(initial), initial),
         ("12.3456789".into(), 0.123456789),
-        ("101".into(), 0.123456789),
-        ("NaN".into(), 0.123456789),
-        ("invalid".into(), 0.123456789),
-        ("".into(), 0.123456789),
-        ("0".into(), 0.0),
+        ("50%".into(), 0.5),
+        ("101".into(), 1.0),
+        ("-5".into(), 0.0),
+        ("NaN".into(), 0.0),
+        ("invalid".into(), 0.0),
+        ("".into(), 0.0),
         ("100".into(), 1.0),
     ] {
         world
@@ -552,14 +483,8 @@ fn native_percentage_input_preserves_precision_and_rejects_invalid_values() {
             },
             Entity::PLACEHOLDER,
         ));
-        // Native observers enqueue commands; the real input schedule flushes
-        // them before the app's Update systems commit or reset a draft.
         world.flush();
-        world
-            .resource_mut::<ButtonInput<KeyCode>>()
-            .press(KeyCode::Enter);
-        world.run_system(commit).unwrap();
-        world.resource_mut::<ButtonInput<KeyCode>>().reset_all();
+        settle(world);
         world.run_system_once(sync_parameter_widgets).unwrap();
         assert_eq!(world.resource::<Params>().get(0), expected, "{draft}");
         assert_eq!(
@@ -568,9 +493,29 @@ fn native_percentage_input_preserves_precision_and_rejects_invalid_values() {
         );
         assert_eq!(
             world.get::<EditableText>(text).unwrap().value().to_string(),
-            percentage_text(expected)
+            shown(expected),
+            "{draft}"
         );
     }
+
+    // Leaving the field commits it too, and restores an unparsable draft.
+    for (draft, expected) in [("34", 0.34), ("abc", 0.34)] {
+        world
+            .get_mut::<EditableText>(text)
+            .unwrap()
+            .editor
+            .set_text(draft);
+        world.trigger(FocusLost { entity: text });
+        world.flush();
+        settle(world);
+        assert_eq!(world.resource::<Params>().get(0), expected, "{draft}");
+        assert_eq!(
+            world.get::<EditableText>(text).unwrap().value().to_string(),
+            shown(expected),
+            "{draft}"
+        );
+    }
+
     // Dragging emits intermediate f64 values; the field and model must follow them.
     world.trigger(ValueChange {
         source: root,
@@ -584,7 +529,8 @@ fn native_percentage_input_preserves_precision_and_rejects_invalid_values() {
         NumberInputValue::F64(44.4)
     );
 
-    // A real step-button activation followed by blur must retain the step.
+    // A step-button activation followed by blur in the same frame must retain
+    // the step rather than committing the stale draft over it.
     let plus = world
         .query::<(Entity, &ProbStep)>()
         .iter(world)
@@ -593,23 +539,28 @@ fn native_percentage_input_preserves_precision_and_rejects_invalid_values() {
         .0;
     world.trigger(bevy::ui_widgets::Activate { entity: plus });
     world.flush();
-    world.resource_mut::<InputFocus>().clear();
-    world.run_system(commit).unwrap();
     world.trigger(FocusLost { entity: text });
     world.flush();
     assert_eq!(world.resource::<Params>().get(0), 0.445);
 
+    // Restore defaults must win over a pending draft blurred in the same frame.
+    world.resource_mut::<Params>().set(4, 0.33);
     world
         .get_mut::<EditableText>(text)
         .unwrap()
         .editor
         .set_text("25");
-    world.resource_mut::<InputFocus>().clear();
     world.write_message(ParameterReset(0, 4));
-    world.run_system(commit).unwrap();
+    world.run_system_once(reset_parameters).unwrap();
     world.trigger(FocusLost { entity: text });
     world.flush();
-    assert_eq!(world.resource::<Params>().get(0), Params::default().get(0));
+    for index in 0..4 {
+        assert_eq!(
+            world.resource::<Params>().get(index),
+            Params::default().get(index)
+        );
+    }
+    assert_eq!(world.resource::<Params>().get(4), 0.33);
 }
 
 /// A small app runs the native tab observers and derived accessibility state.
