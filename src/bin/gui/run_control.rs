@@ -6,6 +6,7 @@ use crate::editing::EditMode;
 use crate::layout::BoardCamera;
 use crate::params::{Params, SavedParams, apply_parameter_values};
 use crate::simulation::{BoardRes, Seed, Simulation, StartingSetup, StepTimer};
+use crate::summary::adjacent_speed;
 use bevy::ecs::system::SystemParam;
 use bevy::input_focus::InputFocus;
 use bevy::prelude::*;
@@ -48,6 +49,7 @@ pub enum RunAction {
     TogglePlay,
     Step,
     Reset,
+    /// Steps to the next slower or faster entry in `SPEED_PRESETS`.
     Slower,
     Faster,
     /// Sets the seconds per turn without changing playback or advancing the board.
@@ -128,10 +130,11 @@ pub fn apply_run_actions(
                 edit.enabled = false;
             }
             RunAction::Slower | RunAction::Faster | RunAction::SetSpeed(_) => {
+                let current = timer.0.duration().as_secs_f32();
                 let seconds = match action {
                     RunAction::SetSpeed(seconds) => *seconds,
-                    RunAction::Faster => timer.0.duration().as_secs_f32() * 0.5,
-                    _ => timer.0.duration().as_secs_f32() * 2.0,
+                    RunAction::Faster => adjacent_speed(current, true),
+                    _ => adjacent_speed(current, false),
                 };
                 // A malformed request must not panic Duration or stop the run.
                 if !seconds.is_finite() || seconds <= 0.0 {

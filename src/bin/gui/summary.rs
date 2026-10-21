@@ -9,15 +9,14 @@ use crate::panel::{PropertiesToggle, PropertiesToggleLabel, toggle_properties};
 use crate::run_control::{RunAction, StatusLine};
 use crate::simulation::{Playing, STEP_SECONDS, Seed, Stats, StepTimer};
 use crate::widgets::{run_button, set_text, ui_text};
-use bevy::feathers::controls::{
-    ButtonVariant, FeathersButton, FeathersMenu, FeathersMenuButton, FeathersMenuItem,
-    FeathersMenuPopup,
-};
-use bevy::feathers::display::label_small;
+use bevy::feathers::controls::{ButtonVariant, FeathersButton, FeathersListRow, FeathersSelect};
+use bevy::feathers::display::{caption, label, label_small};
 use bevy::feathers::theme::{ThemeBackgroundColor, ThemedText};
 use bevy::feathers::tokens;
 use bevy::prelude::*;
-use bevy::ui_widgets::Activate;
+use bevy::scene::SceneList;
+use bevy::ui::Selected;
+use bevy::ui_widgets::{Activate, ValueChange};
 
 #[derive(Component, Clone, Default, FromTemplate)]
 pub struct HudText(pub usize);
@@ -28,70 +27,97 @@ pub struct PlayLabel;
 #[derive(Component, Clone, Default, FromTemplate)]
 pub struct PlaybackStatus;
 
-#[derive(Component, Clone, Default, FromTemplate)]
-pub struct SpeedLabel;
-
 /// Seconds per turn, ordered slowest to fastest, including the launch default.
-pub const SPEED_PRESETS: [f32; 8] = [4.0, 2.0, 1.0, 0.5, STEP_SECONDS, 0.2, 0.1, 0.05];
+/// The `[` and `]` shortcuts step through these, so the speed is always one of
+/// them and the select always has a row to show.
+pub const SPEED_PRESETS: [f32; 7] = [4.0, 2.0, 1.0, STEP_SECONDS, 0.2, 0.1, 0.05];
+
+/// The preset one step faster or slower than `seconds`, or `seconds` itself
+/// at either end.
+pub fn adjacent_speed(seconds: f32, faster: bool) -> f32 {
+    let step = if faster {
+        SPEED_PRESETS
+            .into_iter()
+            .find(|preset| *preset < seconds - 1e-6)
+    } else {
+        SPEED_PRESETS
+            .into_iter()
+            .rev()
+            .find(|preset| *preset > seconds + 1e-6)
+    };
+    step.unwrap_or(seconds)
+}
 
 #[derive(Component, Clone, Default, FromTemplate)]
-pub struct SpeedMenuButton;
+pub struct SpeedSelect;
 
-#[derive(Component, Clone, Default, FromTemplate)]
-pub struct SpeedMenuPopup;
-
-/// Each native menu item sends its interval through the playback message path.
+/// The interval a speed row stands for.
 #[derive(Component, Clone, Default, FromTemplate)]
 pub struct SpeedPreset(pub f32);
 
-#[derive(Component, Clone, Default, FromTemplate)]
-pub struct SpeedOptionLabel(pub f32);
+/// A row's caption, which the select also shows once the row is selected.
+pub fn speed_caption(seconds: f32) -> String {
+    let rate = format!("{:.2}", 1.0 / seconds);
+    let rate = rate.trim_end_matches('0').trim_end_matches('.');
+    let default_label = if seconds == STEP_SECONDS {
+        " (default)"
+    } else {
+        ""
+    };
+    format!("{rate} turns/s{default_label}")
+}
 
-/// A native popup supplies keyboard navigation, dismissal, and focus restoration.
-pub fn speed_menu() -> impl Scene {
-    bsn! {
-        @FeathersMenu
-        Node { width: percent(100), flex_shrink: 0.0 }
-        Children [
-            @FeathersMenuButton {
-                @caption: bsn! { Text("") ThemedText SpeedLabel },
-            }
-            Node { width: percent(100) }
-            SpeedMenuButton
-            --
-            @FeathersMenuPopup
-            Node { min_width: percent(100) }
-            SpeedMenuPopup
-            Children [
-                {SPEED_PRESETS.into_iter().map(|seconds| bsn! {
-                    @FeathersMenuItem
+fn speed_rows() -> Box<dyn SceneList> {
+    Box::new(
+        SPEED_PRESETS
+            .into_iter()
+            .map(|seconds| -> Box<dyn SceneList> {
+                bsn! {
+                    @FeathersListRow
                     SpeedPreset(seconds)
-                    on(move |_: On<Activate>, mut actions: MessageWriter<RunAction>| {
-                        actions.write(RunAction::SetSpeed(seconds));
-                    })
-                    Children [Text("") ThemedText SpeedOptionLabel(seconds)]
-                }).collect::<Vec<_>>()}
-            ]
+                    Children [@caption(speed_caption(seconds))]
+                }
+                .into()
+            })
+            .collect::<Vec<_>>(),
+    )
+}
+
+/// A native select supplies the popup, keyboard navigation, dismissal, focus
+/// restoration, and a caption that follows the selected row.
+pub fn speed_select() -> impl Scene {
+    bsn! {
+        Node { width: percent(100), column_gap: px(8), align_items: AlignItems::Center, flex_shrink: 0.0 }
+        Children [
+            @label("Speed")
+            --
+            @FeathersSelect { @options: {speed_rows()} }
+            SpeedSelect
+            Node { flex_grow: 1.0 }
+            on(|change: On<ValueChange<Entity>>, presets: Query<&SpeedPreset>, mut actions: MessageWriter<RunAction>| {
+                if let Ok(preset) = presets.get(change.value) {
+                    actions.write(RunAction::SetSpeed(preset.0));
+                }
+            })
         ]
     }
 }
 
-/// Mark an exact preset match; shortcut speeds between presets keep their own
-/// readout without falsely selecting the nearest menu entry.
-pub fn sync_speed_menu(timer: Res<StepTimer>, mut labels: Query<(&SpeedOptionLabel, &mut Text)>) {
-    for (preset, mut text) in &mut labels {
-        let selected = timer.0.duration() == std::time::Duration::from_secs_f32(preset.0);
-        let mark = if selected { "• " } else { "" };
-        let default_label = if preset.0 == STEP_SECONDS {
-            " (default)"
-        } else {
-            ""
-        };
-        let rate = format!("{:.2}", 1.0 / preset.0);
-        let rate = rate.trim_end_matches('0').trim_end_matches('.');
-        let next = format!("{mark}{rate} turns/s{default_label}");
-        if text.0 != next {
-            text.0 = next;
+/// Selects the row for the current speed, which the shortcuts change too. This
+/// sets `Selected` directly rather than through `SetSelected`, whose
+/// `ValueChange` would send the speed back as a request and restart the timer.
+pub fn sync_speed_select(
+    mut commands: Commands,
+    timer: Res<StepTimer>,
+    rows: Query<(Entity, &SpeedPreset, Has<Selected>)>,
+) {
+    let current = timer.0.duration();
+    for (entity, preset, selected) in &rows {
+        let wanted = current == std::time::Duration::from_secs_f32(preset.0);
+        if wanted && !selected {
+            commands.entity(entity).insert(Selected);
+        } else if !wanted && selected {
+            commands.entity(entity).remove::<Selected>();
         }
     }
 }
@@ -167,7 +193,7 @@ pub fn spawn_summary(
                 @run_button("Reset", RunAction::Reset)
             ]
             --
-            @speed_menu()
+            @speed_select()
             --
             @ui_text("", 14.0) PlaybackStatus
             --
@@ -193,24 +219,17 @@ pub type HudTexts<'w, 's> = Query<
         Option<&'static HudText>,
         Has<PlayLabel>,
         Has<PlaybackStatus>,
-        Has<SpeedLabel>,
     ),
 >;
 
 pub fn update_hud(
     stats: Res<Stats>,
     playing: Res<Playing>,
-    timer: Res<StepTimer>,
     edit: Res<EditMode>,
     seed: Res<Seed>,
     mut texts: HudTexts,
 ) {
-    if !(stats.is_changed()
-        || playing.is_changed()
-        || timer.is_changed()
-        || edit.is_changed()
-        || seed.is_changed())
-    {
+    if !(stats.is_changed() || playing.is_changed() || edit.is_changed() || seed.is_changed()) {
         return;
     }
     let state = if edit.enabled {
@@ -222,7 +241,7 @@ pub fn update_hud(
     } else {
         "Paused"
     };
-    for (mut text, hud, play, status, speed) in &mut texts {
+    for (mut text, hud, play, status) in &mut texts {
         let next = if let Some(hud) = hud {
             match hud.0 {
                 0 => stats.aphids.to_string(),
@@ -241,11 +260,6 @@ pub fn update_hud(
             }
         } else if status {
             format!("{state}  ·  Turn {}", stats.turn)
-        } else if speed {
-            format!(
-                "Speed: {:.2} turns/s",
-                1.0 / timer.0.duration().as_secs_f32()
-            )
         } else {
             continue;
         };

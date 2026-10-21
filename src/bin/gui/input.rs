@@ -11,7 +11,7 @@ use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll};
 use bevy::input_focus::InputFocus;
 use bevy::prelude::*;
 use bevy::text::EditableText;
-use bevy::ui_widgets::{ListBox, MenuFocusState, MenuItem, Tab};
+use bevy::ui_widgets::{ListBox, MenuFocusState, Tab};
 
 /// How far the pointer may move between press and release and still count as a
 /// click (an edit) rather than a drag (a pan), in logical pixels.
@@ -33,8 +33,7 @@ impl BoardPointer {
 }
 
 /// Widgets whose Home/End navigation must take precedence over board shortcuts.
-pub type NavigationWidgets<'w, 's> =
-    Query<'w, 's, (), Or<(With<Tab>, With<ListBox>, With<MenuItem>)>>;
+pub type NavigationWidgets<'w, 's> = Query<'w, 's, (), Or<(With<Tab>, With<ListBox>)>>;
 
 pub fn keyboard_controls(
     (keys, mut focus): (Res<ButtonInput<KeyCode>>, ResMut<InputFocus>),

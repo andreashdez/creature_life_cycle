@@ -63,7 +63,7 @@ use crate::simulation::{
     DEFAULT_SEED, Playing, Revision, STEP_SECONDS, Seed, Stats, StepTimer, step_simulation,
 };
 use crate::startup::setup;
-use crate::summary::{sync_speed_menu, update_hud, update_status_text};
+use crate::summary::{sync_speed_select, update_hud, update_status_text};
 use bevy::camera::visibility::RenderLayers;
 use bevy::feathers::FeathersPlugins;
 use bevy::feathers::dark_theme::create_dark_theme;
@@ -223,7 +223,7 @@ fn main() {
                 )
                     .chain(),
                 (
-                    sync_speed_menu,
+                    sync_speed_select,
                     sync_parameter_widgets,
                     sync_board_view,
                     update_board_detail,

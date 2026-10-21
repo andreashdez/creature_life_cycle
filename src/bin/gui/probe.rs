@@ -17,8 +17,8 @@ use crate::panel::{
 use crate::params::{Params, ProbField, ProbStep};
 use crate::run_control::RunAction;
 use crate::simulation::{BoardRes, Playing, Stats, StepTimer};
-use crate::summary::{SpeedMenuButton, SpeedMenuPopup, SpeedPreset};
-use bevy::feathers::controls::ButtonVariant;
+use crate::summary::{SpeedPreset, SpeedSelect};
+use bevy::feathers::controls::{ButtonVariant, FeathersMenuButton, FeathersMenuPopup};
 use bevy::input::ButtonState;
 use bevy::input::keyboard::{Key, KeyboardInput};
 use bevy::input::mouse::MouseScrollUnit;
@@ -27,7 +27,7 @@ use bevy::prelude::*;
 use bevy::render::view::window::screenshot::{Screenshot, save_to_disk};
 use bevy::text::EditableText;
 use bevy::ui::Checked;
-use bevy::ui_widgets::{Activate, SetSelected, ToggleChecked, ValueChange};
+use bevy::ui_widgets::{Activate, ActiveDescendant, SetSelected, ToggleChecked, ValueChange};
 use creature_life_cycle::Coordinates;
 
 /// The screenshot probe can also verify the smallest supported window.
@@ -58,9 +58,11 @@ pub type ProbeWidgets<'w, 's> = (
     Query<'w, 's, (Entity, &'static ViewButton)>,
     Query<'w, 's, (Entity, &'static ChartControlButton)>,
     Query<'w, 's, Entity, With<PropertiesToggle>>,
-    Query<'w, 's, Entity, With<SpeedMenuButton>>,
-    Query<'w, 's, &'static Visibility, With<SpeedMenuPopup>>,
+    Query<'w, 's, Entity, With<SpeedSelect>>,
+    Query<'w, 's, (Entity, &'static ChildOf), With<FeathersMenuButton>>,
+    Query<'w, 's, (&'static Visibility, &'static ChildOf), With<FeathersMenuPopup>>,
     Query<'w, 's, (Entity, &'static SpeedPreset)>,
+    Query<'w, 's, &'static ActiveDescendant>,
 );
 
 pub type ProbeState<'w> = (
@@ -131,9 +133,11 @@ pub fn screenshot_probe(
         views,
         chart_controls,
         properties_toggles,
+        speed_selects,
         speed_buttons,
         speed_popups,
         speed_items,
+        active_rows,
     ): ProbeWidgets,
     (params, board, history, overlay, edit, stats, playing, step_timer): ProbeState,
     mut panel: Query<(&mut ScrollPosition, &ComputedNode), With<PanelRoot>>,
@@ -168,6 +172,22 @@ pub fn screenshot_probe(
             .map(|(_, tool, variant)| format!("{:?}={variant:?}", tool.0))
             .collect::<Vec<_>>()
             .join(" ")
+    };
+
+    // The select's button and popup are its direct children.
+    let speed_button = || {
+        speed_buttons
+            .iter()
+            .find(|(_, parent)| speed_selects.contains(parent.parent()))
+            .map(|(entity, _)| entity)
+            .unwrap()
+    };
+    let speed_popup = || {
+        *speed_popups
+            .iter()
+            .find(|(_, parent)| speed_selects.contains(parent.parent()))
+            .unwrap()
+            .0
     };
 
     match probe.stage {
@@ -672,24 +692,26 @@ pub fn screenshot_probe(
         }
         36 => {
             commands.trigger(Activate {
-                entity: speed_buttons.single().unwrap(),
+                entity: speed_button(),
             });
             probe.timer = Timer::from_seconds(0.5, TimerMode::Once);
         }
         37 => {
-            assert_eq!(*speed_popups.single().unwrap(), Visibility::Visible);
+            assert_eq!(speed_popup(), Visibility::Visible);
             commands
                 .spawn(Screenshot::primary_window())
                 .observe(save_to_disk(probe.path.replace(".png", "-speed-menu.png")));
             probe.timer = Timer::from_seconds(1.0, TimerMode::Once);
         }
         38 | 39 => {
-            // Navigate and commit through the same focused keyboard events as a user.
+            // Navigate and commit through the same focused keyboard events as a
+            // user. Focus sits on the select's list, which tracks its row.
             let entity = focus.get().unwrap();
             let (key_code, logical_key) = if probe.stage == 38 {
                 (KeyCode::End, Key::End)
             } else {
-                assert_eq!(speed_items.get(entity).unwrap().1.0, 0.05);
+                let row = active_rows.get(entity).unwrap().0.unwrap();
+                assert_eq!(speed_items.get(row).unwrap().1.0, 0.05);
                 (KeyCode::Enter, Key::Enter)
             };
             commands.trigger(FocusedInput::new(
@@ -709,15 +731,15 @@ pub fn screenshot_probe(
         40 => {
             assert_eq!(step_timer.0.duration().as_secs_f32(), 0.05);
             assert!(!playing.0, "selecting a speed must keep the run paused");
-            assert_eq!(*speed_popups.single().unwrap(), Visibility::Hidden);
-            assert_eq!(focus.get(), Some(speed_buttons.single().unwrap()));
+            assert_eq!(speed_popup(), Visibility::Hidden);
+            assert_eq!(focus.get(), Some(speed_button()));
             actions.write(RunAction::Slower);
             probe.timer = Timer::from_seconds(0.5, TimerMode::Once);
         }
         41 => {
             assert_eq!(step_timer.0.duration().as_secs_f32(), 0.1);
             commands.trigger(Activate {
-                entity: speed_buttons.single().unwrap(),
+                entity: speed_button(),
             });
             probe.timer = Timer::from_seconds(0.5, TimerMode::Once);
         }

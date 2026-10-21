@@ -122,11 +122,11 @@ one turn. Reset pauses and restores the last saved setup, or the board loaded at
 the current seed and probabilities. The sidebar's status line reports the outcome
 of the most recent save or seed change for a few seconds.
 
-The **Speed** dropdown offers 0.25, 0.5, 1, 2, 5, 10, and 20 turns/s, plus the
-launch default of about 2.22 turns/s. A bullet marks the current preset.
-Selecting a speed keeps playback running or paused as it was. The `[` / `]`
-shortcuts still halve or double the rate within 0.25–20 turns/s; the dropdown
-shows the resulting rate even between presets. Focus the dropdown and press
+The **Speed** dropdown offers 0.25, 0.5, 1, 2, 5, 10, and 20 turns/s, starts
+at 2 turns/s, and shows the current one. Selecting a
+speed keeps playback running or paused as it was. The `[` / `]` shortcuts step
+to the next slower or faster preset, so the rate is always one of the seven.
+Focus the dropdown and press
 Down to open it, use Up/Down or Home/End to navigate, and Enter or Space to
 select. Escape dismisses the menu and returns focus to its button.
 

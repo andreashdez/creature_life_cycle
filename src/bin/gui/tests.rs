@@ -58,158 +58,94 @@ fn speed_selection_preserves_playback_and_shortcut_limits() {
         world.resource::<StepTimer>().0.duration().as_secs_f32(),
         4.0
     );
+    // The shortcuts step through the presets, so the select always has a row.
     run_action(&mut world, RunAction::SetSpeed(STEP_SECONDS));
     run_action(&mut world, RunAction::Faster);
     assert_eq!(
         world.resource::<StepTimer>().0.duration().as_secs_f32(),
-        STEP_SECONDS / 2.0
+        0.2
+    );
+    run_action(&mut world, RunAction::Slower);
+    run_action(&mut world, RunAction::Slower);
+    assert_eq!(
+        world.resource::<StepTimer>().0.duration().as_secs_f32(),
+        1.0
     );
     for invalid in [f32::NAN, f32::INFINITY, 0.0, -1.0] {
         run_action(&mut world, RunAction::SetSpeed(invalid));
         assert_eq!(
             world.resource::<StepTimer>().0.duration().as_secs_f32(),
-            STEP_SECONDS / 2.0
+            1.0
         );
     }
 }
 
-/// Exercise the real popup hierarchy and native keyboard observers, including
-/// dismissal and the distinction between focused and currently selected speeds.
+/// The select's rows map to presets in both directions: choosing a row asks
+/// for its speed, and the current speed decides the selected row. Keyboard
+/// navigation, dismissal, and focus belong to feathers; the screenshot probe
+/// drives those through real key events.
 #[test]
-fn speed_menu_navigates_selects_and_restores_focus() {
-    use bevy::feathers::theme::UiTheme;
-    use bevy::input::ButtonState;
-    use bevy::input::keyboard::{Key, KeyboardInput};
-    use bevy::input_focus::{FocusCause, FocusedInput, InputFocusVisible};
-    use bevy::ui_widgets::{Activate, MenuPlugin};
+fn speed_select_requests_presets_and_follows_the_timer() {
+    use bevy::ui::Selected;
+    use bevy::ui_widgets::ValueChange;
 
     let mut app = App::new();
     app.add_plugins((
         bevy::app::TaskPoolPlugin::default(),
         AssetPlugin::default(),
         bevy::scene::ScenePlugin,
-        MenuPlugin,
     ))
     .init_asset::<Image>()
     .init_asset::<bevy::text::Font>()
-    .init_resource::<UiTheme>()
-    .init_resource::<InputFocus>()
-    .init_resource::<InputFocusVisible>()
     .add_message::<RunAction>()
     .insert_resource(StepTimer(Timer::from_seconds(
         STEP_SECONDS,
         TimerMode::Repeating,
     )));
     let world = app.world_mut();
-    world.spawn_scene(speed_menu()).unwrap();
+    world.spawn_scene(speed_select()).unwrap();
     world.flush();
-    let window = world.spawn(Window::default()).id();
-    // The headless fixture supplies the visibility propagation normally done by rendering.
-    for mut visibility in world.query::<&mut InheritedVisibility>().iter_mut(world) {
-        *visibility = InheritedVisibility::VISIBLE;
-    }
-    let button = world
-        .query_filtered::<Entity, With<SpeedMenuButton>>()
+    let select = world
+        .query_filtered::<Entity, With<SpeedSelect>>()
         .single(world)
         .unwrap();
-    let popup = world
-        .query_filtered::<Entity, With<SpeedMenuPopup>>()
-        .single(world)
-        .unwrap();
-    let items: Vec<_> = world.get::<Children>(popup).unwrap().iter().collect();
-    assert_eq!(items.len(), SPEED_PRESETS.len());
-    world.run_system_once(sync_speed_menu).unwrap();
-    let marked: Vec<_> = world
-        .query::<(&SpeedOptionLabel, &Text)>()
+    let rows: Vec<_> = world
+        .query::<(Entity, &SpeedPreset)>()
         .iter(world)
-        .filter(|(_, text)| text.0.starts_with('•'))
-        .map(|(option, _)| option.0)
+        .map(|(entity, preset)| (entity, preset.0))
         .collect();
-    assert_eq!(marked, vec![STEP_SECONDS]);
-    world
-        .resource_mut::<InputFocus>()
-        .set(button, FocusCause::Navigated);
-    world.trigger(Activate { entity: button });
-    world.flush();
-    app.update();
-    assert_eq!(
-        app.world().get::<Visibility>(popup),
-        Some(&Visibility::Visible)
-    );
-    assert_eq!(app.world().resource::<InputFocus>().get(), Some(items[0]));
-
-    let key = |world: &mut World, code, logical_key| {
-        let entity = world.resource::<InputFocus>().get().unwrap();
-        world.trigger(FocusedInput::new(
-            entity,
-            KeyboardInput {
-                key_code: code,
-                logical_key,
-                state: ButtonState::Pressed,
-                text: None,
-                repeat: false,
-                window,
-            },
-            window,
-        ));
-        world.flush();
+    assert_eq!(rows.len(), SPEED_PRESETS.len());
+    let selected = |world: &mut World| {
+        world
+            .query_filtered::<&SpeedPreset, With<Selected>>()
+            .iter(world)
+            .map(|preset| preset.0)
+            .collect::<Vec<_>>()
     };
-    for (code, logical, index) in [
-        (KeyCode::End, Key::End, 7),
-        (KeyCode::Home, Key::Home, 0),
-        (KeyCode::ArrowDown, Key::ArrowDown, 1),
-    ] {
-        key(app.world_mut(), code, logical);
-        assert_eq!(
-            app.world().resource::<InputFocus>().get(),
-            Some(items[index])
-        );
-    }
-    key(app.world_mut(), KeyCode::Enter, Key::Enter);
-    assert_eq!(
-        app.world().get::<Visibility>(popup),
-        Some(&Visibility::Hidden)
-    );
-    assert_eq!(app.world().resource::<InputFocus>().get(), Some(button));
-    let actions: Vec<_> = app
-        .world_mut()
+
+    world.run_system_once(sync_speed_select).unwrap();
+    assert_eq!(selected(world), vec![STEP_SECONDS]);
+
+    let one = rows.iter().find(|(_, seconds)| *seconds == 1.0).unwrap().0;
+    world.trigger(ValueChange {
+        source: select,
+        value: one,
+        is_final: true,
+    });
+    let actions: Vec<_> = world
         .resource_mut::<Messages<RunAction>>()
         .drain()
         .collect();
-    assert!(matches!(actions.as_slice(), [RunAction::SetSpeed(2.0)]));
-    app.update();
-    key(app.world_mut(), KeyCode::ArrowDown, Key::ArrowDown);
-    app.update();
-    key(app.world_mut(), KeyCode::Escape, Key::Escape);
-    assert_eq!(
-        app.world().get::<Visibility>(popup),
-        Some(&Visibility::Hidden)
-    );
-    assert_eq!(app.world().resource::<InputFocus>().get(), Some(button));
-    assert!(app.world().resource::<Messages<RunAction>>().is_empty());
-    app.update();
-    app.world_mut().trigger(Activate { entity: button });
-    app.update();
-    app.world_mut().resource_mut::<InputFocus>().clear();
-    app.update();
-    assert_eq!(
-        app.world().get::<Visibility>(popup),
-        Some(&Visibility::Hidden)
-    );
+    assert!(matches!(actions.as_slice(), [RunAction::SetSpeed(1.0)]));
 
-    // Shortcuts can produce intermediate speeds; don't mark an unrelated preset.
-    let world = app.world_mut();
     world
         .resource_mut::<StepTimer>()
         .0
-        .set_duration(std::time::Duration::from_secs_f32(0.225));
-    world.run_system_once(sync_speed_menu).unwrap();
-    assert!(
-        world
-            .query_filtered::<&Text, With<SpeedOptionLabel>>()
-            .iter(world)
-            .all(|text| !text.0.starts_with('•'))
-    );
+        .set_duration(std::time::Duration::from_secs_f32(0.1));
+    world.run_system_once(sync_speed_select).unwrap();
+    assert_eq!(selected(world), vec![0.1]);
+    assert_eq!(speed_caption(STEP_SECONDS), "2 turns/s (default)");
+    assert_eq!(speed_caption(0.05), "20 turns/s");
 }
 
 /// Rows must distinguish repeated parameter names and retain exact before/after values.
@@ -807,12 +743,6 @@ fn focused_properties_navigation_owns_home_and_space() {
     world
         .resource_mut::<InputFocus>()
         .set(list, bevy::input_focus::FocusCause::Navigated);
-    world.run_system_once(keyboard_controls).unwrap();
-    assert!(world.resource::<Messages<RunAction>>().is_empty());
-    let item = world.spawn(bevy::ui_widgets::MenuItem).id();
-    world
-        .resource_mut::<InputFocus>()
-        .set(item, bevy::input_focus::FocusCause::Navigated);
     world.run_system_once(keyboard_controls).unwrap();
     assert!(world.resource::<Messages<RunAction>>().is_empty());
 
