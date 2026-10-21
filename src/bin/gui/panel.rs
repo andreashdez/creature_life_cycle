@@ -12,8 +12,8 @@ use crate::run_control::{Reseed, RunAction, SEED_DIGITS, SeedField};
 use crate::summary::HudText;
 use crate::widgets::{run_button, ui_text};
 use bevy::feathers::controls::{
-    ButtonVariant, FeathersButton, FeathersCheckbox, FeathersDisclosureToggle, FeathersScrollbar,
-    FeathersTextInput, FeathersTextInputContainer,
+    ButtonVariant, FeathersButton, FeathersCheckbox, FeathersDisclosureToggle, FeathersRadio,
+    FeathersScrollbar, FeathersTextInput, FeathersTextInputContainer,
 };
 use bevy::feathers::display::{label, label_small};
 use bevy::feathers::focus::FocusIndicator;
@@ -27,12 +27,17 @@ use bevy::picking::pointer::PointerButton;
 use bevy::prelude::*;
 use bevy::ui::Checked;
 use bevy::ui_widgets::{
-    Activate, ScrollArea, SelectedTab, Tab, TabActivation, TabList, ToggleChecked, ValueChange,
+    Activate, RadioGroup, ScrollArea, SelectedTab, Tab, TabActivation, TabList, ToggleChecked,
+    ValueChange,
 };
 use bevy::window::SystemCursorIcon;
 
 #[derive(Component, Clone, Default, FromTemplate)]
 pub struct ViewButton(pub BoardView);
+
+/// The radio group holding the two `ViewButton`s.
+#[derive(Component, Clone, Default, FromTemplate)]
+pub struct BoardViewGroup;
 
 #[derive(Component, Clone, Default, FromTemplate)]
 pub struct FoodControls;
@@ -318,33 +323,52 @@ fn food_scale() -> impl Scene {
     }
 }
 
-fn board_view_button(caption: &'static str, view: BoardView) -> impl Scene {
+fn board_view_radio(caption: &'static str, view: BoardView) -> impl Scene {
     bsn! {
-        @FeathersButton
-        Node { flex_grow: 1.0 }
+        @FeathersRadio { @caption: bsn! { Text(caption) ThemedText } }
         ViewButton({view})
-        on(move |_: On<Activate>, mut current: ResMut<BoardView>, mut overlay: ResMut<FoodOverlay>| {
-            *current = view;
-            overlay.bypass_change_detection().selected_view = false;
-        })
-        Children [Text(caption) ThemedText]
     }
 }
 
+/// The Population and Food radios. A radio group gives the pair one checked
+/// state that assistive technology reads as a single choice.
+pub fn board_view_group() -> impl Scene {
+    bsn! {
+        Node { column_gap: px(16) }
+        RadioGroup BoardViewGroup
+        on(select_board_view)
+        Children [@board_view_radio("Population", BoardView::Population) -- @board_view_radio("Food", BoardView::Food)]
+    }
+}
+
+/// Picking a view through the radio group. Choosing a view directly forgets
+/// that the food checkbox switched to the food view, so unticking the checkbox
+/// later does not switch away from a view the user picked.
+fn select_board_view(
+    change: On<ValueChange<Entity>>,
+    buttons: Query<&ViewButton>,
+    mut current: ResMut<BoardView>,
+    mut overlay: ResMut<FoodOverlay>,
+) {
+    if let Ok(button) = buttons.get(change.value) {
+        *current = button.0;
+        overlay.bypass_change_detection().selected_view = false;
+    }
+}
+
+/// Checks the radio for the current view, which the `F` key and the food
+/// checkbox can change too, and shows the food controls only in the food view.
 pub fn sync_board_view(
+    mut commands: Commands,
     view: Res<BoardView>,
-    mut buttons: Query<(&ViewButton, &mut ButtonVariant)>,
+    buttons: Query<(Entity, &ViewButton)>,
     mut controls: Query<&mut Node, With<FoodControls>>,
 ) {
     if !view.is_changed() {
         return;
     }
-    for (button, mut variant) in &mut buttons {
-        *variant = if button.0 == *view {
-            ButtonVariant::Primary
-        } else {
-            ButtonVariant::Normal
-        };
+    for (entity, button) in &buttons {
+        set_checked(&mut commands, entity, button.0 == *view);
     }
     for mut node in &mut controls {
         node.display = if *view == BoardView::Food {
@@ -423,8 +447,7 @@ pub fn spawn_panel(
                 --
                 @section_title("Board view")
                 --
-                Node { column_gap: px(6) }
-                Children [@board_view_button("Population", BoardView::Population) -- @board_view_button("Food", BoardView::Food)]
+                @board_view_group()
                 --
                 @label_small("Aphids: green circles · Ladybugs: red diamonds at distant zoom.")
                 --

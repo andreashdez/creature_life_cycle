@@ -148,6 +148,67 @@ fn speed_select_requests_presets_and_follows_the_timer() {
     assert_eq!(speed_caption(0.05), "20 turns/s");
 }
 
+/// The view radios follow `BoardView`, whichever control changed it, and
+/// picking one sets the view and forgets the checkbox's view switch.
+#[test]
+fn board_view_radios_select_and_follow_the_view() {
+    use bevy::ui::Checked;
+    use bevy::ui_widgets::ValueChange;
+
+    let mut app = App::new();
+    app.add_plugins((
+        bevy::app::TaskPoolPlugin::default(),
+        AssetPlugin::default(),
+        bevy::scene::ScenePlugin,
+    ))
+    .init_asset::<Image>()
+    .init_asset::<bevy::text::Font>()
+    .init_resource::<BoardView>()
+    .init_resource::<FoodOverlay>();
+    let world = app.world_mut();
+    world.spawn_scene(board_view_group()).unwrap();
+    world.flush();
+    let group = world
+        .query_filtered::<Entity, With<BoardViewGroup>>()
+        .single(world)
+        .unwrap();
+    let radio = |world: &mut World, view: BoardView| {
+        world
+            .query::<(Entity, &ViewButton)>()
+            .iter(world)
+            .find(|(_, button)| button.0 == view)
+            .unwrap()
+            .0
+    };
+    let checked = |world: &mut World| {
+        world
+            .query_filtered::<&ViewButton, With<Checked>>()
+            .iter(world)
+            .map(|button| button.0)
+            .collect::<Vec<_>>()
+    };
+
+    world.run_system_once(sync_board_view).unwrap();
+    assert_eq!(checked(world), vec![BoardView::Population]);
+
+    world.resource_mut::<FoodOverlay>().selected_view = true;
+    let food = radio(world, BoardView::Food);
+    world.trigger(ValueChange {
+        source: group,
+        value: food,
+        is_final: true,
+    });
+    assert_eq!(*world.resource::<BoardView>(), BoardView::Food);
+    assert!(!world.resource::<FoodOverlay>().selected_view);
+    world.run_system_once(sync_board_view).unwrap();
+    assert_eq!(checked(world), vec![BoardView::Food]);
+
+    // The F key and the checkbox write the view directly.
+    *world.resource_mut::<BoardView>() = BoardView::Population;
+    world.run_system_once(sync_board_view).unwrap();
+    assert_eq!(checked(world), vec![BoardView::Population]);
+}
+
 /// Rows must distinguish repeated parameter names and retain exact before/after values.
 #[test]
 fn event_details_name_species_and_include_rules_and_extinctions() {

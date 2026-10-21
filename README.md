@@ -157,9 +157,9 @@ alongside their changes in the last turn. Overview keeps recent births and
 deaths and the food layer controls in view; **Run setup** and **Controls &
 shortcuts** expand when needed.
 
-**Population** view uses neutral cells to emphasize creatures. **Food** view
-shades cells by food supply and offers optional, subdued bars and speckles.
-Creatures have a dark backing for contrast in both views. When cells are smaller
+The **Board view** radio buttons switch between two views. **Population** view
+uses neutral cells to emphasize creatures. **Food** view shades cells by food
+supply and offers optional, subdued bars and speckles. Creatures have a dark backing for contrast in both views. When cells are smaller
 than 28 logical pixels, pixel-art creatures become one marker per occupied
 cell and species: green circles for aphids and red diamonds for ladybugs. Mixed
 cells retain both markers. Zooming in restores the pixel-art sprites and counts.

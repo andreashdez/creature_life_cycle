@@ -126,6 +126,7 @@ edits can be undone; advancing a turn or resetting clears that undo history.
 
 ## Board views
 
+The **Board view** radio buttons in the Overview tab switch between two views.
 **Population** view uses neutral cells to emphasize creatures. **Food** view
 shades cells by food supply and offers optional, subdued bars and speckles.
 Creatures get a dark backing for contrast in both views. .keybinding {F}

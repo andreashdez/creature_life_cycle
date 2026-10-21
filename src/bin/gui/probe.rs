@@ -55,7 +55,7 @@ pub type ProbeWidgets<'w, 's> = (
     Query<'w, 's, (Entity, Has<Checked>), With<FoodOverlayToggle>>,
     Query<'w, 's, (Entity, &'static EditToolButton, &'static ButtonVariant)>,
     Query<'w, 's, (Entity, &'static SectionToggle)>,
-    Query<'w, 's, (Entity, &'static ViewButton)>,
+    Query<'w, 's, (Entity, &'static ViewButton, &'static ChildOf)>,
     Query<'w, 's, (Entity, &'static ChartControlButton)>,
     Query<'w, 's, Entity, With<PropertiesToggle>>,
     Query<'w, 's, Entity, With<SpeedSelect>>,
@@ -500,9 +500,14 @@ pub fn screenshot_probe(
             probe.timer = Timer::from_seconds(1.0, TimerMode::Once);
         }
         16 => {
-            for (entity, view) in &views {
+            // A click on a radio reaches the app as its group's ValueChange.
+            for (entity, view, group) in &views {
                 if view.0 == BoardView::Population {
-                    commands.trigger(Activate { entity });
+                    commands.trigger(ValueChange {
+                        source: group.parent(),
+                        value: entity,
+                        is_final: true,
+                    });
                 }
             }
             for (entity, section) in &sections {
