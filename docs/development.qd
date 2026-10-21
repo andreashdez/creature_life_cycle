@@ -18,6 +18,7 @@ cargo clean                 # remove build artifacts
 | `src/lib.rs`, `tests` module | Deterministic randomness, TOML parsing, probability validation, edge movement, combat and feeding, procreation, starvation, phased turn order, board bookkeeping |
 | `src/main.rs` | CLI argument parsing |
 | `tests/seeded_e2e_snapshots.rs` | End-to-end runs against a fixed config and seed |
+| `tests/default_ecology.rs` | The shape of 200 seeded runs of the example config |
 
 The bookkeeping test runs 200 seeded boards of random size and parameters for
 up to 60 turns, adding and removing creatures between turns. After every edit
@@ -26,6 +27,17 @@ free IDs, and cached totals. It also checks that births and deaths account for
 the change in population, and that the ID table never grows past the most IDs
 in use at once. A slip in the swap-remove bookkeeping fails here with the creature
 and cell named, instead of surfacing as an unexplained snapshot change.
+
+The ecology test runs `simulation.example.toml` on seeds 1 to 200 for up to
+1,000 turns each. It checks that median births stay within 24–60, the median
+peak population within 15–24, the median turn the first species dies out within
+65–115, and the number of runs in which aphids die out first within 130–185.
+No run may pass 300 creatures. Across 25 disjoint sets of 200 seeds the medians
+moved far less than these ranges, so a change that only reorders random draws
+passes. A change to the rules that moves the ecology fails, even when every
+unit test passes. Ranges that need updating should be measured again over many
+seed sets; .repolink {notes/0024} {blob/main/notes/0024-statistical-ecology-test.md}
+records how.
 
 The end-to-end test builds a throwaway `XDG_CONFIG_HOME` under `target/` and
 seeds it from `simulation.example.toml`, so it never touches your real

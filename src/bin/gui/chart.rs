@@ -46,8 +46,11 @@ pub const INK_PRIMARY: Color = Color::srgb_u8(0xed, 0xed, 0xee);
 pub const INK_SECONDARY: Color = Color::srgb_u8(0xb1, 0xb1, 0xb2);
 const INK_MUTED: Color = Color::srgb_u8(0x88, 0x88, 0x8b);
 pub const GRIDLINE: Color = Color::srgb_u8(0x36, 0x37, 0x3b); // feathers GRAY_2
-const BASELINE: Color = Color::srgb_u8(0x46, 0x47, 0x4d); // feathers GRAY_3
+pub const BASELINE: Color = Color::srgb_u8(0x46, 0x47, 0x4d); // feathers GRAY_3
 pub const TOOLTIP_BG: Color = Color::srgb_u8(0x2a, 0x2a, 0x2e); // feathers GRAY_1
+// The four feathers copies above are plain colours because gizmos, meshes, and
+// the clear colour cannot read theme tokens. A GUI test fails if they drift
+// from the feathers theme, since the contrast figures here depend on them.
 
 /// Logical width of the chart strip, set by `layout_viewports`.
 #[derive(Resource, Default, PartialEq)]

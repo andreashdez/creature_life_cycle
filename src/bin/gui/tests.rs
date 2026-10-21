@@ -58,158 +58,155 @@ fn speed_selection_preserves_playback_and_shortcut_limits() {
         world.resource::<StepTimer>().0.duration().as_secs_f32(),
         4.0
     );
+    // The shortcuts step through the presets, so the select always has a row.
     run_action(&mut world, RunAction::SetSpeed(STEP_SECONDS));
     run_action(&mut world, RunAction::Faster);
     assert_eq!(
         world.resource::<StepTimer>().0.duration().as_secs_f32(),
-        STEP_SECONDS / 2.0
+        0.2
+    );
+    run_action(&mut world, RunAction::Slower);
+    run_action(&mut world, RunAction::Slower);
+    assert_eq!(
+        world.resource::<StepTimer>().0.duration().as_secs_f32(),
+        1.0
     );
     for invalid in [f32::NAN, f32::INFINITY, 0.0, -1.0] {
         run_action(&mut world, RunAction::SetSpeed(invalid));
         assert_eq!(
             world.resource::<StepTimer>().0.duration().as_secs_f32(),
-            STEP_SECONDS / 2.0
+            1.0
         );
     }
 }
 
-/// Exercise the real popup hierarchy and native keyboard observers, including
-/// dismissal and the distinction between focused and currently selected speeds.
+/// The select's rows map to presets in both directions: choosing a row asks
+/// for its speed, and the current speed decides the selected row. Keyboard
+/// navigation, dismissal, and focus belong to feathers; the screenshot probe
+/// drives those through real key events.
 #[test]
-fn speed_menu_navigates_selects_and_restores_focus() {
-    use bevy::feathers::theme::UiTheme;
-    use bevy::input::ButtonState;
-    use bevy::input::keyboard::{Key, KeyboardInput};
-    use bevy::input_focus::{FocusCause, FocusedInput, InputFocusVisible};
-    use bevy::ui_widgets::{Activate, MenuPlugin};
+fn speed_select_requests_presets_and_follows_the_timer() {
+    use bevy::ui::Selected;
+    use bevy::ui_widgets::ValueChange;
 
     let mut app = App::new();
     app.add_plugins((
         bevy::app::TaskPoolPlugin::default(),
         AssetPlugin::default(),
         bevy::scene::ScenePlugin,
-        MenuPlugin,
     ))
     .init_asset::<Image>()
     .init_asset::<bevy::text::Font>()
-    .init_resource::<UiTheme>()
-    .init_resource::<InputFocus>()
-    .init_resource::<InputFocusVisible>()
     .add_message::<RunAction>()
     .insert_resource(StepTimer(Timer::from_seconds(
         STEP_SECONDS,
         TimerMode::Repeating,
     )));
     let world = app.world_mut();
-    world.spawn_scene(speed_menu()).unwrap();
+    world.spawn_scene(speed_select()).unwrap();
     world.flush();
-    let window = world.spawn(Window::default()).id();
-    // The headless fixture supplies the visibility propagation normally done by rendering.
-    for mut visibility in world.query::<&mut InheritedVisibility>().iter_mut(world) {
-        *visibility = InheritedVisibility::VISIBLE;
-    }
-    let button = world
-        .query_filtered::<Entity, With<SpeedMenuButton>>()
+    let select = world
+        .query_filtered::<Entity, With<SpeedSelect>>()
         .single(world)
         .unwrap();
-    let popup = world
-        .query_filtered::<Entity, With<SpeedMenuPopup>>()
-        .single(world)
-        .unwrap();
-    let items: Vec<_> = world.get::<Children>(popup).unwrap().iter().collect();
-    assert_eq!(items.len(), SPEED_PRESETS.len());
-    world.run_system_once(sync_speed_menu).unwrap();
-    let marked: Vec<_> = world
-        .query::<(&SpeedOptionLabel, &Text)>()
+    let rows: Vec<_> = world
+        .query::<(Entity, &SpeedPreset)>()
         .iter(world)
-        .filter(|(_, text)| text.0.starts_with('•'))
-        .map(|(option, _)| option.0)
+        .map(|(entity, preset)| (entity, preset.0))
         .collect();
-    assert_eq!(marked, vec![STEP_SECONDS]);
-    world
-        .resource_mut::<InputFocus>()
-        .set(button, FocusCause::Navigated);
-    world.trigger(Activate { entity: button });
-    world.flush();
-    app.update();
-    assert_eq!(
-        app.world().get::<Visibility>(popup),
-        Some(&Visibility::Visible)
-    );
-    assert_eq!(app.world().resource::<InputFocus>().get(), Some(items[0]));
-
-    let key = |world: &mut World, code, logical_key| {
-        let entity = world.resource::<InputFocus>().get().unwrap();
-        world.trigger(FocusedInput::new(
-            entity,
-            KeyboardInput {
-                key_code: code,
-                logical_key,
-                state: ButtonState::Pressed,
-                text: None,
-                repeat: false,
-                window,
-            },
-            window,
-        ));
-        world.flush();
+    assert_eq!(rows.len(), SPEED_PRESETS.len());
+    let selected = |world: &mut World| {
+        world
+            .query_filtered::<&SpeedPreset, With<Selected>>()
+            .iter(world)
+            .map(|preset| preset.0)
+            .collect::<Vec<_>>()
     };
-    for (code, logical, index) in [
-        (KeyCode::End, Key::End, 7),
-        (KeyCode::Home, Key::Home, 0),
-        (KeyCode::ArrowDown, Key::ArrowDown, 1),
-    ] {
-        key(app.world_mut(), code, logical);
-        assert_eq!(
-            app.world().resource::<InputFocus>().get(),
-            Some(items[index])
-        );
-    }
-    key(app.world_mut(), KeyCode::Enter, Key::Enter);
-    assert_eq!(
-        app.world().get::<Visibility>(popup),
-        Some(&Visibility::Hidden)
-    );
-    assert_eq!(app.world().resource::<InputFocus>().get(), Some(button));
-    let actions: Vec<_> = app
-        .world_mut()
+
+    world.run_system_once(sync_speed_select).unwrap();
+    assert_eq!(selected(world), vec![STEP_SECONDS]);
+
+    let one = rows.iter().find(|(_, seconds)| *seconds == 1.0).unwrap().0;
+    world.trigger(ValueChange {
+        source: select,
+        value: one,
+        is_final: true,
+    });
+    let actions: Vec<_> = world
         .resource_mut::<Messages<RunAction>>()
         .drain()
         .collect();
-    assert!(matches!(actions.as_slice(), [RunAction::SetSpeed(2.0)]));
-    app.update();
-    key(app.world_mut(), KeyCode::ArrowDown, Key::ArrowDown);
-    app.update();
-    key(app.world_mut(), KeyCode::Escape, Key::Escape);
-    assert_eq!(
-        app.world().get::<Visibility>(popup),
-        Some(&Visibility::Hidden)
-    );
-    assert_eq!(app.world().resource::<InputFocus>().get(), Some(button));
-    assert!(app.world().resource::<Messages<RunAction>>().is_empty());
-    app.update();
-    app.world_mut().trigger(Activate { entity: button });
-    app.update();
-    app.world_mut().resource_mut::<InputFocus>().clear();
-    app.update();
-    assert_eq!(
-        app.world().get::<Visibility>(popup),
-        Some(&Visibility::Hidden)
-    );
+    assert!(matches!(actions.as_slice(), [RunAction::SetSpeed(1.0)]));
 
-    // Shortcuts can produce intermediate speeds; don't mark an unrelated preset.
-    let world = app.world_mut();
     world
         .resource_mut::<StepTimer>()
         .0
-        .set_duration(std::time::Duration::from_secs_f32(0.225));
-    world.run_system_once(sync_speed_menu).unwrap();
-    assert!(
+        .set_duration(std::time::Duration::from_secs_f32(0.1));
+    world.run_system_once(sync_speed_select).unwrap();
+    assert_eq!(selected(world), vec![0.1]);
+    assert_eq!(speed_caption(STEP_SECONDS), "2 turns/s (default)");
+    assert_eq!(speed_caption(0.05), "20 turns/s");
+}
+
+/// The view radios follow `BoardView`, whichever control changed it, and
+/// picking one sets the view and forgets the checkbox's view switch.
+#[test]
+fn board_view_radios_select_and_follow_the_view() {
+    use bevy::ui::Checked;
+    use bevy::ui_widgets::ValueChange;
+
+    let mut app = App::new();
+    app.add_plugins((
+        bevy::app::TaskPoolPlugin::default(),
+        AssetPlugin::default(),
+        bevy::scene::ScenePlugin,
+    ))
+    .init_asset::<Image>()
+    .init_asset::<bevy::text::Font>()
+    .init_resource::<BoardView>()
+    .init_resource::<FoodOverlay>();
+    let world = app.world_mut();
+    world.spawn_scene(board_view_group()).unwrap();
+    world.flush();
+    let group = world
+        .query_filtered::<Entity, With<BoardViewGroup>>()
+        .single(world)
+        .unwrap();
+    let radio = |world: &mut World, view: BoardView| {
         world
-            .query_filtered::<&Text, With<SpeedOptionLabel>>()
+            .query::<(Entity, &ViewButton)>()
             .iter(world)
-            .all(|text| !text.0.starts_with('•'))
-    );
+            .find(|(_, button)| button.0 == view)
+            .unwrap()
+            .0
+    };
+    let checked = |world: &mut World| {
+        world
+            .query_filtered::<&ViewButton, With<Checked>>()
+            .iter(world)
+            .map(|button| button.0)
+            .collect::<Vec<_>>()
+    };
+
+    world.run_system_once(sync_board_view).unwrap();
+    assert_eq!(checked(world), vec![BoardView::Population]);
+
+    world.resource_mut::<FoodOverlay>().selected_view = true;
+    let food = radio(world, BoardView::Food);
+    world.trigger(ValueChange {
+        source: group,
+        value: food,
+        is_final: true,
+    });
+    assert_eq!(*world.resource::<BoardView>(), BoardView::Food);
+    assert!(!world.resource::<FoodOverlay>().selected_view);
+    world.run_system_once(sync_board_view).unwrap();
+    assert_eq!(checked(world), vec![BoardView::Food]);
+
+    // The F key and the checkbox write the view directly.
+    *world.resource_mut::<BoardView>() = BoardView::Population;
+    world.run_system_once(sync_board_view).unwrap();
+    assert_eq!(checked(world), vec![BoardView::Population]);
 }
 
 /// Rows must distinguish repeated parameter names and retain exact before/after values.
@@ -437,120 +434,37 @@ fn reset_edit_and_undo_clear_event_pins() {
 }
 
 #[test]
-fn percentages_validate_bounds_and_format_readably() {
-    assert_eq!(parse_percentage("12.5"), Some(0.125));
-    assert_eq!(parse_percentage(" 100 "), Some(1.0));
-    assert_eq!(parse_percentage("0"), Some(0.0));
-    for invalid in ["", ".", "-1", "100.1", "NaN", "inf", "70%"] {
-        assert_eq!(parse_percentage(invalid), None, "{invalid}");
+fn percent_units_parse_with_or_without_suffix() {
+    use bevy::feathers::controls::{NumberFormat, UnitsFormat};
+    for (draft, expected) in [("12.5", 12.5), ("12.5%", 12.5), (" 100 % ", 100.0)] {
+        assert_eq!(
+            Percent.parse(draft.into(), NumberFormat::F64),
+            Ok(NumberInputValue::F64(expected)),
+            "{draft}"
+        );
     }
+    for invalid in ["", ".", "%", "NaN", "inf", "12 kg"] {
+        assert!(
+            Percent.parse(invalid.into(), NumberFormat::F64).is_err(),
+            "{invalid}"
+        );
+    }
+    assert_eq!(Percent.format(NumberInputValue::F64(12.5), false), "12.5%");
     assert_eq!(percentage_text(0.7), "70");
     assert_eq!(percentage_text(0.125), "12.5");
     assert_eq!(percentage_text(0.0), "0");
 }
 
-#[test]
-fn percentage_fields_commit_on_enter_or_blur_and_reject_invalid_drafts() {
-    let mut world = world_mid_run();
-    world.init_resource::<InputFocus>();
-    world.init_resource::<ButtonInput<KeyCode>>();
-    world.init_resource::<Messages<ParameterReset>>();
-    let initial = world.resource::<Params>().get(0) * 100.0;
-    let root = world
-        .spawn((ProbField(0), NumberInputValue::F64(initial)))
-        .id();
-    let field = world.spawn((ChildOf(root), EditableText::default())).id();
-    let system = world.register_system(commit_parameter_fields);
-    world
-        .resource_mut::<InputFocus>()
-        .set(field, bevy::input_focus::FocusCause::Navigated);
-    world.run_system(system).unwrap();
-    world
-        .get_mut::<EditableText>(field)
-        .unwrap()
-        .editor
-        .set_text("12.5");
-    world
-        .resource_mut::<ButtonInput<KeyCode>>()
-        .press(KeyCode::Enter);
-    world.run_system(system).unwrap();
-    assert_eq!(world.resource::<Params>().get(0), 0.125);
-    world.resource_mut::<ButtonInput<KeyCode>>().clear();
-    world
-        .get_mut::<EditableText>(field)
-        .unwrap()
-        .editor
-        .set_text("101");
-    world.resource_mut::<InputFocus>().clear();
-    world.run_system(system).unwrap();
-    assert_eq!(world.resource::<Params>().get(0), 0.125);
-    assert_eq!(
-        world
-            .get::<EditableText>(field)
-            .unwrap()
-            .value()
-            .to_string(),
-        "12.5"
-    );
-    assert!(!world.resource::<StatusLine>().success);
-
-    world
-        .resource_mut::<InputFocus>()
-        .set(field, bevy::input_focus::FocusCause::Navigated);
-    world.run_system(system).unwrap();
-    world
-        .get_mut::<EditableText>(field)
-        .unwrap()
-        .editor
-        .set_text("34");
-    world.resource_mut::<InputFocus>().clear();
-    world.run_system(system).unwrap();
-    assert_eq!(world.resource::<Params>().get(0), 0.34);
-}
-
-#[test]
-fn restoring_a_parameter_group_wins_over_its_pending_draft() {
-    let mut world = world_mid_run();
-    world.init_resource::<InputFocus>();
-    world.init_resource::<ButtonInput<KeyCode>>();
-    world.init_resource::<Messages<ParameterReset>>();
-    let initial = world.resource::<Params>().get(0) * 100.0;
-    let root = world
-        .spawn((ProbField(0), NumberInputValue::F64(initial)))
-        .id();
-    let field = world.spawn((ChildOf(root), EditableText::default())).id();
-    let system = world.register_system(commit_parameter_fields);
-    world.resource_mut::<Params>().set(4, 0.33);
-    world
-        .resource_mut::<InputFocus>()
-        .set(field, bevy::input_focus::FocusCause::Navigated);
-    world.run_system(system).unwrap();
-    world
-        .get_mut::<EditableText>(field)
-        .unwrap()
-        .editor
-        .set_text("25");
-    world.resource_mut::<InputFocus>().clear();
-    world.write_message(ParameterReset(0, 4));
-    world.run_system(system).unwrap();
-    for index in 0..4 {
-        assert_eq!(
-            world.resource::<Params>().get(index),
-            Params::default().get(index)
-        );
-    }
-    assert_eq!(world.resource::<Params>().get(4), 0.33);
-}
-
 /// Exercise the actual number scene, including its native Enter and blur
-/// observers, rather than only the app's validation helper.
+/// observers, rather than only the app's helpers.
 #[test]
-fn native_percentage_input_preserves_precision_and_rejects_invalid_values() {
+fn native_percentage_input_clamps_and_restores_unparsable_drafts() {
     use bevy::feathers::controls::UnitsRegistry;
     use bevy::feathers::theme::UiTheme;
     use bevy::input::ButtonState;
     use bevy::input::keyboard::{Key, KeyboardInput};
     use bevy::input_focus::{FocusLost, FocusedInput};
+    use bevy::text::TextEdit;
     use bevy::ui_widgets::ValueChange;
 
     let mut app = App::new();
@@ -567,7 +481,10 @@ fn native_percentage_input_preserves_precision_and_rejects_invalid_values() {
     world.init_resource::<InputFocus>();
     world.init_resource::<UiTheme>();
     world.init_resource::<UnitsRegistry>();
-    world.init_resource::<ButtonInput<KeyCode>>();
+    world.resource_mut::<UnitsRegistry>().insert(&Percent);
+    // `FocusedInput` bubbles through `WindowTraversal`, which queries `Window`;
+    // without the component registered, Enter never reaches the field root.
+    world.register_component::<Window>();
     world.init_resource::<Messages<ParameterReset>>();
     world.insert_resource(SavedParams(*world.resource::<Params>()));
     let initial = 0.123456789012345;
@@ -583,20 +500,31 @@ fn native_percentage_input_preserves_precision_and_rejects_invalid_values() {
         .find(|(_, parent, _)| parent.parent() == root)
         .unwrap()
         .0;
-    let commit = world.register_system(commit_parameter_fields);
-    world
-        .resource_mut::<InputFocus>()
-        .set(text, bevy::input_focus::FocusCause::Navigated);
-    world.run_system(commit).unwrap();
+    // Feathers redraws a field by queueing select-all and insert; Bevy's text
+    // systems apply that next frame. Apply it here so the test sees the text.
+    let settle = |world: &mut World| {
+        let mut editable = world.get_mut::<EditableText>(text).unwrap();
+        if let Some(TextEdit::Insert(shown)) = editable.pending_edits.last().cloned() {
+            editable.editor.set_text(&shown);
+        }
+        editable.pending_edits.clear();
+    };
+    settle(world);
+    let shown = |expected: f64| format!("{}%", percentage_text(expected));
+    assert_eq!(
+        world.get::<EditableText>(text).unwrap().value().to_string(),
+        shown(initial)
+    );
 
     for (draft, expected) in [
-        (percentage_text(initial), initial),
+        (shown(initial), initial),
         ("12.3456789".into(), 0.123456789),
-        ("101".into(), 0.123456789),
-        ("NaN".into(), 0.123456789),
-        ("invalid".into(), 0.123456789),
-        ("".into(), 0.123456789),
-        ("0".into(), 0.0),
+        ("50%".into(), 0.5),
+        ("101".into(), 1.0),
+        ("-5".into(), 0.0),
+        ("NaN".into(), 0.0),
+        ("invalid".into(), 0.0),
+        ("".into(), 0.0),
         ("100".into(), 1.0),
     ] {
         world
@@ -616,14 +544,8 @@ fn native_percentage_input_preserves_precision_and_rejects_invalid_values() {
             },
             Entity::PLACEHOLDER,
         ));
-        // Native observers enqueue commands; the real input schedule flushes
-        // them before the app's Update systems commit or reset a draft.
         world.flush();
-        world
-            .resource_mut::<ButtonInput<KeyCode>>()
-            .press(KeyCode::Enter);
-        world.run_system(commit).unwrap();
-        world.resource_mut::<ButtonInput<KeyCode>>().reset_all();
+        settle(world);
         world.run_system_once(sync_parameter_widgets).unwrap();
         assert_eq!(world.resource::<Params>().get(0), expected, "{draft}");
         assert_eq!(
@@ -632,9 +554,29 @@ fn native_percentage_input_preserves_precision_and_rejects_invalid_values() {
         );
         assert_eq!(
             world.get::<EditableText>(text).unwrap().value().to_string(),
-            percentage_text(expected)
+            shown(expected),
+            "{draft}"
         );
     }
+
+    // Leaving the field commits it too, and restores an unparsable draft.
+    for (draft, expected) in [("34", 0.34), ("abc", 0.34)] {
+        world
+            .get_mut::<EditableText>(text)
+            .unwrap()
+            .editor
+            .set_text(draft);
+        world.trigger(FocusLost { entity: text });
+        world.flush();
+        settle(world);
+        assert_eq!(world.resource::<Params>().get(0), expected, "{draft}");
+        assert_eq!(
+            world.get::<EditableText>(text).unwrap().value().to_string(),
+            shown(expected),
+            "{draft}"
+        );
+    }
+
     // Dragging emits intermediate f64 values; the field and model must follow them.
     world.trigger(ValueChange {
         source: root,
@@ -648,7 +590,8 @@ fn native_percentage_input_preserves_precision_and_rejects_invalid_values() {
         NumberInputValue::F64(44.4)
     );
 
-    // A real step-button activation followed by blur must retain the step.
+    // A step-button activation followed by blur in the same frame must retain
+    // the step rather than committing the stale draft over it.
     let plus = world
         .query::<(Entity, &ProbStep)>()
         .iter(world)
@@ -657,23 +600,28 @@ fn native_percentage_input_preserves_precision_and_rejects_invalid_values() {
         .0;
     world.trigger(bevy::ui_widgets::Activate { entity: plus });
     world.flush();
-    world.resource_mut::<InputFocus>().clear();
-    world.run_system(commit).unwrap();
     world.trigger(FocusLost { entity: text });
     world.flush();
     assert_eq!(world.resource::<Params>().get(0), 0.445);
 
+    // Restore defaults must win over a pending draft blurred in the same frame.
+    world.resource_mut::<Params>().set(4, 0.33);
     world
         .get_mut::<EditableText>(text)
         .unwrap()
         .editor
         .set_text("25");
-    world.resource_mut::<InputFocus>().clear();
     world.write_message(ParameterReset(0, 4));
-    world.run_system(commit).unwrap();
+    world.run_system_once(reset_parameters).unwrap();
     world.trigger(FocusLost { entity: text });
     world.flush();
-    assert_eq!(world.resource::<Params>().get(0), Params::default().get(0));
+    for index in 0..4 {
+        assert_eq!(
+            world.resource::<Params>().get(index),
+            Params::default().get(index)
+        );
+    }
+    assert_eq!(world.resource::<Params>().get(4), 0.33);
 }
 
 /// A small app runs the native tab observers and derived accessibility state.
@@ -809,12 +757,6 @@ fn focused_properties_navigation_owns_home_and_space() {
         .set(list, bevy::input_focus::FocusCause::Navigated);
     world.run_system_once(keyboard_controls).unwrap();
     assert!(world.resource::<Messages<RunAction>>().is_empty());
-    let item = world.spawn(bevy::ui_widgets::MenuItem).id();
-    world
-        .resource_mut::<InputFocus>()
-        .set(item, bevy::input_focus::FocusCause::Navigated);
-    world.run_system_once(keyboard_controls).unwrap();
-    assert!(world.resource::<Messages<RunAction>>().is_empty());
 
     // Native Escape restores the trigger before our shortcut system runs.
     world.spawn(bevy::ui_widgets::MenuFocusState::Open);
@@ -851,6 +793,33 @@ fn event_row_text_meets_contrast_on_native_list_surfaces() {
     ] {
         let surface = luminance(theme.context_color(&token, SurfaceLevel::Base));
         assert!((ink.max(surface) + 0.05) / (ink.min(surface) + 0.05) >= 4.5);
+    }
+}
+
+/// The chart's surface and gray steps are copied from feathers as sRGB bytes,
+/// and every contrast figure in `chart.rs` is measured against them. Fail on a
+/// feathers upgrade that moves the theme instead of letting the copies drift.
+#[test]
+fn chart_palette_matches_feathers_theme() {
+    use bevy::feathers::{dark_theme::create_dark_theme, palette, theme::UiTheme, tokens};
+    let theme = UiTheme(create_dark_theme());
+    let bytes = |color: Color| color.to_srgba().to_u8_array();
+    for (name, copy, source) in [
+        (
+            "CHART_SURFACE",
+            CHART_SURFACE,
+            theme.color(&tokens::WINDOW_BG),
+        ),
+        ("TOOLTIP_BG", TOOLTIP_BG, palette::GRAY_1),
+        ("GRIDLINE", GRIDLINE, palette::GRAY_2),
+        ("BASELINE", BASELINE, palette::GRAY_3),
+    ] {
+        let (copy, source) = (bytes(copy), bytes(source));
+        // Allow one step per channel for rounding out of OKLCH.
+        assert!(
+            copy.iter().zip(source).all(|(a, b)| a.abs_diff(b) <= 1),
+            "{name} is {copy:?} but feathers now uses {source:?}"
+        );
     }
 }
 

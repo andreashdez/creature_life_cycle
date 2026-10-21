@@ -43,6 +43,7 @@ exploratory documents written while working something out.
 | [0021](0021-gui-split-into-modules.md) | The GUI is split into modules by concern | — |
 | [0022](0022-ladybugs-feed-on-aphids.md) | Ladybugs regain life from the aphids they kill | — |
 | [0023](0023-creature-ids-are-reused.md) | A dead creature's ID is reused, from the next turn on | — |
+| [0024](0024-statistical-ecology-test.md) | A statistical test checks the default ecology | — |
 
 ## Design sketches
 

@@ -122,11 +122,11 @@ one turn. Reset pauses and restores the last saved setup, or the board loaded at
 the current seed and probabilities. The sidebar's status line reports the outcome
 of the most recent save or seed change for a few seconds.
 
-The **Speed** dropdown offers 0.25, 0.5, 1, 2, 5, 10, and 20 turns/s, plus the
-launch default of about 2.22 turns/s. A bullet marks the current preset.
-Selecting a speed keeps playback running or paused as it was. The `[` / `]`
-shortcuts still halve or double the rate within 0.25–20 turns/s; the dropdown
-shows the resulting rate even between presets. Focus the dropdown and press
+The **Speed** dropdown offers 0.25, 0.5, 1, 2, 5, 10, and 20 turns/s, starts
+at 2 turns/s, and shows the current one. Selecting a
+speed keeps playback running or paused as it was. The `[` / `]` shortcuts step
+to the next slower or faster preset, so the rate is always one of the seven.
+Focus the dropdown and press
 Down to open it, use Up/Down or Home/End to navigate, and Enter or Space to
 select. Escape dismisses the menu and returns focus to its button.
 
@@ -141,8 +141,9 @@ selected page, and a focus outline shows keyboard focus.
 Parameters are grouped by Aphids, Ladybugs, and Environment. Each parameter has an
 editable percentage, and a short explanation. The ladybug prey life gain is not a probability and
 has no control here; it is set in the config file, and Save setup keeps it. Enter or leaving the field applies
-a value from 0 to 100; invalid input restores the previous value and reports an
-error. The percentage fields also support horizontal dragging and − / +
+the value. Values outside 0 to 100 are clamped to the nearest end, and text
+that is not a number is replaced by the previous value. Each field shows a %
+suffix; typing it is optional. The percentage fields also support horizontal dragging and − / +
 buttons in 0.1 percentage-point steps. Dragging and stepping use one decimal place; typed
 values retain finer precision. A bullet marks values changed
 from the saved setup, and each group has **Restore defaults** for the built-in
@@ -156,9 +157,9 @@ alongside their changes in the last turn. Overview keeps recent births and
 deaths and the food layer controls in view; **Run setup** and **Controls &
 shortcuts** expand when needed.
 
-**Population** view uses neutral cells to emphasize creatures. **Food** view
-shades cells by food supply and offers optional, subdued bars and speckles.
-Creatures have a dark backing for contrast in both views. When cells are smaller
+The **Board view** radio buttons switch between two views. **Population** view
+uses neutral cells to emphasize creatures. **Food** view shades cells by food
+supply and offers optional, subdued bars and speckles. Creatures have a dark backing for contrast in both views. When cells are smaller
 than 28 logical pixels, pixel-art creatures become one marker per occupied
 cell and species: green circles for aphids and red diamonds for ladybugs. Mixed
 cells retain both markers. Zooming in restores the pixel-art sprites and counts.
@@ -508,4 +509,4 @@ Remove build artifacts:
 cargo clean
 ```
 
-The simulation tests live in `src/lib.rs` under the `tests` module. The CLI parsing tests live in `src/main.rs`. Together they cover deterministic randomness, CLI parsing, TOML configuration parsing, probability validation, edge movement, combat and feeding, procreation, starvation, and phased turn order. A randomized test runs 200 seeded boards of random size and parameters for up to 60 turns, with creatures added and removed between turns, and after every edit and turn recounts the cell lists, cell slots, active list, free IDs, and cached totals against what the board reports.
+The simulation tests live in `src/lib.rs` under the `tests` module. The CLI parsing tests live in `src/main.rs`. Together they cover deterministic randomness, CLI parsing, TOML configuration parsing, probability validation, edge movement, combat and feeding, procreation, starvation, and phased turn order. A randomized test runs 200 seeded boards of random size and parameters for up to 60 turns, with creatures added and removed between turns, and after every edit and turn recounts the cell lists, cell slots, active list, free IDs, and cached totals against what the board reports. `tests/default_ecology.rs` runs the example config on 200 seeds and checks that median births, median peak population, the median turn the first species dies out, and how often aphids die out first all stay within measured ranges, and that no run grows past 300 creatures. The seeded snapshots in `tests/seeded_e2e_snapshots.rs` compare whole CLI runs byte for byte.

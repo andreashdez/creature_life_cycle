@@ -15,6 +15,7 @@ front ends drive it.
 | `src/main.rs`                   | CLI (`clap`): prints the board and a per-turn summary. Small.                                                                              |
 | `src/bin/gui/`                  | Bevy GUI, one module per concern: board, creatures, `bevy_feathers` sidebars, population chart, editing, GUI tests. `main.rs` wires it up. |
 | `tests/seeded_e2e_snapshots.rs` | End-to-end CLI runs compared byte-for-byte against expected stdout.                                                                        |
+| `tests/default_ecology.rs`      | Statistical check that 200 seeded runs of the example config keep their births, peak, and coexistence in range.                            |
 | `benches/board_refresh.rs`      | Criterion benchmark of `Board::refresh`.                                                                                                   |
 | `assets/`                       | Cell shader and 32×32 pixel-art sprites, embedded into the binary with `embedded_asset!`.                                                  |
 | `docs/`                         | User-facing [Quarkdown](https://quarkdown.com) site (`.qd`), deployed to GitHub Pages.                                                     |

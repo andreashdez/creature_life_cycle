@@ -11,7 +11,7 @@ use bevy::prelude::*;
 use creature_life_cycle::{Board, Random, TurnStats};
 
 pub const DEFAULT_SEED: u64 = 42;
-pub const STEP_SECONDS: f32 = 0.45;
+pub const STEP_SECONDS: f32 = 0.5;
 
 #[derive(Resource)]
 pub struct BoardRes(pub Board);

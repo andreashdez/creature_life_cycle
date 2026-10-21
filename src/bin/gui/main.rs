@@ -49,10 +49,10 @@ use crate::input::{BoardPointer, camera_controls, keyboard_controls};
 use crate::layout::layout_viewports;
 use crate::panel::{
     ActiveTab, PanelSections, PropertiesPanel, sync_board_view, sync_food_checkbox,
-    sync_panel_sections, sync_properties_panel, sync_scrollbar_visibility, sync_sidebar,
+    sync_panel_sections, sync_properties_panel, sync_sidebar,
 };
 use crate::params::{
-    ParameterReset, apply_params, commit_parameter_fields, sync_parameter_widgets,
+    ParameterReset, apply_params, percent_units, reset_parameters, sync_parameter_widgets,
 };
 use crate::probe::{ScreenshotProbe, review_window_size, screenshot_probe};
 use crate::run_control::{
@@ -63,7 +63,7 @@ use crate::simulation::{
     DEFAULT_SEED, Playing, Revision, STEP_SECONDS, Seed, Stats, StepTimer, step_simulation,
 };
 use crate::startup::setup;
-use crate::summary::{sync_speed_menu, update_hud, update_status_text};
+use crate::summary::{sync_speed_select, update_hud, update_status_text};
 use bevy::camera::visibility::RenderLayers;
 use bevy::feathers::FeathersPlugins;
 use bevy::feathers::dark_theme::create_dark_theme;
@@ -92,6 +92,7 @@ fn main() {
         .add_plugins(board_render_assets)
         .add_plugins(Material2dPlugin::<CellMaterial>::default())
         .add_plugins(FeathersPlugins)
+        .add_plugins(percent_units)
         .insert_resource(UiTheme(create_dark_theme()))
         // Gridlines and series need different widths, and gizmo width is set per
         // group, so they are two groups. Both live on the chart's render layer.
@@ -186,7 +187,7 @@ fn main() {
                     apply_cell_edits,
                     exclusive_play_and_edit,
                     sync_edit_controls,
-                    commit_parameter_fields,
+                    reset_parameters,
                     apply_params,
                     // After the edits and parameters have landed, so a save
                     // writes the board as it is on screen, and before the next
@@ -217,14 +218,13 @@ fn main() {
                     update_hud,
                     update_status_text,
                     update_cell_popup,
-                    sync_scrollbar_visibility,
                     sync_panel_sections,
                     update_edit_palette,
                     update_edit_preview,
                 )
                     .chain(),
                 (
-                    sync_speed_menu,
+                    sync_speed_select,
                     sync_parameter_widgets,
                     sync_board_view,
                     update_board_detail,

@@ -12,8 +12,8 @@ use crate::run_control::{Reseed, RunAction, SEED_DIGITS, SeedField};
 use crate::summary::HudText;
 use crate::widgets::{run_button, ui_text};
 use bevy::feathers::controls::{
-    ButtonVariant, FeathersButton, FeathersCheckbox, FeathersScrollbar, FeathersTextInput,
-    FeathersTextInputContainer,
+    ButtonVariant, FeathersButton, FeathersCheckbox, FeathersDisclosureToggle, FeathersRadio,
+    FeathersScrollbar, FeathersTextInput, FeathersTextInputContainer,
 };
 use bevy::feathers::display::{label, label_small};
 use bevy::feathers::focus::FocusIndicator;
@@ -21,19 +21,28 @@ use bevy::feathers::theme::{ThemeBackgroundColor, ThemedText};
 use bevy::feathers::tokens;
 use bevy::input::mouse::MouseScrollUnit;
 use bevy::input_focus::InputFocus;
+use bevy::picking::cursor::EntityCursor;
+use bevy::picking::events::PointerClick;
+use bevy::picking::pointer::PointerButton;
 use bevy::prelude::*;
 use bevy::ui::Checked;
 use bevy::ui_widgets::{
-    Activate, ScrollArea, SelectedTab, Tab, TabActivation, TabList, ValueChange,
+    Activate, RadioGroup, ScrollArea, SelectedTab, Tab, TabActivation, TabList, ToggleChecked,
+    ValueChange,
 };
+use bevy::window::SystemCursorIcon;
 
 #[derive(Component, Clone, Default, FromTemplate)]
 pub struct ViewButton(pub BoardView);
 
+/// The radio group holding the two `ViewButton`s.
+#[derive(Component, Clone, Default, FromTemplate)]
+pub struct BoardViewGroup;
+
 #[derive(Component, Clone, Default, FromTemplate)]
 pub struct FoodControls;
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
 pub enum PanelSection {
     #[default]
     Setup,
@@ -57,9 +66,6 @@ impl PanelSections {
 
 #[derive(Component, Clone, Default, FromTemplate)]
 pub struct SectionBody(pub PanelSection);
-
-#[derive(Component, Clone, Default, FromTemplate)]
-pub struct SectionLabel(pub PanelSection);
 
 #[derive(Component, Clone, Default, FromTemplate)]
 pub struct SectionToggle(pub PanelSection);
@@ -113,9 +119,6 @@ pub struct PropertiesTabs;
 
 #[derive(Component, Clone, FromTemplate)]
 pub struct TabButton(pub PanelTab);
-
-#[derive(Component, Clone, Default, FromTemplate)]
-pub struct PanelScrollbar;
 
 fn stat_row(caption: &'static str, index: usize) -> impl Scene {
     bsn! {
@@ -187,25 +190,55 @@ fn save_destination() -> String {
     format!("Writes to {shown}")
 }
 
-fn section_toggle(section: PanelSection) -> impl Scene {
-    bsn! {
-        @FeathersButton { @variant: ButtonVariant::Plain }
-        SectionToggle({section})
-        Node { margin: UiRect::top(px(16)), justify_content: JustifyContent::SpaceBetween }
-        on(move |_: On<Activate>, mut sections: ResMut<PanelSections>| {
-            match section {
-                PanelSection::Setup => sections.setup = !sections.setup,
-                PanelSection::Help => sections.help = !sections.help,
-            }
-        })
-        Children [@ui_text("", 16.0) SectionLabel({section})]
+impl PanelSection {
+    fn caption(self) -> &'static str {
+        match self {
+            PanelSection::Setup => "Run setup",
+            PanelSection::Help => "Controls & shortcuts",
+        }
     }
 }
 
+/// A native disclosure toggle carries the open state as `Checked`, so focus,
+/// Space/Enter, and assistive technology all see it. The toggle itself is only
+/// a 12px chevron; clicking the caption row toggles it through the same
+/// `ToggleChecked` path, keeping the whole row a target as the old button was.
+fn section_toggle(section: PanelSection) -> impl Scene {
+    bsn! {
+        Node {
+            margin: UiRect::top(px(16)), padding: UiRect::vertical(px(4)),
+            column_gap: px(8), align_items: AlignItems::Center,
+        }
+        EntityCursor::System(SystemCursorIcon::Pointer)
+        on(move |click: On<PointerClick>, toggles: Query<(Entity, &SectionToggle)>, mut commands: Commands| {
+            for (entity, toggle) in &toggles {
+                if toggle.0 == section && click.button == PointerButton::Primary {
+                    commands.trigger(ToggleChecked { entity });
+                }
+            }
+        })
+        Children [
+            @FeathersDisclosureToggle
+            SectionToggle({section})
+            on(move |change: On<ValueChange<bool>>, mut sections: ResMut<PanelSections>| {
+                match section {
+                    PanelSection::Setup => sections.setup = change.value,
+                    PanelSection::Help => sections.help = change.value,
+                }
+            })
+            --
+            @ui_text(section.caption(), 16.0)
+        ]
+    }
+}
+
+/// Shows open section bodies and mirrors `PanelSections` onto the toggles, so
+/// the chevron follows state changed from anywhere, not only its own clicks.
 pub fn sync_panel_sections(
+    mut commands: Commands,
     sections: Res<PanelSections>,
     mut bodies: Query<(&SectionBody, &mut Node)>,
-    mut labels: Query<(&SectionLabel, &mut Text)>,
+    toggles: Query<(Entity, &SectionToggle)>,
 ) {
     if !sections.is_changed() {
         return;
@@ -217,19 +250,8 @@ pub fn sync_panel_sections(
             Display::None
         };
     }
-    for (label, mut text) in &mut labels {
-        let caption = match label.0 {
-            PanelSection::Setup => "Run setup",
-            PanelSection::Help => "Controls & shortcuts",
-        };
-        text.0 = format!(
-            "{}  {caption}",
-            if sections.is_open(label.0) {
-                "−"
-            } else {
-                "+"
-            }
-        );
+    for (entity, toggle) in &toggles {
+        set_checked(&mut commands, entity, sections.is_open(toggle.0));
     }
 }
 
@@ -301,33 +323,52 @@ fn food_scale() -> impl Scene {
     }
 }
 
-fn board_view_button(caption: &'static str, view: BoardView) -> impl Scene {
+fn board_view_radio(caption: &'static str, view: BoardView) -> impl Scene {
     bsn! {
-        @FeathersButton
-        Node { flex_grow: 1.0 }
+        @FeathersRadio { @caption: bsn! { Text(caption) ThemedText } }
         ViewButton({view})
-        on(move |_: On<Activate>, mut current: ResMut<BoardView>, mut overlay: ResMut<FoodOverlay>| {
-            *current = view;
-            overlay.bypass_change_detection().selected_view = false;
-        })
-        Children [Text(caption) ThemedText]
     }
 }
 
+/// The Population and Food radios. A radio group gives the pair one checked
+/// state that assistive technology reads as a single choice.
+pub fn board_view_group() -> impl Scene {
+    bsn! {
+        Node { column_gap: px(16) }
+        RadioGroup BoardViewGroup
+        on(select_board_view)
+        Children [@board_view_radio("Population", BoardView::Population) -- @board_view_radio("Food", BoardView::Food)]
+    }
+}
+
+/// Picking a view through the radio group. Choosing a view directly forgets
+/// that the food checkbox switched to the food view, so unticking the checkbox
+/// later does not switch away from a view the user picked.
+fn select_board_view(
+    change: On<ValueChange<Entity>>,
+    buttons: Query<&ViewButton>,
+    mut current: ResMut<BoardView>,
+    mut overlay: ResMut<FoodOverlay>,
+) {
+    if let Ok(button) = buttons.get(change.value) {
+        *current = button.0;
+        overlay.bypass_change_detection().selected_view = false;
+    }
+}
+
+/// Checks the radio for the current view, which the `F` key and the food
+/// checkbox can change too, and shows the food controls only in the food view.
 pub fn sync_board_view(
+    mut commands: Commands,
     view: Res<BoardView>,
-    mut buttons: Query<(&ViewButton, &mut ButtonVariant)>,
+    buttons: Query<(Entity, &ViewButton)>,
     mut controls: Query<&mut Node, With<FoodControls>>,
 ) {
     if !view.is_changed() {
         return;
     }
-    for (button, mut variant) in &mut buttons {
-        *variant = if button.0 == *view {
-            ButtonVariant::Primary
-        } else {
-            ButtonVariant::Normal
-        };
+    for (entity, button) in &buttons {
+        set_checked(&mut commands, entity, button.0 == *view);
     }
     for mut node in &mut controls {
         node.display = if *view == BoardView::Food {
@@ -406,8 +447,7 @@ pub fn spawn_panel(
                 --
                 @section_title("Board view")
                 --
-                Node { column_gap: px(6) }
-                Children [@board_view_button("Population", BoardView::Population) -- @board_view_button("Food", BoardView::Food)]
+                @board_view_group()
                 --
                 @label_small("Aphids: green circles · Ladybugs: red diamonds at distant zoom.")
                 --
@@ -537,8 +577,8 @@ pub fn spawn_panel(
     commands.entity(root).add_child(scroll);
     let scrollbar = commands
         .spawn_scene(bsn! {
+            // Feathers hides the scrollbar itself while the content fits.
             @FeathersScrollbar { @target: {scroll} }
-            PanelScrollbar
             Node {
                 position_type: PositionType::Absolute,
                 right: px(8), top: px(PANEL_HEADER), bottom: px(16), width: px(8),
@@ -546,22 +586,6 @@ pub fn spawn_panel(
         })
         .id();
     commands.entity(root).add_child(scrollbar);
-}
-
-pub fn sync_scrollbar_visibility(
-    panel: Query<&ComputedNode, With<PanelRoot>>,
-    mut scrollbar: Query<&mut Visibility, With<PanelScrollbar>>,
-) {
-    if let Ok(node) = panel.single() {
-        let visible = if node.content_size().y > node.size().y + 1.0 {
-            Visibility::Inherited
-        } else {
-            Visibility::Hidden
-        };
-        for mut visibility in &mut scrollbar {
-            visibility.set_if_neq(visible);
-        }
-    }
 }
 
 /// Keep page visibility, underline, and native tab selection in agreement,

@@ -6,12 +6,14 @@ use crate::run_control::StatusLine;
 use crate::simulation::{BoardRes, Stats};
 use crate::widgets::ui_text;
 use bevy::feathers::controls::{
-    ButtonVariant, FeathersButton, FeathersNumberInput, HardLimit, NumberInputPrecision,
-    NumberInputStep, NumberInputValue, SoftLimit,
+    ButtonVariant, FeathersButton, FeathersNumberInput, HardLimit, NumberFormat,
+    NumberInputPrecision, NumberInputStep, NumberInputUnits, NumberInputValue, SoftLimit,
+    StandardUnitItem, StandardUnitKind, UnitsFormat, UnitsRegistry,
 };
 use bevy::feathers::display::label_small;
 use bevy::feathers::theme::ThemedText;
-use bevy::input_focus::InputFocus;
+use bevy::input::keyboard::KeyboardInput;
+use bevy::input_focus::{FocusLost, FocusedInput};
 use bevy::prelude::*;
 use bevy::text::EditableText;
 use bevy::ui_widgets::{Activate, ValueChange};
@@ -68,6 +70,31 @@ const PARAM_HELP: [&str; 9] = [
     "Chance each cell regains one food per turn, up to 9.",
 ];
 
+/// Percent units for the probability fields. Values stay in percent (0 to
+/// 100) inside the widget, so the suffix is display only: the field shows
+/// "12.4%", and typing "12.4" or "12.4%" both parse.
+pub struct Percent;
+
+impl StandardUnitKind for Percent {
+    const ID: &'static str = "ratio_percent";
+
+    fn units(&self) -> &'static [StandardUnitItem] {
+        &[StandardUnitItem {
+            suffixes: &["%"],
+            scale: 1.0,
+        }]
+    }
+}
+
+/// Registers `Percent` with feathers. Must be added after `FeathersPlugins`,
+/// which creates the registry, and before the panel spawns, or the fields fall
+/// back to plain numbers.
+pub fn percent_units(app: &mut App) {
+    app.world_mut()
+        .resource_mut::<UnitsRegistry>()
+        .insert(&Percent);
+}
+
 impl Params {
     pub fn get(&self, index: usize) -> f64 {
         match index {
@@ -99,6 +126,7 @@ impl Params {
 }
 
 /// One percentage field supports typing and dragging, with explicit step buttons.
+/// Feathers clamps typed and dragged values to `HardLimit`, so 150 becomes 100.
 pub fn param_row(index: usize, value: f64) -> impl Scene {
     bsn! {
         Node {
@@ -117,10 +145,13 @@ pub fn param_row(index: usize, value: f64) -> impl Scene {
                 SoftLimit::f64(0.0..=100.0)
                 NumberInputPrecision(1)
                 NumberInputStep(0.1)
+                NumberInputUnits::new_static(Percent::ID)
                 Node {
                     flex_grow: 1.0, flex_basis: px(0), min_width: px(0),
                 }
                 on(on_number_changed)
+                on(restore_on_blur)
+                on(restore_on_enter)
                 --
                 Node { flex_direction: FlexDirection::Column, row_gap: px(2), flex_shrink: 0.0 }
                 Children [
@@ -128,8 +159,6 @@ pub fn param_row(index: usize, value: f64) -> impl Scene {
                     --
                     @percentage_step(index, -0.1, "−")
                 ]
-                --
-                @label_small("%")
             ]
             --
             @label_small(PARAM_HELP[index])
@@ -172,74 +201,43 @@ pub fn param_group(title: &'static str, start: usize, end: usize) -> impl Scene 
     }
 }
 
-/// Reject invalid drafts before they can change the simulation.
-pub fn parse_percentage(text: &str) -> Option<f64> {
-    let value = text.trim().parse::<f64>().ok()?;
-    (value.is_finite() && (0.0..=100.0).contains(&value)).then_some(value / 100.0)
-}
-
-/// Preserve the full value when a number field is focused or committed unchanged.
+/// Full precision, so a typed value is not rounded when the field shows it.
 pub fn percentage_text(value: f64) -> String {
     (value * 100.0).to_string()
 }
 
-/// Keep the app's reject-and-restore policy for invalid drafts (Feathers otherwise
-/// clamps them or leaves unparsable text visible). Commit blur before simulation
-/// and Save run, and let Restore defaults override a pending edit.
-pub fn commit_parameter_fields(
-    (keys, focus): (Res<ButtonInput<KeyCode>>, Res<InputFocus>),
-    mut previous: Local<Option<Entity>>,
-    fields: Query<(&ProbField, &NumberInputValue)>,
-    mut texts: Query<(&ChildOf, &mut EditableText)>,
-    mut params: ResMut<Params>,
-    mut status: ResMut<StatusLine>,
-    mut resets: MessageReader<ParameterReset>,
-) {
-    let focused = focus.get();
-    let commit = if *previous != focused {
-        *previous
-    } else if keys.just_pressed(KeyCode::Enter) {
-        focused
-    } else {
-        None
-    };
-    if let Some(entity) = commit
-        && let Ok((parent, mut text)) = texts.get_mut(entity)
-        && let Ok((field, current)) = fields.get(parent.parent())
-    {
-        let typed = text.value().to_string();
-        if let Some(value) = parse_percentage(&typed) {
-            // An unchanged draft must not overwrite a step-button
-            // update that happened while the field was losing focus.
-            if typed.trim().parse::<f64>().ok().map(NumberInputValue::F64) != Some(*current) {
-                params.set(field.0, value);
-                status.set(
-                    format!(
-                        "{} set to {}%.",
-                        PARAM_LABELS[field.0],
-                        percentage_text(value)
-                    ),
-                    true,
-                );
-            }
-        } else {
-            status.set("Enter a percentage from 0 to 100. Value unchanged.", false);
+/// The field's text for a probability, as feathers formats it with `Percent`.
+fn field_text(value: f64) -> String {
+    format!("{}%", percentage_text(value))
+}
+
+/// Overwrites a field's draft right away. Feathers commits the draft on
+/// `FocusLost`, which runs in `PostUpdate`; when a step button or Restore
+/// defaults lands in the same frame as the blur, a stale draft would
+/// otherwise be committed after it and undo the change.
+fn replace_draft(children: &Children, texts: &mut Query<&mut EditableText>, value: f64) {
+    for child in children.iter() {
+        if let Ok(mut text) = texts.get_mut(child) {
+            text.editor.set_text(&field_text(value));
         }
-        text.editor.set_text(&percentage_text(params.get(field.0)));
     }
-    *previous = focused;
+}
+
+/// Applies Restore defaults to a parameter group.
+pub fn reset_parameters(
+    mut resets: MessageReader<ParameterReset>,
+    mut params: ResMut<Params>,
+    fields: Query<(&ProbField, &Children)>,
+    mut texts: Query<&mut EditableText>,
+) {
     for reset in resets.read() {
         let defaults = Params::default();
         for index in reset.0..reset.1 {
             params.set(index, defaults.get(index));
         }
-        // FocusLost runs later, in PostUpdate. Replace the draft now so its
-        // native number-input observer cannot put it back after this reset.
-        for (parent, mut text) in &mut texts {
-            if let Ok((field, _)) = fields.get(parent.parent())
-                && (reset.0..reset.1).contains(&field.0)
-            {
-                text.editor.set_text(&percentage_text(params.get(field.0)));
+        for (field, children) in &fields {
+            if (reset.0..reset.1).contains(&field.0) {
+                replace_draft(children, &mut texts, params.get(field.0));
             }
         }
     }
@@ -275,9 +273,9 @@ pub fn sync_parameter_widgets(
     }
 }
 
-/// Accept native typing, scrubbing, and chevron events while keeping invalid
-/// drafts from being silently clamped. Reinsert even an unchanged value on a
-/// final event so the native field restores its canonical text.
+/// Accepts typed, dragged, and stepped values. Feathers has already parsed
+/// and clamped them, so every value here is in range. Reinserting the value
+/// even when unchanged redraws a committed draft such as "50.0" as "50%".
 fn on_number_changed(
     change: On<ValueChange<f64>>,
     mut commands: Commands,
@@ -289,15 +287,7 @@ fn on_number_changed(
     let Ok((field, children)) = fields.get(change.source) else {
         return;
     };
-    let invalid_draft = change.is_final
-        && children.iter().any(|child| {
-            texts
-                .get(child)
-                .is_ok_and(|text| parse_percentage(&text.value().to_string()).is_none())
-        });
-    if invalid_draft || !change.value.is_finite() || !(0.0..=100.0).contains(&change.value) {
-        status.set("Enter a percentage from 0 to 100. Value unchanged.", false);
-    } else if change.value != params.get(field.0) * 100.0 {
+    if change.value != params.get(field.0) * 100.0 {
         params.set(field.0, change.value / 100.0);
         if change.is_final {
             status.set(
@@ -306,16 +296,54 @@ fn on_number_changed(
             );
         }
     }
-    // FocusLost can follow the button's activation later in this frame. Keep
-    // its draft in sync immediately so it cannot undo the step just applied.
-    for child in children.iter() {
-        if let Ok(mut text) = texts.get_mut(child) {
-            text.editor.set_text(&percentage_text(params.get(field.0)));
-        }
-    }
+    replace_draft(children, &mut texts, params.get(field.0));
     commands
         .entity(change.source)
         .insert(NumberInputValue::F64(params.get(field.0) * 100.0));
+}
+
+/// Feathers ignores a committed draft it cannot parse, such as "abc" or an
+/// empty field, and leaves the text in place. Redraw the value in use instead.
+fn restore_unparsed_draft(
+    field: Entity,
+    fields: &Query<(&NumberInputValue, &Children), With<ProbField>>,
+    texts: &Query<&EditableText>,
+    commands: &mut Commands,
+) {
+    let Ok((value, children)) = fields.get(field) else {
+        return;
+    };
+    let unparsed = children.iter().any(|child| {
+        texts.get(child).is_ok_and(|text| {
+            let draft = text.value().to_string();
+            draft.trim().is_empty() || Percent.parse(draft, NumberFormat::F64).is_err()
+        })
+    });
+    if unparsed {
+        commands.entity(field).insert(*value);
+    }
+}
+
+/// Leaving a field commits it; see `restore_unparsed_draft`.
+fn restore_on_blur(
+    blur: On<FocusLost>,
+    fields: Query<(&NumberInputValue, &Children), With<ProbField>>,
+    texts: Query<&EditableText>,
+    mut commands: Commands,
+) {
+    restore_unparsed_draft(blur.event_target(), &fields, &texts, &mut commands);
+}
+
+/// Enter commits a field; see `restore_unparsed_draft`.
+fn restore_on_enter(
+    key: On<FocusedInput<KeyboardInput>>,
+    fields: Query<(&NumberInputValue, &Children), With<ProbField>>,
+    texts: Query<&EditableText>,
+    mut commands: Commands,
+) {
+    if key.input.key_code == KeyCode::Enter {
+        restore_unparsed_draft(key.event_target(), &fields, &texts, &mut commands);
+    }
 }
 
 /// Pushes edited parameters into the board. Deliberately does not bump
